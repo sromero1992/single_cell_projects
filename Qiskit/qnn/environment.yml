@@ -1,0 +1,23 @@
+name: qnn-env
+
+channels:
+  - conda-forge
+  - pytorch
+dependencies:
+  - python=3.11
+  - numpy
+  - leidenalg
+  - igraph
+  - scipy
+  - scanpy
+  - pandas
+  - matplotlib
+  - scikit-learn
+  - qiskit
+  - qiskit-machine-learning[torch]
+  - ipykernel
+  - pytorch 
+  - torchvision 
+  - torchaudio
+  - pylatexenc
+  - ipywidgets
