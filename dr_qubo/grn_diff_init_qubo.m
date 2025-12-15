@@ -55,7 +55,8 @@ Xwt_mnn = adjX_mat_construct_sparse_cust_idx(Xwt, 'mnn', K0, cust_idx); % large 
 Xdiff = Xwt2norm - Xko2norm; % This gets rid of the 1 diagonal by definition
 
 % Cell state information in genes difference
-Vdiff = Xwt_cs - Xko_cs;
+%Vdiff = Xwt_cs - Xko_cs;
+Vdiff = 0;
 
 % Create interaction network from desired selected genes or pathway genes
 idx = ismember(upper(g), genelist);
