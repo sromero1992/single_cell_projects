@@ -18,8 +18,8 @@ if (!dir.exists(personal_lib)) {
 # --- CRAN Packages ---
 # CORRECTED: 'harmony' is now on CRAN and has been moved here.
 cran_pkgs <- c(
-  "Seurat", "devtools", "dplyr", "ggplot2", "Matrix", "ggpubr", "tidyr",
-  "stringr", "tibble", "cowplot", "writexl", "readxl", "parallelly", "hdf5r",
+  "Seurat", "devtools", "dplyr", "ggplot2", "Matrix", "ggpubr", "tidyr", "patchwork",
+  "stringr", "tibble", "cowplot", "openxlsx","writexl", "readxl", "parallelly", "hdf5r",
   "harmony" # Added here from CRAN
 )
 
@@ -46,7 +46,6 @@ github_pkgs <- c(
   "scSGS" = "Xenon8778/scSGS",
   "leidenbase" = "cole-trapnell-lab/leidenbase", # Monocle3 dependency
   "monocle3" = "cole-trapnell-lab/monocle3",
-  "cicero" = "cole-trapnell-lab/cicero-release" # Installs as 'cicero'
 )
 
 # 3. AUTOMATED INSTALLATION LOGIC
