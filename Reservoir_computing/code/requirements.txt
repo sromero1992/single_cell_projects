@@ -1,7 +1,32 @@
-numpy>=1.21
-scipy>=1.7
-scikit-learn>=1.0
-scanpy>=1.9
-anndata>=0.8
-matplotlib>=3.5
-seaborn>=0.11
+# =============================================================================
+# scReservoir — Python dependencies
+# =============================================================================
+# Install all:         pip install -r requirements.txt
+# Classical only:      pip install -r requirements.txt --ignore-requires-python
+# Quantum simulation:  also requires scipy (already listed below)
+# =============================================================================
+
+# --- Core numerical stack ---
+numpy>=1.21          # array operations, linear algebra
+scipy>=1.9           # sparse matrices (reservoir), expm (quantum unitary),
+                     # KDE (energy landscape), eigsh (spectral radius)
+
+# --- Machine learning utilities ---
+scikit-learn>=1.0    # NearestNeighbors (k-NN graph), KMeans (attractors),
+                     # randomized_svd (landscape compression), PCA (plotting)
+
+# --- Single-cell analysis ---
+scanpy>=1.9          # sc.pp.normalize_total, log1p, highly_variable_genes, scale
+anndata>=0.8         # AnnData container used by scanpy
+
+# --- Visualization ---
+matplotlib>=3.5      # all plots
+seaborn>=0.12        # heatmaps (GRN, attractor gene programs)
+
+# =============================================================================
+# Optional — development / testing
+# =============================================================================
+# pytest>=7.0
+# pytest-cov>=4.0
+# black>=23.0
+# flake8>=6.0
