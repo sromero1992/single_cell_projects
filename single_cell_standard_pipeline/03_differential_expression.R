@@ -111,7 +111,12 @@ CELLTYPE_COLUMN  <- "CellType"
 CONDITION_COLUMN <- "Condition"
 
 # GROUP_1: The "test" group. Positive log2FC means higher in GROUP_1.
-# GROUP_2: The "reference" group. Must match values in CONDITION_COLUMN.
+# GROUP_2: The "reference" / control group. Must match values in CONDITION_COLUMN.
+#
+# CONVENTION — DE direction vs. plot order:
+#   GROUP_1 = KO  → positive log2FC = upregulated in KO (keep this order for DE).
+#   For plot axis ordering (WT on the left), set CONDITION_LEVELS = c("WT", ...)
+#   in Script 04. These two conventions are intentionally independent.
 GROUP_1 <- "KO"
 GROUP_2 <- "WT"
 
@@ -149,24 +154,57 @@ SUBTYPE_COLUMN    <- "sub_cell_types"
 SUBTYPE_RDS       <- file.path(OUTPUT_DIR,
                                 paste0(PROJECT_NAME, "_", SUBTYPE_CELL_TYPE, "_subclustered.rds"))
 
-# --- 1.7: Mode D — SplineDV + Overlap + Enrichment Parameters ---------------
+# --- 1.7: Mode D — SplineDV Parameters --------------------------------------
 
 # DV_PADJ_THRESH: Adjusted p-value threshold for calling a gene "differentially
 #   variable". SplineDV detects changes in variance (not mean expression).
 DV_PADJ_THRESH <- 0.05
 
-# Enrichment settings for fgsea::fora() over-representation analysis.
-# The ORA tests whether DV ∩ DE overlap genes are enriched in MSigDB pathways,
-# using all DE-tested genes as the background universe (more conservative
-# than using the whole genome).
-ENRICHMENT_SPECIES     <- "Mus musculus"  # or "Homo sapiens"
-ENRICHMENT_CATEGORY    <- "C5"            # C5 = GO, H = Hallmark, C2 = KEGG/Reactome
-ENRICHMENT_SUBCATEGORY <- "BP"            # BP = Biological Process
-ENRICHMENT_MIN_SIZE    <- 5    # Min overlap size to test a pathway
-ENRICHMENT_PADJ_THRESH <- 0.05 # Significance cutoff for ORA
-ENRICHMENT_TOP_N_PLOT  <- 15   # Top N pathways shown in bar plots
+# --- 1.8: GSEA Parameters (ranked gene-set enrichment — ALL tested DE genes) -
+#
+# GSEA uses the FULL ranked list of tested genes (not just significant ones).
+# Genes are ranked by: sign(log2FC) × -log10(padj) — a signed significance
+# score that emphasises genes that are both strongly directional AND significant.
+# This is more statistically robust than ORA because it does not require an
+# arbitrary significance cutoff to define the gene list.
+#
+# Gene sets come from MSigDB (msigdbr) — same species and category settings
+# apply to both GSEA and are loaded once in Part 3.
+GSEA_SPECIES     <- "Mus musculus"  # or "Homo sapiens"
+GSEA_CATEGORY    <- "C5"            # C5 = GO, H = Hallmark, C2 = KEGG/Reactome
+GSEA_SUBCATEGORY <- "BP"            # BP = Biological Process; "" for Hallmark
+GSEA_MIN_SIZE    <- 15              # Min genes in pathway to test (recommend 15)
+GSEA_MAX_SIZE    <- 500             # Max genes in pathway to test
+GSEA_NPERM       <- 1000            # Permutations (increase to 10000 for publication)
+GSEA_PADJ_THRESH <- 0.05            # FDR threshold for significant GSEA results
+GSEA_TOP_N_PLOT  <- 15              # Top N pathways shown in the NES bar plot
 
-# --- 1.8: Plot Settings -------------------------------------------------------
+# --- 1.9: Enrichr ORA Parameters (on specific ranked gene lists) -------------
+#
+# Enrichr ORA is run on five gene lists per cell type:
+#   1. DE up    — top ENRICHR_TOP_N_GENES up-regulated genes (by padj then log2FC)
+#   2. DE down  — top ENRICHR_TOP_N_GENES down-regulated genes
+#   3. DV       — top ENRICHR_TOP_N_GENES differentially variable genes (by padj)
+#   4. DV ∩ DE up   — intersection of lists 3 and 1 (no directionality on DV)
+#   5. DV ∩ DE down — intersection of lists 3 and 2
+#
+# Three databases are queried for each list. Verify exact database names with:
+#   enrichR::listEnrichrDbs()   (requires internet connection)
+#
+# NOTE on mouse data: Enrichr accepts mouse gene symbols (title-case, e.g. Foxp3)
+#   alongside human. Most GO and KEGG databases map both conventions. If you see
+#   very low overlap counts, check symbol capitalisation or use mouse-specific
+#   databases (e.g. "GO_Biological_Process_2023_Mouse").
+ENRICHR_DATABASES   <- c(
+  "GO_Biological_Process_2025",
+  "GO_Molecular_Function_2025",
+  "KEGG_2026"
+)
+ENRICHR_TOP_N_GENES  <- 250   # Top N genes taken from each ranked DE / DV list
+ENRICHR_TOP_N_PLOT   <- 15    # Top N significant terms shown per bar plot
+ENRICHR_PADJ_THRESH  <- 0.05  # Adjusted p-value cutoff for Enrichr terms
+
+# --- 1.10: Plot Settings ------------------------------------------------------
 DPI_SETTING    <- 300
 VOLCANO_WIDTH  <- 9
 VOLCANO_HEIGHT <- 7
@@ -348,68 +386,192 @@ run_splinedv <- function(seurat_obj, cell_type, celltype_col, condition_col,
 }
 
 # ---------------------------------------------------------------------------
-#' run_fgsea_ora: Over-representation analysis via fgsea::fora().
-#
-#   Tests whether a gene list (the DV ∩ DE overlap) is enriched in MSigDB
-#   pathways relative to the DE-tested gene universe (not the whole genome).
-#   Using the DE universe as the background is CONSERVATIVE and appropriate
-#   because genes not tested in DE were excluded due to low expression.
+#' run_gsea_ranked
+#'
+#'   Standard GSEA via fgsea::fgsea() on ALL tested DE genes.
+#'   Unlike ORA, no significance cutoff is applied — every gene tested in
+#'   Mode A enters the ranked list. This makes GSEA more sensitive to modest
+#'   but coordinated expression shifts that would be missed by ORA.
+#'
+#'   Ranking metric: sign(log2FC) × -log10(padj + 1e-300)
+#'     → up-regulated significant genes score highest (large positive)
+#'     → down-regulated significant genes score lowest (large negative)
+#'     → non-significant genes cluster near zero
+#'
+#'   Gene sets come from MSigDB (pre-loaded via msigdbr in Part 3).
 # ---------------------------------------------------------------------------
-run_fgsea_ora <- function(query_genes, universe, pathways,
-                          min_size    = ENRICHMENT_MIN_SIZE,
-                          padj_thresh = ENRICHMENT_PADJ_THRESH) {
+run_gsea_ranked <- function(de_result, pathways, label = "") {
   if (!requireNamespace("fgsea", quietly = TRUE))
-    stop("[ERROR] fgsea not installed. Run: BiocManager::install('fgsea')")
+    stop("[ERROR] fgsea not installed. Run 00_rlibs_installation.R.")
   library(fgsea)
 
-  if (length(query_genes) < 2) {
-    message("    [SKIP ORA] < 2 query genes — skipping.")
+  ranked_df <- de_result %>%
+    dplyr::filter(!is.na(log2FC), !is.na(padj)) %>%
+    dplyr::mutate(rank_score = sign(log2FC) * -log10(padj + 1e-300)) %>%
+    dplyr::distinct(gene, .keep_all = TRUE) %>%
+    dplyr::arrange(desc(rank_score))
+
+  ranked <- setNames(ranked_df$rank_score, ranked_df$gene)
+  if (length(ranked) < GSEA_MIN_SIZE * 2) {
+    message(paste("  [SKIP GSEA]", label, "— too few ranked genes:", length(ranked)))
     return(NULL)
   }
-  res <- tryCatch(
-    fgsea::fora(pathways = pathways, genes = query_genes,
-                universe = universe, minSize = min_size),
-    error = function(e) { message("    [ERROR] fora: ", e$message); return(NULL) }
+  message(paste("  [GSEA]", label, "| ranked genes:", length(ranked)))
+
+  result <- tryCatch(
+    fgsea::fgsea(pathways    = pathways,
+                 stats       = ranked,
+                 minSize     = GSEA_MIN_SIZE,
+                 maxSize     = GSEA_MAX_SIZE,
+                 nPermSimple = GSEA_NPERM),
+    error = function(e) { message("  [ERROR GSEA]: ", e$message); return(NULL) }
   )
-  if (is.null(res) || nrow(res) == 0) return(NULL)
-  res$overlapGenes <- sapply(res$overlapGenes, paste, collapse = "|")
-  res %>% dplyr::filter(padj < padj_thresh) %>% dplyr::arrange(padj)
+  if (is.null(result) || nrow(result) == 0) return(NULL)
+  result$leadingEdge <- sapply(result$leadingEdge, paste, collapse = "|")
+  result %>% dplyr::arrange(padj)
 }
 
 # ---------------------------------------------------------------------------
-#' plot_ora_barplot: Horizontal bar plot of top enriched pathways.
+#' plot_gsea_barplot
+#'   Horizontal NES bar chart. Positive NES = enriched in GROUP_1 up direction.
+#'   Top N up- and top N down-enriched pathways are shown (balanced).
 # ---------------------------------------------------------------------------
-plot_ora_barplot <- function(ora_result, title,
-                             top_n      = ENRICHMENT_TOP_N_PLOT,
-                             fill_color = "#E41A1C") {
-  if (is.null(ora_result) || nrow(ora_result) == 0) return(NULL)
+plot_gsea_barplot <- function(gsea_result, title,
+                               top_n       = GSEA_TOP_N_PLOT,
+                               padj_thresh = GSEA_PADJ_THRESH) {
+  if (is.null(gsea_result) || nrow(gsea_result) == 0) return(NULL)
+  df_sig <- gsea_result %>% dplyr::filter(padj < padj_thresh)
+  if (nrow(df_sig) == 0) return(NULL)
 
-  df <- ora_result %>%
-    dplyr::slice_head(n = top_n) %>%
+  df_up   <- df_sig %>% dplyr::filter(NES > 0) %>% dplyr::arrange(padj) %>% dplyr::slice_head(n = ceiling(top_n / 2))
+  df_down <- df_sig %>% dplyr::filter(NES < 0) %>% dplyr::arrange(padj) %>% dplyr::slice_head(n = floor(top_n / 2))
+  df_plot <- dplyr::bind_rows(df_up, df_down) %>%
     dplyr::mutate(
-      pathway_label  = gsub("^GOBP_|^HALLMARK_|^KEGG_|^REACTOME_", "", pathway) %>%
-        gsub("_", " ", .) %>% tools::toTitleCase() %>%
-        stringr::str_wrap(width = 50),
-      neg_log10_padj = -log10(padj + 1e-300)
+      pathway_label = gsub("^GOBP_|^GOMF_|^HALLMARK_|^KEGG_|^REACTOME_", "", pathway) %>%
+        gsub("_", " ", .) %>% tools::toTitleCase() %>% stringr::str_wrap(width = 50),
+      Direction = ifelse(NES > 0, paste0("Up in ", GROUP_1), paste0("Down in ", GROUP_1))
     ) %>%
-    dplyr::arrange(neg_log10_padj) %>%
+    dplyr::arrange(NES) %>%
     dplyr::mutate(pathway_label = factor(pathway_label, levels = pathway_label))
 
-  ggplot(df, aes(x = neg_log10_padj, y = pathway_label)) +
-    geom_col(fill = fill_color, alpha = 0.85, color = "black", linewidth = 0.3) +
-    geom_vline(xintercept = -log10(ENRICHMENT_PADJ_THRESH),
-               linetype = "dashed", color = "grey40", linewidth = 0.7) +
-    geom_text(aes(label = paste0(overlap, "/", size)), hjust = -0.1, size = 3.5) +
-    scale_x_continuous(expand = expansion(mult = c(0, 0.25))) +
+  if (nrow(df_plot) == 0) return(NULL)
+
+  dir_colors <- setNames(c("#E41A1C", "#377EB8"),
+                         c(paste0("Up in ", GROUP_1), paste0("Down in ", GROUP_1)))
+
+  ggplot(df_plot, aes(x = NES, y = pathway_label, fill = Direction)) +
+    geom_col(alpha = 0.85, color = "black", linewidth = 0.3) +
+    geom_vline(xintercept = 0, color = "black", linewidth = 0.6) +
+    scale_fill_manual(values = dir_colors) +
     labs(title    = title,
-         x        = expression(-log[10] * "(adj. p-value)"),
-         y        = NULL,
-         subtitle = paste0(nrow(ora_result), " significant pathways | top ", top_n, " shown")) +
+         subtitle = paste0(nrow(df_sig), " sig. pathways (padj < ", padj_thresh, ") | top ", top_n, " shown"),
+         x        = "Normalized Enrichment Score (NES)",
+         y        = NULL, fill = NULL) +
     theme_classic() +
     theme(plot.title    = element_text(hjust = 0.5, face = "bold", size = 12),
           plot.subtitle = element_text(hjust = 0.5, size = 9, color = "grey50"),
-          axis.text.y   = element_text(size = 10),
-          axis.text.x   = element_text(size = 10))
+          axis.text.y   = element_text(size = 9),
+          legend.position = "bottom")
+}
+
+# ---------------------------------------------------------------------------
+#' save_enrichr_results
+#'
+#'   Run Enrichr ORA on a gene list against ENRICHR_DATABASES, save:
+#'     - One multi-sheet Excel (one sheet per database, significant terms only)
+#'     - One horizontal bar plot PNG per database
+#'
+#'   Returns the raw enrichR result list invisibly (one element per database).
+#'
+#' @param gene_list  Character vector of gene symbols to test.
+#' @param label      Short identifier used in file names and plot titles.
+#' @param out_dir    Directory to write outputs into.
+#' @param fill_color Bar fill color for the bar plots.
+# ---------------------------------------------------------------------------
+save_enrichr_results <- function(gene_list, label, out_dir,
+                                  fill_color = "#E41A1C") {
+  if (!requireNamespace("enrichR", quietly = TRUE))
+    stop("[ERROR] enrichR not installed. Add 'enrichR' to cran_pkgs in Script 00 and re-run.")
+  library(enrichR)
+
+  if (length(gene_list) == 0) {
+    message(paste("  [SKIP Enrichr]", label, "— empty gene list"))
+    return(invisible(NULL))
+  }
+  message(paste("  [Enrichr]", label, "| genes:", length(gene_list),
+                "| databases:", paste(ENRICHR_DATABASES, collapse = ", ")))
+
+  enrichr_res <- tryCatch({
+    enrichR::setEnrichrSite("Enrichr")
+    enrichR::enrichr(gene_list, ENRICHR_DATABASES)
+  }, error = function(e) {
+    message(paste("  [ERROR Enrichr]", label, ":", e$message))
+    return(NULL)
+  })
+  if (is.null(enrichr_res)) return(invisible(NULL))
+
+  # ---- Save multi-sheet Excel (one sheet per database, sig terms only) -----
+  xl_sheets <- lapply(ENRICHR_DATABASES, function(db) {
+    df <- enrichr_res[[db]]
+    if (is.null(df) || nrow(df) == 0) return(NULL)
+    df_sig <- df %>% dplyr::filter(Adjusted.P.value < ENRICHR_PADJ_THRESH) %>%
+      dplyr::arrange(Adjusted.P.value)
+    if (nrow(df_sig) == 0) return(NULL)
+    df_sig
+  })
+  names(xl_sheets) <- ENRICHR_DATABASES
+  xl_sheets <- xl_sheets[!sapply(xl_sheets, is.null)]
+  if (length(xl_sheets) > 0)
+    write_xlsx(xl_sheets,
+               file.path(out_dir, paste0(label, "_Enrichr.xlsx")))
+
+  # ---- Bar plot per database -----------------------------------------------
+  db_colors <- c("#E41A1C", "#377EB8", "#4DAF4A")  # red, blue, green per DB
+  for (k in seq_along(ENRICHR_DATABASES)) {
+    db     <- ENRICHR_DATABASES[k]
+    df     <- enrichr_res[[db]]
+    if (is.null(df) || nrow(df) == 0) next
+    df_sig <- df %>% dplyr::filter(Adjusted.P.value < ENRICHR_PADJ_THRESH)
+    if (nrow(df_sig) == 0) {
+      message(paste("    No sig. Enrichr terms for", label, "/", db))
+      next
+    }
+    df_plot <- df_sig %>%
+      dplyr::arrange(Adjusted.P.value) %>%
+      dplyr::slice_head(n = ENRICHR_TOP_N_PLOT) %>%
+      dplyr::mutate(
+        term_label     = gsub("\\s*\\(GO:\\d+\\)$", "", Term) %>%
+          gsub("_", " ", .) %>%
+          stringr::str_wrap(width = 55),
+        neg_log10_padj = -log10(Adjusted.P.value + 1e-300)
+      ) %>%
+      dplyr::arrange(neg_log10_padj) %>%
+      dplyr::mutate(term_label = factor(term_label, levels = term_label))
+
+    p <- ggplot(df_plot, aes(x = neg_log10_padj, y = term_label)) +
+      geom_col(fill = db_colors[k], alpha = 0.85, color = "black", linewidth = 0.3) +
+      geom_vline(xintercept = -log10(ENRICHR_PADJ_THRESH),
+                 linetype = "dashed", color = "grey40", linewidth = 0.7) +
+      geom_text(aes(label = Overlap), hjust = -0.1, size = 3.2) +
+      scale_x_continuous(expand = expansion(mult = c(0, 0.3))) +
+      labs(title    = paste0(label),
+           subtitle = paste0(db, " | ", nrow(df_sig),
+                             " sig. terms | top ", ENRICHR_TOP_N_PLOT, " shown"),
+           x        = expression(-log[10] * "(adj. p-value)"),
+           y        = NULL) +
+      theme_classic() +
+      theme(plot.title    = element_text(hjust = 0.5, face = "bold", size = 12),
+            plot.subtitle = element_text(hjust = 0.5, size = 9, color = "grey50"),
+            axis.text.y   = element_text(size = 9),
+            axis.text.x   = element_text(size = 10))
+
+    db_safe <- gsub("[^A-Za-z0-9_]", "_", db)
+    plot_h  <- max(4, nrow(df_plot) * 0.38 + 2)
+    ggsave(file.path(out_dir, paste0(label, "_Enrichr_", db_safe, ".png")),
+           p, width = 11, height = plot_h, dpi = DPI_SETTING, bg = "white")
+    message(paste("    Sig. terms (", db, "):", nrow(df_sig)))
+  }
+  invisible(enrichr_res)
 }
 
 # =============================================================================
@@ -431,12 +593,12 @@ if (RUN_MODE_D_SPLINEDV) {
   library(msigdbr)
   library(stringr)
   message("  Pre-loading MSigDB gene sets...")
-  msig_df <- msigdbr(species = ENRICHMENT_SPECIES,
-                     category = ENRICHMENT_CATEGORY,
-                     subcategory = if (nchar(ENRICHMENT_SUBCATEGORY) > 0) ENRICHMENT_SUBCATEGORY else NULL)
+  msig_df <- msigdbr(species = GSEA_SPECIES,
+                     category = GSEA_CATEGORY,
+                     subcategory = if (nchar(GSEA_SUBCATEGORY) > 0) GSEA_SUBCATEGORY else NULL)
   msig_pathways <- split(msig_df$gene_symbol, msig_df$gs_name)
   message(paste("  Loaded", length(msig_pathways), "pathways from",
-                ENRICHMENT_CATEGORY, "/", ENRICHMENT_SUBCATEGORY))
+                GSEA_CATEGORY, "/", GSEA_SUBCATEGORY))
 }
 
 # =============================================================================
@@ -530,10 +692,40 @@ if (RUN_MODE_C_WITHIN_SUBTYPE) {
 }
 
 # =============================================================================
-# --- PART 7: MODE D — SplineDV + DE OVERLAP + fgsea ORA ---------------------
+# --- PART 7: MODE D — SplineDV + GSEA + Enrichr ORA -------------------------
+#
+#  Per-cell-type workflow:
+#    D.1  SplineDV        → full DV results CSV + top-N DV gene list
+#    D.2  DE gene lists   → top-N up and top-N down lists (no padj cutoff,
+#                           just rank — so Enrichr always gets a meaningful list)
+#    D.3  Gene-list CSVs  → saved individually for all 5 lists + overlap tables
+#                           with both DE and DV statistics per gene
+#    D.4  GSEA            → fgsea::fgsea on ALL tested DE genes (ranked),
+#                           MSigDB gene sets (GSEA_SPECIES / GSEA_CATEGORY /
+#                           GSEA_SUBCATEGORY configured in Section 1.8)
+#    D.5  Enrichr ORA     → enrichR::enrichr on 5 gene lists against
+#                           ENRICHR_DATABASES (configured in Section 1.9):
+#                             1. DE up top ENRICHR_TOP_N_GENES
+#                             2. DE down top ENRICHR_TOP_N_GENES
+#                             3. DV top ENRICHR_TOP_N_GENES (no direction)
+#                             4. DV ∩ DE up (overlap)
+#                             5. DV ∩ DE down (overlap)
+#    D.6  Summary CSV     → cross-cell-type table of list sizes
+#
+#  Key design decisions:
+#    • "Top N" uses NO significance cutoff — genes are ranked by padj (DV) or
+#      by padj + direction (DE). This guarantees a non-empty query list even for
+#      cell types with few significant hits, making Enrichr results comparable
+#      across cell types. Change ENRICHR_TOP_N_GENES (Section 1.9) to adjust.
+#    • SplineDV has NO directionality — DV genes are simply "more variable in
+#      one group". Overlaps with DE up / DE down capture genes whose variance
+#      AND mean both shift.
+#    • GSEA uses ALL genes tested in Mode A — no cutoff applied, ranked by
+#      sign(log2FC) × -log10(padj + 1e-300). Pathways loaded from MSigDB via
+#      msigdbr (pre-loaded in Part 3).
 # =============================================================================
 if (RUN_MODE_D_SPLINEDV) {
-  message(paste("\n=== MODE D: SplineDV + DE Overlap + Enrichment |",
+  message(paste("\n=== MODE D: SplineDV + GSEA + Enrichr ORA |",
                 GROUP_1, "vs", GROUP_2, "==="))
 
   mode_d_dir <- file.path(DE_DIR, paste0("ModeD_SplineDV_", GROUP_1, "_vs_", GROUP_2))
@@ -551,122 +743,202 @@ if (RUN_MODE_D_SPLINEDV) {
     if (!dir.exists(ct_dir)) dir.create(ct_dir, recursive = TRUE)
     message(paste("\n  --- Mode D:", ct, "---"))
 
-    # --- Step D.1: Run SplineDV ---
+    # -------------------------------------------------------------------------
+    # Step D.1: SplineDV — differential variability
+    # -------------------------------------------------------------------------
     dv_result <- run_splinedv(data, ct, CELLTYPE_COLUMN, CONDITION_COLUMN, GROUP_1, GROUP_2)
     if (is.null(dv_result)) next
 
-    write.csv(dv_result, file.path(ct_dir, paste0(safe_ct, "_SplineDV_full_results.csv")),
+    write.csv(dv_result,
+              file.path(ct_dir, paste0(safe_ct, "_SplineDV_full_results.csv")),
               row.names = FALSE)
 
-    dv_sig_genes <- dv_result$gene[!is.na(dv_result$padj) & dv_result$padj < DV_PADJ_THRESH]
-    message(paste("    DV significant genes (padj <", DV_PADJ_THRESH, "):", length(dv_sig_genes)))
-    if (length(dv_sig_genes) == 0) {
-      message("    No significant DV genes — skipping overlap.")
-      next
-    }
+    # Top-N DV genes by padj — no significance cutoff (see design note above)
+    dv_top_n <- dv_result %>%
+      dplyr::filter(!is.na(padj)) %>%
+      dplyr::arrange(padj) %>%
+      dplyr::slice_head(n = ENRICHR_TOP_N_GENES) %>%
+      dplyr::pull(gene)
 
-    # --- Step D.2: Get DE results for this cell type (from Mode A) ---
+    n_dv_sig <- sum(!is.na(dv_result$padj) & dv_result$padj < DV_PADJ_THRESH)
+    message(paste("    DV sig (padj <", DV_PADJ_THRESH, "):", n_dv_sig,
+                  "| top", length(dv_top_n), "taken for Enrichr"))
+
+    # -------------------------------------------------------------------------
+    # Step D.2: DE gene lists for this cell type (from Mode A)
+    # -------------------------------------------------------------------------
     if (!ct %in% names(wilcox_results_all)) {
-      message(paste("    No Wilcoxon DE results for", ct, "— skipping overlap."))
+      message(paste("    No Wilcoxon DE results for", ct, "— skipping."))
       next
     }
-    de_ct      <- wilcox_results_all[[ct]]
-    de_universe <- de_ct$gene   # All DE-tested genes = ORA background
+    de_ct <- wilcox_results_all[[ct]]
 
-    up_genes   <- de_ct$gene[!is.na(de_ct$padj) & de_ct$padj < DE_PADJ_THRESH & de_ct$log2FC >  DE_LFC_THRESH]
-    down_genes <- de_ct$gene[!is.na(de_ct$padj) & de_ct$padj < DE_PADJ_THRESH & de_ct$log2FC < -DE_LFC_THRESH]
+    # Top-N up-regulated: padj < DE_PADJ_THRESH AND log2FC > 0,
+    #   sorted by padj asc then log2FC desc
+    de_up_n <- de_ct %>%
+      dplyr::filter(!is.na(padj), !is.na(log2FC),
+                    padj < DE_PADJ_THRESH, log2FC > 0) %>%
+      dplyr::arrange(padj, desc(log2FC)) %>%
+      dplyr::slice_head(n = ENRICHR_TOP_N_GENES) %>%
+      dplyr::pull(gene)
 
-    message(paste("    DE up:", length(up_genes), "| DE down:", length(down_genes),
-                  "| DE universe:", length(de_universe)))
+    # Top-N down-regulated: padj < DE_PADJ_THRESH AND log2FC < 0,
+    #   sorted by padj asc then log2FC asc (most negative first)
+    de_dn_n <- de_ct %>%
+      dplyr::filter(!is.na(padj), !is.na(log2FC),
+                    padj < DE_PADJ_THRESH, log2FC < 0) %>%
+      dplyr::arrange(padj, log2FC) %>%
+      dplyr::slice_head(n = ENRICHR_TOP_N_GENES) %>%
+      dplyr::pull(gene)
 
-    # --- Step D.3: Compute overlaps ---
-    overlap_up   <- intersect(dv_sig_genes, up_genes)
-    overlap_down <- intersect(dv_sig_genes, down_genes)
-    message(paste("    DV ∩ Up-DE:", length(overlap_up),
-                  "| DV ∩ Down-DE:", length(overlap_down)))
+    # Overlaps — SplineDV has no directionality, so dv_top_n overlaps with both
+    overlap_up <- intersect(de_up_n, dv_top_n)
+    overlap_dn <- intersect(de_dn_n, dv_top_n)
 
-    # Save overlap gene table with all statistics
-    all_overlap_genes <- sort(unique(c(overlap_up, overlap_down)))
-    if (length(all_overlap_genes) > 0) {
-      overlap_df <- data.frame(
-        gene         = all_overlap_genes,
-        in_DV_sig    = all_overlap_genes %in% dv_sig_genes,
-        in_Up_DE     = all_overlap_genes %in% up_genes,
-        in_Down_DE   = all_overlap_genes %in% down_genes,
-        DV_padj      = dv_result$padj[match(all_overlap_genes, dv_result$gene)],
-        DE_log2FC    = de_ct$log2FC[match(all_overlap_genes, de_ct$gene)],
-        DE_padj      = de_ct$padj[match(all_overlap_genes, de_ct$gene)],
-        stringsAsFactors = FALSE
+    message(paste("    DE up top-N:", length(de_up_n),
+                  "| DE dn top-N:", length(de_dn_n)))
+    message(paste("    DV top-N:", length(dv_top_n),
+                  "| DV \u2229 DE up:", length(overlap_up),
+                  "| DV \u2229 DE dn:", length(overlap_dn)))
+
+    # -------------------------------------------------------------------------
+    # Step D.3: Save all 5 gene lists as individual CSVs
+    # -------------------------------------------------------------------------
+    enrichr_pfx <- paste0(safe_ct, "_", GROUP_1, "_vs_", GROUP_2)
+
+    write.csv(data.frame(gene = de_up_n),
+              file.path(ct_dir, paste0(safe_ct, "_genes_DE_up_top", ENRICHR_TOP_N_GENES, ".csv")),
+              row.names = FALSE)
+    write.csv(data.frame(gene = de_dn_n),
+              file.path(ct_dir, paste0(safe_ct, "_genes_DE_dn_top", ENRICHR_TOP_N_GENES, ".csv")),
+              row.names = FALSE)
+    write.csv(data.frame(gene = dv_top_n),
+              file.path(ct_dir, paste0(safe_ct, "_genes_DV_top", ENRICHR_TOP_N_GENES, ".csv")),
+              row.names = FALSE)
+
+    # Overlap tables include DE + DV statistics for each gene
+    if (length(overlap_up) > 0) {
+      write.csv(
+        data.frame(
+          gene      = overlap_up,
+          DE_log2FC = de_ct$log2FC[match(overlap_up, de_ct$gene)],
+          DE_padj   = de_ct$padj[match(overlap_up, de_ct$gene)],
+          DV_padj   = dv_result$padj[match(overlap_up, dv_result$gene)],
+          stringsAsFactors = FALSE
+        ),
+        file.path(ct_dir, paste0(safe_ct, "_genes_overlap_DV_DEup.csv")),
+        row.names = FALSE
       )
-      write.csv(overlap_df, file.path(ct_dir, paste0(safe_ct, "_DV_DE_overlap_genes.csv")),
-                row.names = FALSE)
+    }
+    if (length(overlap_dn) > 0) {
+      write.csv(
+        data.frame(
+          gene      = overlap_dn,
+          DE_log2FC = de_ct$log2FC[match(overlap_dn, de_ct$gene)],
+          DE_padj   = de_ct$padj[match(overlap_dn, de_ct$gene)],
+          DV_padj   = dv_result$padj[match(overlap_dn, dv_result$gene)],
+          stringsAsFactors = FALSE
+        ),
+        file.path(ct_dir, paste0(safe_ct, "_genes_overlap_DV_DEdn.csv")),
+        row.names = FALSE
+      )
     }
 
-    # Summary row for this cell type
+    # -------------------------------------------------------------------------
+    # Step D.4: GSEA on ALL ranked DE genes (fgsea::fgsea)
+    # -------------------------------------------------------------------------
+    if (!is.null(msig_pathways)) {
+      gsea_result <- run_gsea_ranked(de_ct, msig_pathways, label = ct)
+      if (!is.null(gsea_result) && nrow(gsea_result) > 0) {
+        write.csv(gsea_result,
+                  file.path(ct_dir, paste0(safe_ct, "_GSEA_results.csv")),
+                  row.names = FALSE)
+        p_gsea <- plot_gsea_barplot(
+          gsea_result,
+          title       = paste0(ct, " | GSEA (all DE genes)\n", GROUP_1, " vs ", GROUP_2),
+          top_n       = GSEA_TOP_N_PLOT,
+          padj_thresh = GSEA_PADJ_THRESH
+        )
+        if (!is.null(p_gsea))
+          ggsave(file.path(ct_dir, paste0(safe_ct, "_GSEA_NES_barplot.png")),
+                 p_gsea, width = 11, height = 8, dpi = DPI_SETTING, bg = "white")
+        message(paste("    GSEA sig. pathways (padj <", GSEA_PADJ_THRESH, "):",
+                      sum(gsea_result$padj < GSEA_PADJ_THRESH, na.rm = TRUE)))
+      } else {
+        message(paste("    No significant GSEA results for", ct))
+      }
+    }
+
+    # -------------------------------------------------------------------------
+    # Step D.5: Enrichr ORA on 5 gene lists
+    #   Colors: up=red, dn=blue, DV=purple, overlap-up=orange, overlap-dn=brown
+    # -------------------------------------------------------------------------
+
+    # List 1 — DE up top-N
+    if (length(de_up_n) > 0)
+      save_enrichr_results(
+        gene_list  = de_up_n,
+        label      = paste0(enrichr_pfx, "_DE_up_top", ENRICHR_TOP_N_GENES),
+        out_dir    = ct_dir,
+        fill_color = "#E41A1C"   # red
+      )
+
+    # List 2 — DE down top-N
+    if (length(de_dn_n) > 0)
+      save_enrichr_results(
+        gene_list  = de_dn_n,
+        label      = paste0(enrichr_pfx, "_DE_dn_top", ENRICHR_TOP_N_GENES),
+        out_dir    = ct_dir,
+        fill_color = "#377EB8"   # blue
+      )
+
+    # List 3 — DV top-N (no directionality)
+    if (length(dv_top_n) > 0)
+      save_enrichr_results(
+        gene_list  = dv_top_n,
+        label      = paste0(enrichr_pfx, "_DV_top", ENRICHR_TOP_N_GENES),
+        out_dir    = ct_dir,
+        fill_color = "#984EA3"   # purple
+      )
+
+    # List 4 — DV ∩ DE up
+    if (length(overlap_up) > 0)
+      save_enrichr_results(
+        gene_list  = overlap_up,
+        label      = paste0(enrichr_pfx, "_overlap_DV_DEup"),
+        out_dir    = ct_dir,
+        fill_color = "#FF7F00"   # orange
+      )
+
+    # List 5 — DV ∩ DE down
+    if (length(overlap_dn) > 0)
+      save_enrichr_results(
+        gene_list  = overlap_dn,
+        label      = paste0(enrichr_pfx, "_overlap_DV_DEdn"),
+        out_dir    = ct_dir,
+        fill_color = "#A65628"   # brown
+      )
+
+    # -------------------------------------------------------------------------
+    # Step D.6: Cross-cell-type summary row
+    # -------------------------------------------------------------------------
     dv_summary_rows[[ct]] <- data.frame(
-      CellType        = ct,
-      N_DV_sig        = length(dv_sig_genes),
-      N_DE_up         = length(up_genes),
-      N_DE_down       = length(down_genes),
-      N_Overlap_Up    = length(overlap_up),
-      N_Overlap_Down  = length(overlap_down),
-      stringsAsFactors = FALSE
+      CellType             = ct,
+      N_DV_sig_padj05      = n_dv_sig,
+      N_DV_top_N           = length(dv_top_n),
+      N_DE_up_top_N        = length(de_up_n),
+      N_DE_dn_top_N        = length(de_dn_n),
+      N_Overlap_DV_DEup    = length(overlap_up),
+      N_Overlap_DV_DEdn    = length(overlap_dn),
+      stringsAsFactors     = FALSE
     )
-
-    # --- Step D.4: fgsea ORA on overlaps ---
-    ora_sheets <- list()
-
-    # Overlap Up: DV ∩ Up-DE
-    if (length(overlap_up) >= ENRICHMENT_MIN_SIZE) {
-      message(paste("    ORA: DV ∩ Up-DE (n =", length(overlap_up), ")..."))
-      ora_up <- run_fgsea_ora(overlap_up, de_universe, msig_pathways)
-      if (!is.null(ora_up) && nrow(ora_up) > 0) {
-        ora_sheets[["DV_UpDE"]] <- ora_up
-        write.csv(ora_up, file.path(ct_dir, paste0(safe_ct, "_ORA_DV_UpDE.csv")),
-                  row.names = FALSE)
-        p_up <- plot_ora_barplot(
-          ora_up, fill_color = "#E41A1C",
-          title = paste0(ct, " | DV ∩ Up-DE\n", GROUP_1, " vs ", GROUP_2)
-        )
-        if (!is.null(p_up))
-          ggsave(file.path(ct_dir, paste0(safe_ct, "_ORA_DV_UpDE_barplot.png")),
-                 p_up, width = 10, height = 7, dpi = DPI_SETTING, bg = "white")
-        message(paste("    Sig. pathways (Up):", nrow(ora_up)))
-      } else { message("    No significant pathways for DV ∩ Up-DE.") }
-    } else {
-      message(paste0("    [SKIP ORA Up] n=", length(overlap_up), " < min (", ENRICHMENT_MIN_SIZE, ")"))
-    }
-
-    # Overlap Down: DV ∩ Down-DE
-    if (length(overlap_down) >= ENRICHMENT_MIN_SIZE) {
-      message(paste("    ORA: DV ∩ Down-DE (n =", length(overlap_down), ")..."))
-      ora_down <- run_fgsea_ora(overlap_down, de_universe, msig_pathways)
-      if (!is.null(ora_down) && nrow(ora_down) > 0) {
-        ora_sheets[["DV_DownDE"]] <- ora_down
-        write.csv(ora_down, file.path(ct_dir, paste0(safe_ct, "_ORA_DV_DownDE.csv")),
-                  row.names = FALSE)
-        p_down <- plot_ora_barplot(
-          ora_down, fill_color = "#377EB8",
-          title = paste0(ct, " | DV ∩ Down-DE\n", GROUP_1, " vs ", GROUP_2)
-        )
-        if (!is.null(p_down))
-          ggsave(file.path(ct_dir, paste0(safe_ct, "_ORA_DV_DownDE_barplot.png")),
-                 p_down, width = 10, height = 7, dpi = DPI_SETTING, bg = "white")
-        message(paste("    Sig. pathways (Down):", nrow(ora_down)))
-      } else { message("    No significant pathways for DV ∩ Down-DE.") }
-    } else {
-      message(paste0("    [SKIP ORA Down] n=", length(overlap_down), " < min (", ENRICHMENT_MIN_SIZE, ")"))
-    }
-
-    if (length(ora_sheets) > 0)
-      write_xlsx(ora_sheets, file.path(ct_dir, paste0(safe_ct, "_ORA_enrichment.xlsx")))
   }
 
-  # Cross-cell-type summary
+  # Cross-cell-type summary table
   if (length(dv_summary_rows) > 0) {
     dv_summary_df <- do.call(rbind, dv_summary_rows)
     write.csv(dv_summary_df,
-              file.path(mode_d_dir, "SplineDV_DE_overlap_summary.csv"),
+              file.path(mode_d_dir, "SplineDV_DE_enrichment_summary.csv"),
               row.names = FALSE)
     message("\n--- Mode D Summary ---")
     print(dv_summary_df)

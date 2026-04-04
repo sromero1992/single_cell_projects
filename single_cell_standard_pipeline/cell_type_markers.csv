@@ -1,43 +1,43 @@
-tier,cell_type,parent_cell_type,markers,dotplot_markers,subcluster_resolution,description
-broad,Plasma B cells,,Ighg1|Mzb1,Ighg1|Mzb1,,Antibody-secreting plasma cells; high Ig expression
-broad,B cells,,Ms4a1|Cd19,Ms4a1|Cd19,,Mature B lymphocytes
-broad,T cells,,Cd3e|Cd4|Cd8a|Trbc2,Cd3e|Cd4|Cd8a|Trbc2,,Pan-T cell markers including helper and cytotoxic T cells
-broad,cDCs,,Clec9a|Xcr1,Clec9a|Xcr1,,Classical dendritic cells (type 1 cDC)
-broad,Macrophages,,Cd163|Csf1r|Cd68|Mrc1|Aif1,Cd163|Csf1r|Cd68|Mrc1|Aif1,,Tissue-resident and monocyte-derived macrophages
-broad,Fibroblasts,,Col1a1|Col3a1|Col6a2,Col1a1|Col3a1|Col6a2,,Stromal fibroblasts defined by collagen expression
-broad,ENs,,Vip|Tubb3|Vat1l,Vip|Tubb3|Vat1l,,Enteric neurons of the enteric nervous system
-broad,EGCs,,Sox10|Plp1,Sox10|Plp1,,Enteric glial cells (peripheral glia)
-broad,LECs,,Lyve1|Flt4|Pecam1,Lyve1|Flt4|Pecam1,,Lymphatic endothelial cells
-broad,VECs,,Plvap|Flt1,Plvap|Flt1,,Vascular endothelial cells
-broad,Colonocytes,,Epcam|Muc2|Krt19|Krt20|Vil1,Epcam|Muc2|Krt19|Krt20|Vil1,,Colonic epithelial cells (all subtypes)
-broad,SMCs,,Myh11|Tagln|Hhip|Des,Myh11|Tagln|Hhip|Des,,Smooth muscle cells (intestinal muscularis)
-broad,vSMCs,,Myh11|Tagln|Des,Myh11|Tagln|Des,,Vascular smooth muscle cells
-broad,Adipocytes,,Adipoq|Plin1|Plin4|Fabp4,Adipoq|Plin1|Plin4|Fabp4,,Adipocytes defined by lipid-storage genes
-sub,Goblet cells,Colonocytes,Muc2|Spink4|Agr2|Retnlb|Fam3d,Muc2|Spink4|Agr2|Retnlb|Fam3d,3,Mucus-secreting goblet cells; first-pass separation from absorptive enterocytes
-sub,Enterocytes,Colonocytes,Ceacam1|Krt19|Krt20|Muc13|Lypd8,Ceacam1|Krt19|Krt20|Muc13|Lypd8,3,Absorptive enterocytes; confirm after panglaoDB-based initial separation
-sub,EECs,Colonocytes,Chga|Chgb|Tph1|Cck|Scgn|Scg5,Chga|Chgb|Tph1|Cck|Scgn|Scg5,3,Enteroendocrine cells; rare hormone-secreting epithelial cells
-sub,Tuft cells,Colonocytes,Dclk1|Trpm5|Avil|Sh2d6|Plcg2,Dclk1|Trpm5|Avil|Sh2d6|Plcg2,3,Chemosensory tuft cells; brush-border morphology
-sub,DCS,Colonocytes,Reg4|Ccl6|Dll1,Reg4|Ccl6|Dll1,3,Deep crypt secretory cells; niche support cells for stem cells
-sub,Abs. colonocytes,Colonocytes,Alpi|Ces2c|Slc26a2|Ceacam1|Aqp8,Alpi|Ces2c|Slc26a2|Ceacam1|Aqp8,3,Absorptive colonocytes; mature ion-transport and lipid-handling cells
-sub,TA cells,Colonocytes,Mki67|Top2a|Birc5|Pcna|Stmn1,Mki67|Top2a|Pcna,3,Transit-amplifying cells; actively cycling progenitors
-sub,Stem cells,Colonocytes,Lgr5|Lrig1|Ascl2|Slc12a2|Smoc2|Kcnq1|Gpx2|Ephb2|Bmpr1a|Hopx|Sox9,Lgr5|Ascl2|Slc12a2,3,Intestinal stem cells at crypt base (CBC and reserve)
-sub,T cells (immune subset),T cells,Cd3e|Cd3d|Cd3g,Cd3e|Cd3d|Cd3g|Gata3|Ncr1|Klrb1b|Ms4a2|Cpa3,2,Pan-T cells within the T cell cluster (to separate from NK and mast)
-sub,ILCs,T cells,Gata3,Gata3|Ncr1,2,Innate lymphoid cells (group 2 ILCs); often co-cluster with T cells
-sub,NK cells,T cells,Ncr1|Klrb1b,Ncr1|Klrb1b,2,Natural killer cells; innate cytotoxic lymphocytes
-sub,Mast cells,T cells,Ms4a2|Cpa3,Ms4a2|Cpa3,2,Mast cells; often appear in T cell broad clusters
-sub,CD4+ T cells,T cells,Cd4|Cd3e|Cd3d,Cd3e|Cd3d|Cd3g|Cd4|Cd8a|Cd8b1|Mki67|Trdc|Trgc1|Gata3,2,Helper T cells; CD4-expressing conventional T cells
-sub,CD8+ T cells,T cells,Cd8a|Cd8b1|Sell,Cd8a|Cd8b1|Sell,2,Cytotoxic T cells; CD8-expressing effector and memory T cells
-sub,Cyc. T cells,T cells,Mki67|Top2a,Mki67|Top2a,2,Cycling (proliferating) T cells
-sub,gd T cells,T cells,Trdc|Trgc1,Trdc|Trgc1,2,Gamma-delta T cells; innate-like T cell subset
-sub,Tregs,T cells,Foxp3|Il2ra|Ikzf2|Ctla4,Foxp3|Il2ra|Ikzf2|Ctla4,2,Regulatory T cells; Foxp3 is the master transcription factor
-sub,Neutrophils,Macrophages,Cxcr2|Csf3r|S100a8,Cxcr2|Csf3r|S100a8,2,Neutrophils; often co-detected in myeloid broad clusters
-sub,cDCs (myeloid sub),Macrophages,Cd11c|Clec9a|Xcr1|Itgae|Flt3,Cd11c|Clec9a|Xcr1|Itgae|Flt3,2,Classical dendritic cells within the macrophage/myeloid cluster
-sub,M1 macrophages,Macrophages,Il1b|Ccr7|Cd86|Cd80|Ccl5|Il6|Nos2,Il1b|Ccr7|Cd86|Cd80|Ccl5|Il6|Nos2,2,Pro-inflammatory M1-polarized macrophages
-sub,Monocytes,Macrophages,Cd14|Ccr2|Cd33|Sell|Fcgr3,Cd14|Ccr2|Cd33|Sell|Fcgr3,2,Classical and non-classical monocytes
-sub,M2 macrophages,Macrophages,Mrc1|C1qa|C1qb|C1qc|Cd163,Mrc1|C1qa|C1qb|C1qc|Cd163,2,Anti-inflammatory / tissue-repair M2-polarized macrophages
-sub,M0 macrophages,Macrophages,Cd68|Csf1r,Cd68|Csf1r,2,Resting / uncommitted macrophages
-sub,GFs,Fibroblasts,Col1a1|Fn1,Col1a1|Fn1,2,Generic fibroblasts (Col1a1+Fn1 without further subtype markers)
-sub,CBFs,Fibroblasts,Col1a1|Fn1|Wnt2|Wnt2b|Sfrp1,Col1a1|Fn1|Wnt2|Wnt2b|Sfrp1,2,Crypt-bottom fibroblasts; Wnt-secreting niche cells supporting stem cells
-sub,CTFs,Fibroblasts,Col1a1|Fn1|Wnt5a|Wnt5b|Bmp2|Cxcl14,Col1a1|Fn1|Wnt5a|Wnt5b|Bmp2|Cxcl14,2,Crypt-tip fibroblasts; BMP-secreting cells promoting differentiation
-sub,MFs,Fibroblasts,Col1a1|Fn1|Acta2,Col1a1|Fn1|Acta2,2,Myofibroblasts; activated fibroblasts with contractile properties
-sub,IAFs,Fibroblasts,Col1a1|Fn1|Ccl19,Col1a1|Fn1|Ccl19,2,Interstitial adventitial fibroblasts; CCL19-expressing stromal cells
+tier,cell_type,parent_cell_type,markers,subcluster_resolution,description
+broad,Plasma B cells,,Ighg1|Mzb1,,Antibody-secreting plasma cells; high Ig expression
+broad,B cells,,Ms4a1|Cd19,,Mature B lymphocytes
+broad,T cells,,Cd3e|Cd4|Cd8a|Trbc2,,Pan-T cell markers including helper and cytotoxic T cells
+broad,cDCs,,Clec9a|Xcr1,,Classical dendritic cells (type 1 cDC)
+broad,Macrophages,,Cd163|Csf1r|Cd68|Mrc1|Aif1,,Tissue-resident and monocyte-derived macrophages
+broad,Fibroblasts,,Col1a1|Col3a1|Col6a2,,Stromal fibroblasts defined by collagen expression
+broad,ENs,,Vip|Tubb3|Vat1l,,Enteric neurons of the enteric nervous system
+broad,EGCs,,Sox10|Plp1,,Enteric glial cells (peripheral glia)
+broad,LECs,,Lyve1|Flt4|Pecam1,,Lymphatic endothelial cells
+broad,VECs,,Plvap|Flt1,,Vascular endothelial cells
+broad,Colonocytes,,Epcam|Muc2|Krt19|Krt20|Vil1,,Colonic epithelial cells (all subtypes)
+broad,SMCs,,Myh11|Tagln|Hhip|Des,,Smooth muscle cells (intestinal muscularis)
+broad,vSMCs,,Myh11|Tagln|Des,,Vascular smooth muscle cells
+broad,Adipocytes,,Adipoq|Plin1|Plin4|Fabp4,,Adipocytes defined by lipid-storage genes
+sub,Goblet cells,Colonocytes,Muc2|Spink4|Agr2|Retnlb|Fam3d,3,Mucus-secreting goblet cells; first-pass separation from absorptive enterocytes
+sub,Enterocytes,Colonocytes,Ceacam1|Krt19|Krt20|Muc13|Lypd8,3,Absorptive enterocytes; confirm after panglaoDB-based initial separation
+sub,EECs,Colonocytes,Chga|Chgb|Tph1|Cck|Scgn|Scg5,3,Enteroendocrine cells; rare hormone-secreting epithelial cells
+sub,Tuft cells,Colonocytes,Dclk1|Trpm5|Avil|Sh2d6|Plcg2,3,Chemosensory tuft cells; brush-border morphology
+sub,DCS,Colonocytes,Reg4|Ccl6|Dll1,3,Deep crypt secretory cells; niche support cells for stem cells
+sub,Abs. colonocytes,Colonocytes,Alpi|Ces2c|Slc26a2|Ceacam1|Aqp8,3,Absorptive colonocytes; mature ion-transport and lipid-handling cells
+sub,TA cells,Colonocytes,Mki67|Top2a|Birc5|Pcna|Stmn1,3,Transit-amplifying cells; actively cycling progenitors
+sub,Stem cells,Colonocytes,Lgr5|Lrig1|Ascl2|Slc12a2|Smoc2|Kcnq1|Gpx2|Ephb2|Bmpr1a|Hopx|Sox9,3,Intestinal stem cells at crypt base (CBC and reserve)
+sub,T cells (immune subset),T cells,Cd3e|Cd3d|Cd3g,2,Pan-T cells within the T cell cluster (to separate from NK and mast)
+sub,ILCs,T cells,Gata3,2,Innate lymphoid cells (group 2 ILCs); often co-cluster with T cells
+sub,NK cells,T cells,Ncr1|Klrb1b,2,Natural killer cells; innate cytotoxic lymphocytes
+sub,Mast cells,T cells,Ms4a2|Cpa3,2,Mast cells; often appear in T cell broad clusters
+sub,CD4+ T cells,T cells,Cd4|Cd3e|Cd3d,2,Helper T cells; CD4-expressing conventional T cells
+sub,CD8+ T cells,T cells,Cd8a|Cd8b1|Sell,2,Cytotoxic T cells; CD8-expressing effector and memory T cells
+sub,Cyc. T cells,T cells,Mki67|Top2a,2,Cycling (proliferating) T cells
+sub,gd T cells,T cells,Trdc|Trgc1,2,Gamma-delta T cells; innate-like T cell subset
+sub,Tregs,T cells,Foxp3|Il2ra|Ikzf2|Ctla4,2,Regulatory T cells; Foxp3 is the master transcription factor
+sub,Neutrophils,Macrophages,Cxcr2|Csf3r|S100a8,2,Neutrophils; often co-detected in myeloid broad clusters
+sub,cDCs (myeloid sub),Macrophages,Cd11c|Clec9a|Xcr1|Itgae|Flt3,2,Classical dendritic cells within the macrophage/myeloid cluster
+sub,M1 macrophages,Macrophages,Il1b|Ccr7|Cd86|Cd80|Ccl5|Il6|Nos2,2,Pro-inflammatory M1-polarized macrophages
+sub,Monocytes,Macrophages,Cd14|Ccr2|Cd33|Sell|Fcgr3,2,Classical and non-classical monocytes
+sub,M2 macrophages,Macrophages,Mrc1|C1qa|C1qb|C1qc|Cd163,2,Anti-inflammatory / tissue-repair M2-polarized macrophages
+sub,M0 macrophages,Macrophages,Cd68|Csf1r,2,Resting / uncommitted macrophages
+sub,GFs,Fibroblasts,Col1a1|Fn1,2,Generic fibroblasts (Col1a1+Fn1 without further subtype markers)
+sub,CBFs,Fibroblasts,Col1a1|Fn1|Wnt2|Wnt2b|Sfrp1,2,Crypt-bottom fibroblasts; Wnt-secreting niche cells supporting stem cells
+sub,CTFs,Fibroblasts,Col1a1|Fn1|Wnt5a|Wnt5b|Bmp2|Cxcl14,2,Crypt-tip fibroblasts; BMP-secreting cells promoting differentiation
+sub,MFs,Fibroblasts,Col1a1|Fn1|Acta2,2,Myofibroblasts; activated fibroblasts with contractile properties
+sub,IAFs,Fibroblasts,Col1a1|Fn1|Ccl19,2,Interstitial adventitial fibroblasts; CCL19-expressing stromal cells

@@ -148,7 +148,7 @@ PRE_MAX_MT_PERCENT     <- 30.0  # Maximum mitochondrial % (discard dying cells, 
 POST_MIN_GENES          <- 500    # Min genes per cell. Raise if low-quality cells persist.
 POST_MAX_GENES          <- 14000  # Max genes per cell. High values may indicate multiplets.
 POST_MIN_UMIS           <- 1500   # Min UMI count. Raise to remove low-depth cells.
-POST_MAX_UMIS           <- 100000 # Max UMI count. Rarely needs changing.
+POST_MAX_UMIS           <- 100000 # Max UMI count. Similarly look at QC violins to adjust.
 POST_MAX_MT             <- 20.0   # Max mitochondrial %. Standard range: 15-25%.
 POST_MIN_CELLS_PER_GENE <- 15     # Genes expressed in fewer cells than this are removed.
 
@@ -177,17 +177,20 @@ DOUBLET_ROLLBACK_THRESHOLD <- 0.14  # 14% maximum acceptable doublet fraction
 N_VARIABLE_FEATURES <- 5000  # Number of highly variable genes for PCA.
                               # Range: 2000-5000. Fewer HVGs can improve UMAP
                               # separation in heterogeneous datasets.
-N_PCS_TO_USE        <- 50    # Number of PCs used for graph construction and UMAP.
+N_PCS_TO_USE        <- 50    # Number of PCs used for graph construction and UMAP (default and recommended).
                               # Increase for very complex datasets.
 CLUSTER_RESOLUTION  <- 1.0   # Leiden/Louvain resolution. Higher = more clusters.
                               # Start at 1.0; tune after viewing the UMAP in Script 02.
-UMAP_N_NEIGHBORS    <- 15    # UMAP: local neighborhood size. Higher = more global structure.
+UMAP_N_NEIGHBORS    <- 15    # UMAP: local neighborhood size (match cluster neighbors). Higher = more global structure.
 UMAP_MIN_DIST       <- 0.3   # UMAP: minimum distance between embedded points.
                               # Lower = tighter clusters; higher = more spread.
 
 # --- 1.6: Workflow Toggles ---
 RUN_DECONTX <- TRUE   # Run DecontX ambient RNA correction (recommended for all runs).
-RUN_SCEVAN  <- TRUE   # Run SCEVAN copy-number variation analysis per sample.
+RUN_SCEVAN  <- TRUE   # Run SCEVAN copy-number variation analysis.
+                      # Enable if ANY sample in the cohort is cancer/tumor — run on ALL
+                      # samples including normals, as normals serve as the CNA reference
+                      # baseline. Set FALSE only if the entire study uses normal tissue.
 DPI_SETTING <- 300    # DPI for all saved diagnostic plots.
 
 # --- 1.7: Probe / KO Gene Integration Parameters ---
@@ -210,7 +213,7 @@ PROBES_FOR_CUSTOM_SUM <- c('Nr4a1|dbf6af3', 'Nr4a1|99a0eaa')
 
 # --- 1.8: SCEVAN Parameters ---
 SCEVAN_ORGANISM  <- "mouse"  # "mouse" or "human"
-SCEVAN_N_CORES   <- 4        # Parallel cores for SCEVAN. Increase on HPC.
+SCEVAN_N_CORES   <- 6        # Parallel cores for SCEVAN. Increase on HPC.
 SCEVAN_SUBCLONES <- TRUE     # Detect subclonal CNA populations.
 SCEVAN_PLOTTREE  <- FALSE    # Plot phylogenetic tree of subclones (slow; set TRUE if needed).
 
@@ -223,139 +226,172 @@ if (!dir.exists(OUTPUT_DIR)) { dir.create(OUTPUT_DIR, recursive = TRUE) }
 if (!dir.exists(SCEVAN_DIR)) { dir.create(SCEVAN_DIR, recursive = TRUE) }
 
 # =============================================================================
-# --- STEP 2.1: Per-Sample Processing with Checkpoint System -----------------
+# --- STEP 2.1a: Per-Sample Processing & Checkpoint Generation ---------------
 # =============================================================================
-# Each sample is processed individually. A checkpoint .rds file is saved after
-# processing. On re-run, existing checkpoints are loaded directly to save time.
-message("=== STEP 2.1: Processing or Loading Individual Samples ===")
-metadata           <- read.xlsx(METADATA_FILE)
+# PURPOSE:
+#   Process each sample independently and save a checkpoint .rds file.
+#   SCEVAN (if enabled) runs here — one sample at a time, with full memory
+#   cleanup after each. No Seurat objects accumulate in a list during this
+#   phase to prevent out-of-memory crashes when running > 10 samples.
+#
+#   If a checkpoint already exists for a sample (e.g., re-run after partial
+#   completion), that sample is skipped entirely — saving hours of compute.
+#
+# MEMORY STRATEGY:
+#   Each sample object is removed from RAM and garbage-collected immediately
+#   after its checkpoint is written. Only one sample occupies memory at a time
+#   during this loop, regardless of cohort size.
+# =============================================================================
+message("=== STEP 2.1a: Per-Sample Processing (SCEVAN + QC + Checkpoint) ===")
+metadata <- read.xlsx(METADATA_FILE)
+
+for (i in 1:nrow(metadata)) {
+  sample_info       <- metadata[i, ]
+  sample_id         <- as.character(sample_info$SampleID)
+  sample_scevan_dir <- file.path(SCEVAN_DIR, sample_id)
+  checkpoint_file   <- file.path(sample_scevan_dir, paste0(sample_id, "_scevan_processed.rds"))
+
+  # --- Skip if checkpoint already exists ---
+  if (file.exists(checkpoint_file)) {
+    message(paste("  [CHECKPOINT] Skipping", sample_id, "- checkpoint found."))
+    next
+  }
+
+  message(paste("  [PROCESSING] Starting", sample_id, "..."))
+  if (!dir.exists(sample_scevan_dir)) { dir.create(sample_scevan_dir, recursive = TRUE) }
+
+  # -- Read RNA count matrix from 10x H5 file --
+  rna_h5_path <- file.path(H5_DIR, sample_id, "sample_filtered_feature_bc_matrix.h5")
+  if (!file.exists(rna_h5_path)) {
+    warning(paste("  [SKIP] RNA H5 file not found for:", sample_id))
+    next
+  }
+  counts_matrix <- Read10X_h5(rna_h5_path)
+
+  # -- Optional: Read probe data and create custom summed feature --
+  probe_matrix <- NULL
+  if (ADD_PROBE_DATA) {
+    probe_h5_path <- file.path(H5_DIR, sample_id, "sample_raw_probe_bc_matrix.h5")
+    if (file.exists(probe_h5_path)) {
+      message("    -> Reading probe data and creating custom 'Nr4a1_cust' feature...")
+      probe_matrix <- Read10X_h5(probe_h5_path)
+      # Handle nested list structure from probe H5 files
+      if (is.list(probe_matrix) && "Probe Barcode" %in% names(probe_matrix)) {
+        probe_matrix <- probe_matrix[["Probe Barcode"]]
+      }
+      # Sum counts across selected KO-target probes into one custom feature
+      common_cells      <- intersect(colnames(counts_matrix), colnames(probe_matrix))
+      custom_sum_counts <- numeric(length(common_cells))
+      names(custom_sum_counts) <- common_cells
+      probes_found <- intersect(PROBES_FOR_CUSTOM_SUM, rownames(probe_matrix))
+      if (length(probes_found) > 0) {
+        summed_vector <- Matrix::colSums(probe_matrix[probes_found, common_cells, drop = FALSE])
+        custom_sum_counts[names(summed_vector)] <- summed_vector
+      }
+      # Append custom feature row to the RNA count matrix
+      custom_row <- Matrix::Matrix(0, 1, ncol(counts_matrix), sparse = TRUE)
+      colnames(custom_row) <- colnames(counts_matrix)
+      rownames(custom_row) <- "Nr4a1_cust"
+      custom_row[1, names(custom_sum_counts)] <- custom_sum_counts
+      counts_matrix <- rbind(counts_matrix, custom_row)
+    } else {
+      warning(paste("    -> [SKIP] Probe H5 not found for", sample_id))
+    }
+  }
+
+  # -- Create Seurat object --
+  seurat_obj <- CreateSeuratObject(counts = counts_matrix, project = sample_id, min.cells = 5)
+
+  # -- Attach all metadata columns from the Excel file --
+  for (col_name in colnames(sample_info)) {
+    seurat_obj[[col_name]] <- sample_info[[col_name]]
+  }
+  # Auto-create combined group label (Condition_Sex) if both columns are present
+  if ("Condition" %in% colnames(seurat_obj@meta.data) &&
+      "Sex" %in% colnames(seurat_obj@meta.data)) {
+    seurat_obj$group <- paste(seurat_obj$Condition, seurat_obj$Sex, sep = "_")
+  }
+
+  # -- Add individual probe counts as metadata columns --
+  if (!is.null(probe_matrix)) {
+    for (probe_id in names(PROBE_MAPPING)) {
+      if (probe_id %in% rownames(probe_matrix)) {
+        col_name_clean <- gsub("[\\s\\(\\)\n]+", "_", PROBE_MAPPING[[probe_id]])
+        col_name_clean <- gsub("_$", "", col_name_clean)
+        col_name_final <- paste0("Nr4a1_", col_name_clean, "_probe_count")
+        seurat_obj <- AddMetaData(seurat_obj,
+                                  metadata = probe_matrix[probe_id, ],
+                                  col.name = col_name_final)
+      }
+    }
+  }
+
+  # -- Optional: Run SCEVAN for copy-number variation detection --
+  # NOTE: SCEVAN is intentionally run inside this first loop (not the loading
+  # loop below) because it is the most memory-intensive step. Running SCEVAN
+  # one sample at a time with immediate cleanup prevents RAM exhaustion in
+  # large cohorts (> 10 samples).
+  if (RUN_SCEVAN) {
+    tryCatch({
+      message("    -> Running SCEVAN for CNA detection...")
+      scevan_res_df <- pipelineCNA(
+        as.matrix(GetAssayData(seurat_obj, layer = "counts")),
+        par_cores  = SCEVAN_N_CORES,
+        SUBCLONES  = SCEVAN_SUBCLONES,
+        plotTree   = SCEVAN_PLOTTREE,
+        organism   = SCEVAN_ORGANISM,
+        output_dir = sample_scevan_dir
+      )
+      if (!is.null(scevan_res_df)) {
+        seurat_obj <- AddMetaData(seurat_obj, metadata = scevan_res_df)
+        message("    -> SCEVAN metadata added to Seurat object.")
+      }
+    }, error = function(e) {
+      message(paste("    -> [WARNING] SCEVAN failed for", sample_id, "| Error:", e$message))
+    })
+  }
+
+  # -- Pre-merge QC: compute mitochondrial percentage and apply loose filters --
+  seurat_obj[["percent.mt"]] <- PercentageFeatureSet(seurat_obj, pattern = "^MT-|^mt-")
+  seurat_obj <- subset(seurat_obj,
+                       subset = nFeature_RNA >= PRE_MIN_GENES_PER_CELL &
+                                percent.mt   <= PRE_MAX_MT_PERCENT)
+
+  # -- Save checkpoint and immediately free all memory for this sample --
+  message("    -> Saving checkpoint and releasing memory...")
+  saveRDS(seurat_obj, file = checkpoint_file)
+  rm(counts_matrix, seurat_obj)
+  if (!is.null(probe_matrix)) { rm(probe_matrix) }
+  gc()
+  message(paste("  [DONE]", sample_id, "- checkpoint saved, memory freed."))
+}
+
+# =============================================================================
+# --- STEP 2.1b: Load All Checkpoints into List for Merging ------------------
+# =============================================================================
+# PURPOSE:
+#   Now that all samples have been processed and checkpointed individually
+#   (with SCEVAN metadata already embedded), load them sequentially into a
+#   named list for the merge step below.
+#
+#   This is a separate loop so that the heavy SCEVAN computation (Step 2.1a)
+#   never co-exists in memory with a growing list of Seurat objects.
+# =============================================================================
+message("=== STEP 2.1b: Loading Checkpoints for Merging ===")
 seurat_objects_list <- list()
 
 for (i in 1:nrow(metadata)) {
-  sample_info      <- metadata[i, ]
-  sample_id        <- as.character(sample_info$SampleID)
+  sample_id         <- as.character(metadata$SampleID[i])
   sample_scevan_dir <- file.path(SCEVAN_DIR, sample_id)
-  checkpoint_file  <- file.path(sample_scevan_dir, paste0(sample_id, "_scevan_processed.rds"))
+  checkpoint_file   <- file.path(sample_scevan_dir, paste0(sample_id, "_scevan_processed.rds"))
 
-  # --- Load from checkpoint if available ---
-  if (file.exists(checkpoint_file)) {
-    message(paste("  [CHECKPOINT] Found checkpoint for", sample_id, "- loading from disk."))
-    seurat_obj <- readRDS(checkpoint_file)
-
-  } else {
-    # --- Process sample from raw H5 ---
-    message(paste("  [PROCESSING] No checkpoint for", sample_id, "- processing from scratch."))
-    if (!dir.exists(sample_scevan_dir)) { dir.create(sample_scevan_dir, recursive = TRUE) }
-
-    # -- Read RNA count matrix from 10x H5 file --
-    rna_h5_path <- file.path(H5_DIR, sample_id, "sample_filtered_feature_bc_matrix.h5")
-    if (!file.exists(rna_h5_path)) {
-      warning(paste("  [SKIP] RNA H5 file not found for:", sample_id))
-      next
-    }
-    counts_matrix <- Read10X_h5(rna_h5_path)
-
-    # -- Optional: Read probe data and create custom summed feature --
-    probe_matrix <- NULL
-    if (ADD_PROBE_DATA) {
-      probe_h5_path <- file.path(H5_DIR, sample_id, "sample_raw_probe_bc_matrix.h5")
-      if (file.exists(probe_h5_path)) {
-        message("    -> Reading probe data and creating custom 'Nr4a1_cust' feature...")
-        probe_matrix <- Read10X_h5(probe_h5_path)
-        # Handle nested list structure from probe H5 files
-        if (is.list(probe_matrix) && "Probe Barcode" %in% names(probe_matrix)) {
-          probe_matrix <- probe_matrix[["Probe Barcode"]]
-        }
-        # Sum counts across selected KO-target probes into one custom feature
-        common_cells       <- intersect(colnames(counts_matrix), colnames(probe_matrix))
-        custom_sum_counts  <- numeric(length(common_cells))
-        names(custom_sum_counts) <- common_cells
-        probes_found <- intersect(PROBES_FOR_CUSTOM_SUM, rownames(probe_matrix))
-        if (length(probes_found) > 0) {
-          summed_vector <- Matrix::colSums(probe_matrix[probes_found, common_cells, drop = FALSE])
-          custom_sum_counts[names(summed_vector)] <- summed_vector
-        }
-        # Append custom feature row to the RNA count matrix
-        custom_row <- Matrix::Matrix(0, 1, ncol(counts_matrix), sparse = TRUE)
-        colnames(custom_row) <- colnames(counts_matrix)
-        rownames(custom_row) <- "Nr4a1_cust"
-        custom_row[1, names(custom_sum_counts)] <- custom_sum_counts
-        counts_matrix <- rbind(counts_matrix, custom_row)
-      } else {
-        warning(paste("    -> [SKIP] Probe H5 not found for", sample_id))
-      }
-    }
-
-    # -- Create Seurat object --
-    seurat_obj <- CreateSeuratObject(counts = counts_matrix, project = sample_id, min.cells = 5)
-
-    # -- Attach all metadata columns from the Excel file --
-    for (col_name in colnames(sample_info)) {
-      seurat_obj[[col_name]] <- sample_info[[col_name]]
-    }
-    # Auto-create combined group label (Condition_Sex) if both columns are present
-    if ("Condition" %in% colnames(seurat_obj@meta.data) &&
-        "Sex" %in% colnames(seurat_obj@meta.data)) {
-      seurat_obj$group <- paste(seurat_obj$Condition, seurat_obj$Sex, sep = "_")
-    }
-
-    # -- Add individual probe counts as metadata columns --
-    if (!is.null(probe_matrix)) {
-      for (probe_id in names(PROBE_MAPPING)) {
-        if (probe_id %in% rownames(probe_matrix)) {
-          # Sanitize probe label to create a valid R column name
-          col_name_clean <- gsub("[\\s\\(\\)\n]+", "_", PROBE_MAPPING[[probe_id]])
-          col_name_clean <- gsub("_$", "", col_name_clean)
-          col_name_final <- paste0("Nr4a1_", col_name_clean, "_probe_count")
-          seurat_obj <- AddMetaData(seurat_obj,
-                                    metadata = probe_matrix[probe_id, ],
-                                    col.name = col_name_final)
-        }
-      }
-    }
-
-    # -- Optional: Run SCEVAN for copy-number variation detection --
-    if (RUN_SCEVAN) {
-      tryCatch({
-        message("    -> Running SCEVAN for CNA detection...")
-        scevan_res_df <- pipelineCNA(
-          as.matrix(GetAssayData(seurat_obj, layer = "counts")),
-          par_cores  = SCEVAN_N_CORES,
-          SUBCLONES  = SCEVAN_SUBCLONES,
-          plotTree   = SCEVAN_PLOTTREE,
-          organism   = SCEVAN_ORGANISM,
-          output_dir = sample_scevan_dir
-        )
-        if (!is.null(scevan_res_df)) {
-          seurat_obj <- AddMetaData(seurat_obj, metadata = scevan_res_df)
-          message("    -> SCEVAN metadata added to Seurat object.")
-        }
-      }, error = function(e) {
-        message(paste("    -> [WARNING] SCEVAN failed for", sample_id, "| Error:", e$message))
-      })
-    }
-
-    # -- Pre-merge QC: compute mitochondrial percentage and apply loose filters --
-    seurat_obj[["percent.mt"]] <- PercentageFeatureSet(seurat_obj, pattern = "^MT-|^mt-")
-    seurat_obj <- subset(seurat_obj,
-                         subset = nFeature_RNA >= PRE_MIN_GENES_PER_CELL &
-                                  percent.mt   <= PRE_MAX_MT_PERCENT)
-
-    # -- Save checkpoint for this sample --
-    message("    -> Saving processed object to checkpoint file.")
-    saveRDS(seurat_obj, file = checkpoint_file)
-
-    # -- Explicit memory cleanup before next iteration --
-    message("    -> Freeing memory before next sample...")
-    rm(counts_matrix, seurat_obj)
-    if (!is.null(probe_matrix)) { rm(probe_matrix) }
-    gc()
-
-    # Reload the object cleanly to add to the main list
-    seurat_obj <- readRDS(checkpoint_file)
+  if (!file.exists(checkpoint_file)) {
+    warning(paste("  [MISSING] No checkpoint found for", sample_id, "- skipping from merge."))
+    next
   }
 
-  seurat_objects_list[[sample_id]] <- seurat_obj
+  message(paste("  [LOAD]", sample_id))
+  seurat_objects_list[[sample_id]] <- readRDS(checkpoint_file)
 }
 
 # =============================================================================

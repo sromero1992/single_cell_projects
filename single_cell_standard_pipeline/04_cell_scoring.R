@@ -80,10 +80,16 @@ SUBTYPE_LEVELS    <- c("CD4+ T cells", "CD8+ T cells", "Tregs",
 # --- 1.3: Experimental Groups -----------------------------------------------
 # CONDITION_COLUMN: Metadata column defining the two conditions being compared.
 # CONDITION_LEVELS: Factor order for conditions in all plots.
+#   CONVENTION: always list the CONTROL / REFERENCE group FIRST (left in plots),
+#   followed by the treatment / KO group. This makes WT the visual baseline.
+#   NOTE: this order affects plot axis position and pseudo-bulk t-test labels
+#   (cond1 = WT, cond2 = KO → "WT < KO" means pathway is HIGHER in KO).
+#   It does NOT affect DE direction — see GROUP_1/GROUP_2 in Script 03, where
+#   GROUP_1 = KO so that positive log2FC always means "upregulated in KO".
 # CONDITION_COLORS: Named vector of hex colors (one per condition level).
 CONDITION_COLUMN <- "Condition"
-CONDITION_LEVELS <- c("Nr4a1 KO", "WT")
-CONDITION_COLORS <- c("Nr4a1 KO" = "#F8766D", "WT" = "#00BFC4")
+CONDITION_LEVELS <- c("WT", "Nr4a1 KO")
+CONDITION_COLORS <- c("WT" = "#00BFC4", "Nr4a1 KO" = "#F8766D")
 
 # --- 1.4: Analysis Modes ---
 RUN_MODE_A_PATHWAY_SCORING  <- TRUE   # AUCell pathway scoring from MSigDB

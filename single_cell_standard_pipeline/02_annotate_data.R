@@ -121,7 +121,10 @@ ADDITIONAL_GROUPS_TO_PLOT <- c("Genotype_Diet")
 # --- 1.6: Gene Expression Comparison (generate_gene_comparison_plots) ---
 # COMPARISON_X_AXIS: Metadata column for x-axis grouping (e.g., "Genotype_Diet").
 # COMPARISON_GROUPS: Character vector of the specific levels to compare.
-# COMPARISON_PAIRS: List of character(2) vectors for pairwise comparisons.
+#   CONVENTION: list CONTROL groups before TREATMENT groups within each factor
+#   so that control (WT) always appears on the left of the x-axis.
+# COMPARISON_PAIRS: List of character(2) vectors for pairwise stat comparisons.
+#   CONVENTION: always c("control", "treatment") — control first in each pair.
 COMPARISON_X_AXIS  <- "Genotype_Diet"
 COMPARISON_GROUPS  <- c("WT_cellulose", "KO_cellulose", "WT_inulin", "KO_inulin")
 COMPARISON_PAIRS   <- list(

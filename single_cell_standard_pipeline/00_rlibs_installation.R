@@ -1,4 +1,29 @@
-# --- R Environment Setup for Single-Cell Analysis (v2) ---
+# =============================================================================
+# scRNA-seq PIPELINE - SCRIPT 0: R ENVIRONMENT SETUP
+# Version: 2.0
+#
+# PURPOSE:
+#   Installs all R packages required by Scripts 01–04 of this pipeline.
+#   Run this script ONCE per machine / R environment before running any other
+#   pipeline script. Re-running is safe — packages already present are skipped.
+#
+# PACKAGE SOURCES:
+#   CRAN        — Standard R packages (Seurat, ggplot2, harmony, enrichR, etc.)
+#   Bioconductor— Biology-specific packages (AUCell, celda, SingleCellExperiment)
+#   GitHub      — Packages not yet on CRAN/Bioc (DoubletFinder, SplineDV, SCEVAN,
+#                 CellChat, monocle3, fgsea, etc.)
+#
+# HOW TO RUN:
+#   Open this script in RStudio and press Ctrl+Shift+Enter (Run All).
+#   Watch the console for any red error messages. If a package fails,
+#   fix the error and re-run — the script will only install missing packages.
+#
+# OUTPUT:
+#   A status report table is printed at the end showing TRUE/FALSE per package.
+#   All packages must show TRUE before proceeding to Script 01.
+#
+# NEXT STEP: Run '01_process_data.R'
+# =============================================================================
 
 # 0. INITIAL SETUP
 # Install `remotes` if not already present, as it's needed for GitHub installations.
@@ -20,7 +45,8 @@ if (!dir.exists(personal_lib)) {
 cran_pkgs <- c(
   "Seurat", "devtools", "dplyr", "ggplot2", "Matrix", "ggpubr", "tidyr", "patchwork",
   "stringr", "tibble", "cowplot", "openxlsx","writexl", "readxl", "parallelly", "hdf5r",
-  "harmony" # Added here from CRAN
+  "harmony",  # Added here from CRAN
+  "enrichR"   # Enrichr ORA client (connects to Enrichr web API)
 )
 
 # --- Bioconductor Packages ---
