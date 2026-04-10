@@ -40,7 +40,7 @@
 # --- Load Required Libraries -------------------------------------------------
 # These must be installed via 00_rlibs_installation.R before running this script.
 library(Seurat)       # Core single-cell analysis framework
-library(harmony)      # Batch correction via Harmony integration
+library(SeuratWrappers) # Batch correction via Harmony integration
 library(openxlsx)     # Reading .xlsx metadata files
 library(dplyr)        # Data manipulation
 library(ggplot2)      # Publication-quality plotting
@@ -160,8 +160,8 @@ DOUBLET_RATE <- 0.08
 # pK Selection: DoubletFinder sweeps a range of pK values and picks the one
 # maximizing the BCmetric. The range below constrains the search to biologically
 # sensible values. The fallback is used if no valid pK is found in range.
-DF_PK_RANGE_MIN <- 0.01  # Minimum valid pK value
-DF_PK_RANGE_MAX <- 0.15  # Maximum valid pK value
+DF_PK_RANGE_MIN <- 0.005  # Minimum valid pK value
+DF_PK_RANGE_MAX <- 0.18  # Maximum valid pK value
 DF_PK_FALLBACK  <- 0.09  # Fallback pK if no valid value found in range
 
 # DOUBLET_ROLLBACK_THRESHOLD: Safety mechanism.
@@ -404,18 +404,59 @@ data <- merge(
   y = seurat_objects_list[-1],
   add.cell.ids = names(seurat_objects_list)
 )
-data <- JoinLayers(data)   # Required for Seurat v5: joins split count layers into one
 rm(seurat_objects_list); gc()
+data <- JoinLayers(data)   # Required for Seurat v5: joins split count layers into one
+gc()
+
+output_rds <- file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_merged_post_metadata_gen.rds"))
+saveRDS(data, output_rds, compress = T)
 
 # =============================================================================
 # --- STEP 2.3: Post-Merge QC & Diagnostic Plots ----------------------------
 # =============================================================================
-message("\n=== STEP 2.3: Post-Merge QC and Diagnostic Plotting ===")
+output_rds <- file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_merged_post_metadata_gen.rds"))
+data<- readRDS(output_rds)
 
+message("\n=== STEP 2.3: Post-Merge QC and Diagnostic Plotting ===")
 # Save violin plots BEFORE filtering so the full distribution is visible
-p_before <- VlnPlot(data,
-                    features = c("nFeature_RNA", "nCount_RNA", "percent.mt"),
-                    ncol = 3, pt.size = 0)
+data[["percent.mt"]] <- PercentageFeatureSet(data, pattern = "^MT-|^mt-")
+data$all_cells <- "Project_Nr4a1"
+
+# --- Fail-Safe Plotting Block ---
+p_before <- tryCatch({
+  message("Attempting standard VlnPlot...")
+  VlnPlot(
+    object = data,
+    features = c("nFeature_RNA", "nCount_RNA", "percent.mt"),
+    group.by = "all_cells", # Ensures they are grouped together
+    ncol = 3,
+    pt.size = 0,
+    raster = FALSE
+  )
+}, error = function(e) {
+  message("Standard VlnPlot failed with S4SXP/Slot error. Falling back to manual ggplot...")
+  
+  # Manual backup logic
+  plot_df <- data@meta.data[, c("all_cells", "nFeature_RNA", "nCount_RNA", "percent.mt")]
+  
+  p1 <- ggplot(plot_df, aes(x = all_cells, y = nFeature_RNA, fill = all_cells)) +
+    geom_violin(scale = "width", adjust = 1, trim = TRUE) +
+    theme_classic() + NoLegend() + labs(title = "nFeature_RNA (Manual)", x = NULL)
+  
+  p2 <- ggplot(plot_df, aes(x = all_cells, y = nCount_RNA, fill = all_cells)) +
+    geom_violin(scale = "width", adjust = 1, trim = TRUE) +
+    theme_classic() + NoLegend() + labs(title = "nCount_RNA (Manual)", x = NULL)
+  
+  p3 <- ggplot(plot_df, aes(x = all_cells, y = percent.mt, fill = all_cells)) +
+    geom_violin(scale = "width", adjust = 1, trim = TRUE) +
+    theme_classic() + NoLegend() + labs(title = "percent.mt (Manual)", x = NULL)
+  
+  return(p1 + p2 + p3 + plot_layout(ncol = 3))
+})
+
+# Display the result
+print(p_before)
+
 ggsave(file.path(OUTPUT_DIR, "01a_qc_violin_before_filtering.png"),
        plot = p_before, width = 10, height = 6, dpi = DPI_SETTING)
 
@@ -433,9 +474,41 @@ genes_to_keep <- rownames(data)[
 ]
 data <- subset(data, features = genes_to_keep)
 
-p_after <- VlnPlot(data,
-                   features = c("nFeature_RNA", "nCount_RNA", "percent.mt"),
-                   ncol = 3, pt.size = 0)
+# --- Fail-Safe Plotting Block (After Filtering) ---
+p_after <- tryCatch({
+  message("Attempting standard VlnPlot (After)...")
+  VlnPlot(
+    object = data,
+    features = c("nFeature_RNA", "nCount_RNA", "percent.mt"),
+    group.by = "all_cells",
+    ncol = 3,
+    pt.size = 0,
+    raster = FALSE
+  )
+}, error = function(e) {
+  message("VlnPlot failed again. Using manual ggplot backup for 'p_after'...")
+  
+  # Ensure the metadata is fresh after your subset() call
+  plot_df_after <- data@meta.data[, c("all_cells", "nFeature_RNA", "nCount_RNA", "percent.mt")]
+  
+  pa1 <- ggplot(plot_df_after, aes(x = all_cells, y = nFeature_RNA, fill = all_cells)) +
+    geom_violin(scale = "width", adjust = 1, trim = TRUE) +
+    theme_classic() + NoLegend() + labs(title = "nFeature_RNA (Filtered)", x = NULL)
+  
+  pa2 <- ggplot(plot_df_after, aes(x = all_cells, y = nCount_RNA, fill = all_cells)) +
+    geom_violin(scale = "width", adjust = 1, trim = TRUE) +
+    theme_classic() + NoLegend() + labs(title = "nCount_RNA (Filtered)", x = NULL)
+  
+  pa3 <- ggplot(plot_df_after, aes(x = all_cells, y = percent.mt, fill = all_cells)) +
+    geom_violin(scale = "width", adjust = 1, trim = TRUE) +
+    theme_classic() + NoLegend() + labs(title = "percent.mt (Filtered)", x = NULL)
+  
+  return(pa1 + pa2 + pa3 + plot_layout(ncol = 3))
+})
+
+# Display the result
+print(p_after)
+
 ggsave(file.path(OUTPUT_DIR, "01b_qc_violin_after_filtering.png"),
        plot = p_after, width = 10, height = 6, dpi = DPI_SETTING)
 
@@ -476,21 +549,26 @@ for (i in seq_along(data_list)) {
   sweep.stats    <- summarizeSweep(sweep.res.list, GT = FALSE)
   bcmvn          <- find.pK(sweep.stats)
   bcmvn$pK       <- as.numeric(as.character(bcmvn$pK))
-  initial_pk     <- bcmvn$pK[which.max(bcmvn$BCmetric)]
-  final_pk       <- initial_pk
-
-  # --- Constrain pK to biologically sensible range ---
-  # If the global maximum falls outside [DF_PK_RANGE_MIN, DF_PK_RANGE_MAX],
-  # find the best pK within range. If no valid value exists, use the fallback.
-  if (is.na(final_pk) || final_pk < DF_PK_RANGE_MIN || final_pk > DF_PK_RANGE_MAX) {
-    bcmvn_filtered <- bcmvn[bcmvn$pK > DF_PK_RANGE_MIN & bcmvn$pK < DF_PK_RANGE_MAX, ]
-    if (nrow(bcmvn_filtered) > 0 && any(is.finite(bcmvn_filtered$BCmetric))) {
-      final_pk <- bcmvn_filtered$pK[which.max(bcmvn_filtered$BCmetric)]
+  
+  # 1. Identify the global maximum first
+  initial_pk <- bcmvn$pK[which.max(bcmvn$BCmetric)]
+  
+  # 2. Apply the Improved Constraint Logic
+  if (initial_pk < DF_PK_RANGE_MIN || initial_pk > DF_PK_RANGE_MAX) {
+    # Filter to find the best value within your 'Safe Zone'
+    in_range <- bcmvn[bcmvn$pK >= DF_PK_RANGE_MIN & bcmvn$pK <= DF_PK_RANGE_MAX, ]
+    
+    if (nrow(in_range) > 0) {
+      # Pick the highest peak that is biologically plausible
+      final_pk <- in_range$pK[which.max(in_range$BCmetric)]
+      message(paste("   -> Sample", sample_name, ": Global peak (", initial_pk, 
+                    ") out of bounds. Using best in-range peak:", final_pk))
     } else {
       final_pk <- DF_PK_FALLBACK
-      message(paste("    -> [WARNING] No valid pK in range for", sample_name,
-                    "- using fallback pK =", DF_PK_FALLBACK))
+      message(paste("   -> Sample", sample_name, ": No peaks in range. Using fallback:", final_pk))
     }
+  } else {
+    final_pk <- initial_pk
   }
 
   # --- Save pK selection diagnostic plot ---
@@ -567,8 +645,26 @@ rollback_df <- do.call(rbind, lapply(names(rollback_log), function(s) {
 write_xlsx(rollback_df, file.path(OUTPUT_DIR, "doublet_finder_rollback_log.xlsx"))
 message(paste("  Doublet summary saved to: doublet_finder_rollback_log.xlsx"))
 
-# --- Merge per-sample doublet results back to the combined object ---
-all_res       <- do.call(rbind, lapply(results_list, function(df) setNames(df, "Doublet_Status")))
+# Standardize column name inside the list first
+results_list_cleaned <- lapply(results_list, function(x) {
+  colnames(x) <- "Doublet_Status"
+  return(x)
+})
+rm(data_list, seu_tmp) ; gc()
+
+# Combine
+all_res <- do.call(rbind, results_list_cleaned)
+
+# 1. Clean the rownames of all_res to remove the 'SampleName.' prefix
+# This regex removes everything up to and including the first dot
+rownames(all_res) <- gsub("^.*?\\.", "", rownames(all_res))
+
+# 2. Double-check a few names to see if they match head(colnames(data)) now
+head(rownames(all_res))
+head(colnames(data))
+
+# Use AddMetaData instead of direct bracket assignment
+#data <- AddMetaData(data, metadata = all_res)
 data$Doublet_Status <- all_res[rownames(data@meta.data), "Doublet_Status"]
 
 # --- Diagnostic UMAP of doublets BEFORE removal ---
@@ -581,9 +677,10 @@ data <- NormalizeData(data, verbose = FALSE) %>%
           reduction.name = "umap_temp_doublets", verbose = FALSE)
 
 p_doublets <- DimPlot(data, reduction = "umap_temp_doublets",
-                      group.by = "Doublet_Status",
-                      cols = c("Singlet" = "grey80", "Doublet" = "red")) +
+                      group.by = "Doublet_Status" #, cols = c("Singlet" = "grey80", "Doublet" = "red")
+                      ) +
   ggtitle("Doublet Visualization (Before Removal)")
+p_doublets
 ggsave(file.path(OUTPUT_DIR, "01c_DIAGNOSTIC_doublet_visualization.png"),
        plot = p_doublets, width = 8, height = 7, dpi = DPI_SETTING)
 
@@ -597,12 +694,18 @@ message(paste("  Total cells BEFORE doublet filtering:", ncol(data)))
 data <- subset(data, subset = Doublet_Status != "Doublet" | is.na(Doublet_Status))
 message(paste("  Total cells AFTER doublet filtering:", ncol(data)))
 
+output_rds <- file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_merged_qc_dblt_rm.rds"))
+saveRDS(data, output_rds, compress = T)
+
 # =============================================================================
 # --- STEP 2.5: Ambient RNA Correction (DecontX) ------------------------------
 # =============================================================================
 # DecontX models ambient RNA contamination per cell and produces a
 # decontaminated count matrix. The corrected matrix replaces the raw counts,
 # and QC metrics are recalculated and re-filtered.
+output_rds <- file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_merged_qc_dblt_rm.rds"))
+data<- readRDS(output_rds)
+
 if (RUN_DECONTX) {
   message("\n=== STEP 2.5: Ambient RNA Correction (DecontX) ===")
   counts_sparse    <- GetAssayData(object = data, layer = "counts")
@@ -626,6 +729,89 @@ if (RUN_DECONTX) {
                           percent.mt   <= POST_MAX_MT)
   message(paste("  Cells remaining after DecontX re-filtering:", ncol(data)))
 }
+rm(decontx_results, counts_sparse); gc()
+
+
+# =============================================================================
+# --- STEP 2.6: Normalization, Dimensionality Reduction & Integration (Seurat v5 Method) ---
+# =============================================================================
+# This modern workflow uses the IntegrateLayers function with HarmonyIntegration.
+# 1. The RNA assay is split into temporary layers, one for each sample.
+# 2. Normalization, HVG finding, Scaling, and PCA are run on each layer independently.
+# 3. An 'unintegrated' UMAP is created for diagnostics (Track A).
+# 4. IntegrateLayers with HarmonyIntegration is called to create a new, corrected 'harmony' reduction.
+# 5. A 'harmony' UMAP and clustering are created from the corrected reduction (Track B).
+message("\n=== STEP 2.6: Normalization, Dimensionality Reduction, and Integration (Seurat v5 Method) ===")
+# --- Split the object into layers by SampleID for integration ---
+data[["RNA"]] <- split(data[["RNA"]], f = data$SampleID)
+message("  -> RNA assay split into layers by SampleID.")
+
+# --- Normalize, find HVGs, scale, and run PCA on each layer ---
+# These functions will automatically iterate over the new layers.
+data <- NormalizeData(data, verbose = FALSE)
+data <- FindVariableFeatures(data, nfeatures = N_VARIABLE_FEATURES, verbose = FALSE)
+data <- ScaleData(data, verbose = FALSE)
+data <- RunPCA(data, npcs = N_PCS_TO_USE, verbose = FALSE)
+message("  -> Per-layer normalization, scaling, and PCA complete.")
+gc()
+
+# --- Track A: Standard PCA (unintegrated) for diagnostics ---
+message("  -> Generating unintegrated UMAP (Track A)...")
+data <- FindNeighbors(data, dims = 1:N_PCS_TO_USE, reduction = "pca",
+                      graph.name = "pca_nn", verbose = FALSE, k.param = UMAP_N_NEIGHBORS)
+data <- FindClusters(data, resolution = CLUSTER_RESOLUTION,
+                     graph.name = "pca_nn", cluster.name = "clusters_none",
+                     verbose = FALSE)
+data <- RunUMAP(data, dims = 1:N_PCS_TO_USE, reduction = "pca",
+                n.neighbors = UMAP_N_NEIGHBORS, min.dist = UMAP_MIN_DIST,
+                reduction.name = "umap_none", verbose = FALSE, n.epochs = 500)
+gc()
+
+# --- Track B: Harmony integration using the official Seurat v5 wrapper ---
+message("  -> Running Harmony integration via IntegrateLayers (Track B)...")
+library(SeuratWrappers)
+data <- IntegrateLayers(
+  object = data,
+  method = HarmonyIntegration,
+  orig.reduction = "pca",
+  new.reduction = "harmony",
+  group.by = "SampleID", # Explicitly specify the batch variable
+  verbose = TRUE
+)
+
+# --- Find Neighbors, Clusters, and UMAP on the new 'harmony' reduction ---
+data <- FindNeighbors(data, dims = 1:N_PCS_TO_USE, reduction = "harmony",
+                      graph.name = "harmony_nn", verbose = FALSE,  k.param = UMAP_N_NEIGHBORS)
+data <- FindClusters(data, resolution = CLUSTER_RESOLUTION,
+                     graph.name = "harmony_nn", cluster.name = "clusters_harmony",
+                     verbose = FALSE)
+data <- RunUMAP(data, dims = 1:N_PCS_TO_USE, reduction = "harmony",
+                n.neighbors = UMAP_N_NEIGHBORS, min.dist = UMAP_MIN_DIST,
+                reduction.name = "umap_harmony", verbose = FALSE, n.epochs = 500)
+gc()
+
+# --- Your original diagnostic plot code will now work perfectly ---
+p1 <- DimPlot(data, reduction = "umap_none",    group.by = "SampleID") +
+  ggtitle("Unintegrated PCA")
+p2 <- DimPlot(data, reduction = "umap_harmony", group.by = "SampleID") +
+  ggtitle("Harmony Integrated")
+p1+p2
+ggsave(file.path(OUTPUT_DIR, "02_DIAGNOSTIC_UMAP_Harmony_vs_NoHarmony.png"),
+       plot = p1 + p2, width = 16, height = 7, dpi = DPI_SETTING)
+
+p3 <- DimPlot(data, reduction = "umap_none",    group.by = "clusters_none",
+              label = TRUE) + ggtitle("Clusters: Unintegrated PCA") + NoLegend()
+p4 <- DimPlot(data, reduction = "umap_harmony", group.by = "clusters_harmony",
+              label = TRUE) + ggtitle("Clusters: Harmony") + NoLegend()
+p3+p4
+ggsave(file.path(OUTPUT_DIR, "03_DIAGNOSTIC_UMAP_Cluster_Comparison.png"),
+       plot = p3 + p4, width = 16, height = 7, dpi = DPI_SETTING)
+message("  Saved Harmony vs. PCA diagnostic UMAP plots.")
+
+
+
+
+
 
 # =============================================================================
 # --- STEP 2.6: Normalization, Dimensionality Reduction & Integration --------
@@ -644,32 +830,36 @@ data <- NormalizeData(data, verbose = FALSE) %>%
 
 # --- Track A: Standard PCA (no batch correction) ---
 data <- FindNeighbors(data, dims = 1:N_PCS_TO_USE, reduction = "pca",
-                      graph.name = "pca_nn", verbose = FALSE)
+                      graph.name = "pca_nn", verbose = FALSE, k.param = UMAP_N_NEIGHBORS)
 data <- FindClusters(data, resolution = CLUSTER_RESOLUTION,
                      graph.name = "pca_nn", cluster.name = "clusters_none",
                      verbose = FALSE)
 data <- RunUMAP(data, dims = 1:N_PCS_TO_USE, reduction = "pca",
                 n.neighbors = UMAP_N_NEIGHBORS, min.dist = UMAP_MIN_DIST,
-                reduction.name = "umap_none", verbose = FALSE)
+                reduction.name = "umap_none", verbose = FALSE, n.epochs = 500)
+gc()
 
 # --- Track B: Harmony integration (batch correction by SampleID) ---
 data <- RunHarmony(data, group.by.vars = "SampleID",
                    reduction = "pca", reduction.save = "harmony",
-                   verbose = FALSE)
+                   verbose = TRUE, max_iter = 50)
 data <- FindNeighbors(data, dims = 1:N_PCS_TO_USE, reduction = "harmony",
-                      graph.name = "harmony_nn", verbose = FALSE)
+                      graph.name = "harmony_nn", verbose = FALSE,  k.param = UMAP_N_NEIGHBORS)
 data <- FindClusters(data, resolution = CLUSTER_RESOLUTION,
                      graph.name = "harmony_nn", cluster.name = "clusters_harmony",
                      verbose = FALSE)
 data <- RunUMAP(data, dims = 1:N_PCS_TO_USE, reduction = "harmony",
                 n.neighbors = UMAP_N_NEIGHBORS, min.dist = UMAP_MIN_DIST,
-                reduction.name = "umap_harmony", verbose = FALSE)
+                reduction.name = "umap_harmony", verbose = FALSE, n.epochs = 500)
+
+gc()
 
 # --- Diagnostic plots: compare Harmony vs. no Harmony ---
 p1 <- DimPlot(data, reduction = "umap_none",    group.by = "SampleID") +
   ggtitle("Standard PCA (No Harmony)")
 p2 <- DimPlot(data, reduction = "umap_harmony", group.by = "SampleID") +
   ggtitle("Harmony Batch-Corrected")
+p1+p2
 ggsave(file.path(OUTPUT_DIR, "02_DIAGNOSTIC_UMAP_Harmony_vs_NoHarmony.png"),
        plot = p1 + p2, width = 16, height = 7, dpi = DPI_SETTING)
 
@@ -677,6 +867,7 @@ p3 <- DimPlot(data, reduction = "umap_none",    group.by = "clusters_none",
               label = TRUE) + ggtitle("Clusters: Standard PCA") + NoLegend()
 p4 <- DimPlot(data, reduction = "umap_harmony", group.by = "clusters_harmony",
               label = TRUE) + ggtitle("Clusters: Harmony") + NoLegend()
+p3+p4
 ggsave(file.path(OUTPUT_DIR, "03_DIAGNOSTIC_UMAP_Cluster_Comparison.png"),
        plot = p3 + p4, width = 16, height = 7, dpi = DPI_SETTING)
 
@@ -687,7 +878,7 @@ message("  Saved Harmony vs. PCA diagnostic UMAP plots.")
 # =============================================================================
 message("\n=== STEP 2.7: Saving Processed Object for Annotation ===")
 output_rds <- file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_processed_for_annotation.rds"))
-saveRDS(data, output_rds)
+saveRDS(data, output_rds, compress=T)
 message(paste0(
   "\n",
   "=== PROCESSING COMPLETE ===\n",
@@ -696,3 +887,7 @@ message(paste0(
   "  Total genes:  ", nrow(data), "\n",
   "\nNext step: Open and run '02_annotate_data.R' to annotate the data.\n"
 ))
+
+# Load if needed
+output_rds <- file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_processed_for_annotation.rds"))
+data <- readRDS(output_rds)

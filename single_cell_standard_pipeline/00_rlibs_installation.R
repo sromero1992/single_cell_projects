@@ -32,36 +32,37 @@ if (!requireNamespace("remotes", quietly = TRUE)) {
 }
 
 # 1. SET THE PERSONAL LIBRARY PATH
-# This is a best practice to keep project dependencies isolated.
-personal_lib <- file.path(Sys.getenv("USERPROFILE"), "Documents", "R_libs_scRNA")
+personal_lib <- if (.Platform$OS.type == "windows") {
+  file.path(Sys.getenv("USERPROFILE"), "Documents", "R_libs_scRNA")
+} else {
+  file.path(Sys.getenv("HOME"), "R_libs_scRNA")
+}
+
 if (!dir.exists(personal_lib)) {
   dir.create(personal_lib, recursive = TRUE)
 }
-.libPaths(c(personal_lib, .libPaths())) # Prepend our new path to make it the default
+
+# CRITICAL: Force R to use the personal library FIRST and check it for dependencies.
+.libPaths(c(personal_lib, .libPaths()))
+cat("Using Library Paths:\n")
+print(.libPaths())
 
 # 2. DEFINE PACKAGE LISTS
-# --- CRAN Packages ---
-# CORRECTED: 'harmony' is now on CRAN and has been moved here.
 cran_pkgs <- c(
   "Seurat", "devtools", "dplyr", "ggplot2", "Matrix", "ggpubr", "tidyr", "patchwork",
   "stringr", "tibble", "cowplot", "openxlsx","writexl", "readxl", "parallelly", "hdf5r",
-  "harmony",  # Added here from CRAN
-  "enrichR"   # Enrichr ORA client (connects to Enrichr web API)
+  "enrichR", "remotes", "R.utils"
 )
 
-# --- Bioconductor Packages ---
 bioc_pkgs <- c(
   "BiocManager", "ComplexHeatmap", "Biobase", "BiocNeighbors", "BiocGenerics",
   "celda", "dittoSeq", "AUCell", "Gviz", "GenomicRanges", "rtracklayer",
   "BiocSingular", "SingleCellExperiment", "SummarizedExperiment"
 )
 
-# --- GitHub Packages ---
-# Using a NAMED vector is a clean way to map package name to repo path.
-# Format: "package_name" = "github_user/repo"
-# CORRECTED: 'harmony' has been removed from this list.
 github_pkgs <- c(
   "DoubletFinder" = "chris-mcginnis-ucsf/DoubletFinder",
+  "seuratWrappers" = "satijalab/seurat-wrappers",
   "presto" = "immunogenomics/presto",
   "yaGST" = "miccec/yaGST",
   "ggtree" = "YuLab-SMU/ggtree",
@@ -70,78 +71,84 @@ github_pkgs <- c(
   "SplineDV" = "Xenon8778/SplineDV",
   "CellChat" = "jinworks/CellChat",
   "scSGS" = "Xenon8778/scSGS",
-  "leidenbase" = "cole-trapnell-lab/leidenbase", # Monocle3 dependency
-  "monocle3" = "cole-trapnell-lab/monocle3",
+  "leidenbase" = "cole-trapnell-lab/leidenbase",
+  "monocle3" = "cole-trapnell-lab/monocle3"
 )
 
 # 3. AUTOMATED INSTALLATION LOGIC
-cat("--- Starting Automated Installation ---\n")
-cat("Packages will be installed in:", personal_lib, "\n\n")
+cat("\n--- Starting Automated Installation ---\n")
 
-# Check which packages are already installed in the target library
-installed_in_lib <- installed.packages(lib.loc = personal_lib)[, "Package"]
+# Logic: Check only the personal library to avoid "Ghost" version conflicts from system folders
+get_installed <- function(lib) {
+  if (!dir.exists(lib)) return(character(0))
+  installed.packages(lib.loc = lib)[, "Package"]
+}
 
 # --- Install CRAN Packages ---
-cat("--- Checking CRAN packages ---\n")
-missing_cran <- cran_pkgs[!(cran_pkgs %in% installed_in_lib)]
+cat("\n--- Checking CRAN packages ---\n")
+installed_custom <- get_installed(personal_lib)
+missing_cran <- cran_pkgs[!(cran_pkgs %in% installed_custom)]
+
 if (length(missing_cran) > 0) {
-  cat("Installing from CRAN:", paste(missing_cran, collapse=", "), "\n")
+  cat("Installing missing CRAN packages to:", personal_lib, "\n")
   install.packages(missing_cran, lib = personal_lib)
 } else {
-  cat("All required CRAN packages are already installed.\n")
+  cat("All CRAN packages present in personal library.\n")
 }
 
 # --- Install Bioconductor Packages ---
 cat("\n--- Checking Bioconductor packages ---\n")
-if (!requireNamespace("BiocManager", quietly = TRUE)) {
+if (!requireNamespace("BiocManager", quietly = TRUE, lib.loc = personal_lib)) {
   install.packages("BiocManager", lib = personal_lib)
 }
-# Make sure we check against all installed packages, not just those in our personal lib
-all_installed <- installed.packages()[,"Package"]
-missing_bioc <- bioc_pkgs[!(bioc_pkgs %in% all_installed)]
+
+# Load BiocManager explicitly from the custom path to avoid "not found" errors
+library(BiocManager, lib.loc = personal_lib)
+
+missing_bioc <- bioc_pkgs[!(bioc_pkgs %in% installed_custom)]
 if (length(missing_bioc) > 0) {
-  cat("Installing from Bioconductor:", paste(missing_bioc, collapse=", "), "\n")
+  cat("Installing Bioconductor packages...\n")
   BiocManager::install(missing_bioc, lib = personal_lib, update = FALSE, ask = FALSE)
 } else {
-  cat("All required Bioconductor packages are already installed.\n")
+  cat("All Bioconductor packages present in personal library.\n")
 }
 
 # --- Install GitHub Packages ---
 cat("\n--- Checking GitHub packages ---\n")
+if (!requireNamespace("remotes", quietly = TRUE, lib.loc = personal_lib)) {
+  install.packages("remotes", lib = personal_lib)
+}
+library(remotes, lib.loc = personal_lib)
+
 gh_package_names <- names(github_pkgs)
-missing_gh <- gh_package_names[!(gh_package_names %in% all_installed)]
+missing_gh <- gh_package_names[!(gh_package_names %in% installed_custom)]
 
 if (length(missing_gh) > 0) {
-  repos_to_install <- github_pkgs[missing_gh]
-  cat("Installing from GitHub:", paste(names(repos_to_install), collapse=", "), "\n")
-  for (pkg_name in names(repos_to_install)) {
-    repo <- repos_to_install[pkg_name]
+  for (pkg_name in missing_gh) {
+    repo <- github_pkgs[pkg_name]
     cat("Installing", pkg_name, "from", repo, "...\n")
-    if (pkg_name == "cicero") {
-      remotes::install_github(repo, ref = "monocle3", lib = personal_lib, upgrade = "never", force = TRUE)
-    } else {
-      remotes::install_github(repo, lib = personal_lib, upgrade = "never")
-    }
+    remotes::install_github(repo, lib = personal_lib, upgrade = "never", force = TRUE)
   }
 } else {
-  cat("All required GitHub packages are already installed.\n")
+  cat("All GitHub packages present in personal library.\n")
 }
 
 # 4. FINAL VERIFICATION REPORT
 cat("\n--- FINAL STATUS REPORT ---\n")
 all_pkgs_to_check <- unique(c(cran_pkgs, bioc_pkgs, names(github_pkgs)))
 
+# Check if they can actually be loaded (the ultimate test)
 final_check <- data.frame(
   Package = all_pkgs_to_check,
-  Installed = sapply(all_pkgs_to_check, function(p) requireNamespace(p, quietly = TRUE))
+  Status = sapply(all_pkgs_to_check, function(p) {
+    requireNamespace(p, quietly = TRUE)
+  })
 )
-rownames(final_check) <- NULL
+
 print(final_check)
 
-failed <- final_check$Package[!final_check$Installed]
-if (length(failed) > 0) {
-  cat("\n[!] The following packages failed to install or load:", paste(failed, collapse=", "), "\n")
-  cat("[!] Please check the error messages above for details.\n")
+if (all(final_check$Status)) {
+  cat("\n[+] Success! All packages are installed and version-matched.\n")
 } else {
-  cat("\n[+] Success! Your R environment for single-cell analysis is ready.\n")
+  cat("\n[!] Some packages failed. Check permissions or missing system dependencies (like hdf5).\n")
 }
