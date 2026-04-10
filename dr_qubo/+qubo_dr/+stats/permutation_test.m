@@ -81,12 +81,12 @@ function results = permutation_test(X, g, batch_id, selected_idx, Q1, opts)
         Zb_p  = normr(Xb_p);
         Sa_p  = Za_p * Za_p';
         Sb_p  = Zb_p * Zb_p';
-        Xdiff_p = Sb_p - Sa_p;
+        dS_p = Sb_p - Sa_p;
 
         % Score real solution z* on permuted differential matrix
-        % (only Xdiff component — MNN/Vdiff are omitted for speed;
+        % (only dS component — MNN/Vdiff are omitted for speed;
         %  the differential similarity matrix is the dominant signal term)
-        E_null(p) = bz' * Xdiff_p * bz;
+        E_null(p) = bz' * dS_p * bz;
     end
 
     % --- Statistics ---

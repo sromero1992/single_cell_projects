@@ -159,7 +159,7 @@ def compute_ucell_score(X, g, geneset, n_max_rank=1500, chunk_size=500):
     return scores
 
 
-def compute_differential_activity(X, g, batch_id, geneset, condition_A='KO', condition_B='WT',
+def compute_differential_activity(X, g, batch_id, geneset, condition_A='test', condition_B='WT',
                                   n_max_rank=1500, return_stats=True):
     """
     Compute differential UCell pathway activity between two conditions.
@@ -178,7 +178,7 @@ def compute_differential_activity(X, g, batch_id, geneset, condition_A='KO', con
         Condition labels for each cell (strings).
     geneset : array-like or set
         Gene names in the pathway (strings). Case-insensitive matching.
-    condition_A : str, default='KO'
+    condition_A : str, default='test'
         Condition A label (substring search in batch_id).
     condition_B : str, default='WT'
         Condition B label (substring search in batch_id).
@@ -290,7 +290,7 @@ def compute_differential_activity(X, g, batch_id, geneset, condition_A='KO', con
     }
 
 
-def plot_ucell_violin(scores_A, scores_B, condition_A='KO', condition_B='WT',
+def plot_ucell_violin(scores_A, scores_B, condition_A='test', condition_B='WT',
                       title='Pathway Activity (UCell)', ax=None):
     """
     Create a violin plot comparing UCell score distributions between conditions.
@@ -301,7 +301,7 @@ def plot_ucell_violin(scores_A, scores_B, condition_A='KO', condition_B='WT',
         UCell scores for condition A cells.
     scores_B : array-like, shape (N_B,)
         UCell scores for condition B cells.
-    condition_A : str, default='KO'
+    condition_A : str, default='test'
         Label for condition A.
     condition_B : str, default='WT'
         Label for condition B.

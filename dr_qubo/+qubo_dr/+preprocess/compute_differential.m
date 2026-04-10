@@ -1,42 +1,46 @@
-function [Xdiff, Vdiff] = compute_differential(Xwt2norm, Xko2norm, Xwt_norm, Xko_norm, cs_wt, cs_ko)
+function [dS, Vdiff] = compute_differential(Xref2norm, Xtest2norm, Xref_norm, Xtest_norm, cs_ref, cs_test)
 % COMPUTE_DIFFERENTIAL Compute differential co-expression and cell state vectors.
 %
-%   [Xdiff, Vdiff] = COMPUTE_DIFFERENTIAL(Xwt2norm, Xko2norm, Xwt_norm, Xko_norm, cs_wt, cs_ko)
+%   [dS, Vdiff] = COMPUTE_DIFFERENTIAL(Xref2norm, Xtest2norm, Xref_norm, Xtest_norm, cs_ref, cs_test)
 %
-% Computes the differential gene similarity matrix (WT - KO) and the
+% Computes the differential gene similarity matrix (reference − test) and the
 % differential cell-state-weighted gene expression vector.
 %
 % INPUT:
-%   Xwt2norm    - WT Gram matrix (genes × genes)
-%   Xko2norm    - KO Gram matrix (genes × genes)
-%   Xwt_norm    - WT normalized expression (genes × wt_cells)
-%   Xko_norm    - KO normalized expression (genes × ko_cells)
-%   cs_wt       - WT cell state vector (length = wt_cells), can be zeros
-%   cs_ko       - KO cell state vector (length = ko_cells), can be zeros
+%   Xref2norm   - Reference Gram matrix (genes × genes)
+%   Xtest2norm  - Test Gram matrix (genes × genes)
+%   Xref_norm   - Reference normalized expression (genes × ref_cells)
+%   Xtest_norm  - Test normalized expression (genes × test_cells)
+%   cs_ref      - Reference cell state vector (length = ref_cells), can be zeros
+%   cs_test     - Test cell state vector (length = test_cells), can be zeros
 %
 % OUTPUT:
-%   Xdiff       - Differential matrix (genes × genes), WT - KO
+%   dS       - Differential matrix (genes × genes), reference − test.
+%                 Positive values: reference co-expression gain.
+%                 Negative values: test/disease co-expression gain.
 %   Vdiff       - Differential cell-state vector (genes × 1)
 %
-% NOTE: Negative values in Xdiff indicate increased co-expression in KO.
+% NOTE: When plotting, negate dS (i.e. plot −dS) so that positive
+%       values (red) represent test/disease co-expression gain — the
+%       biologically natural direction.
 %
 % AUTHOR: Selim Romero, Texas A&M University
 
-    % Compute differential matrix
-    Xdiff = Xwt2norm - Xko2norm;
+    % Compute differential matrix: reference − test
+    dS = Xref2norm - Xtest2norm;
 
     % Normalize cell state vectors
-    cs_wt = cs_wt(:);
-    cs_ko = cs_ko(:);
+    cs_ref  = cs_ref(:);
+    cs_test = cs_test(:);
 
-    cs_wt_norm = cs_wt / (norm(cs_wt) + 1e-10);
-    cs_ko_norm = cs_ko / (norm(cs_ko) + 1e-10);
+    cs_ref_norm  = cs_ref  / (norm(cs_ref)  + 1e-10);
+    cs_test_norm = cs_test / (norm(cs_test) + 1e-10);
 
     % Compute differential cell-state vector
     % Project normalized expression onto normalized cell state
-    v_wt = Xwt_norm * cs_wt_norm;
-    v_ko = Xko_norm * cs_ko_norm;
+    v_ref  = Xref_norm  * cs_ref_norm;
+    v_test = Xtest_norm * cs_test_norm;
 
-    Vdiff = v_wt - v_ko;
+    Vdiff = v_ref - v_test;
 
 end

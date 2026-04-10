@@ -105,14 +105,14 @@ function results = bootstrap_stability(X, g, batch_id, genelist, K, opts)
             Zb_b   = normr(Xb_b);
             Sa_b   = Za_b * Za_b';
             Sb_b   = Zb_b * Zb_b';
-            Xdiff_b = Sb_b - Sa_b;
+            dS_b = Sb_b - Sa_b;
 
             % --- MNN adjacency matrices ---
             Amnn_A = adjX_mat_construct_sparse_cust_idx(Xa_b, opts.method, opts.n_neighbors);
             Amnn_B = adjX_mat_construct_sparse_cust_idx(Xb_b, opts.method, opts.n_neighbors);
 
             % --- QUBO assembly ---
-            Q1_b = Xdiff_b - full(Amnn_A + Amnn_B) + Xnet;
+            Q1_b = dS_b - full(Amnn_A + Amnn_B) + Xnet;
             P    = 10 * max(abs(Q1_b(:)));
 
             Q_b = Q1_b + P * (ones(G, G) - eye(G));

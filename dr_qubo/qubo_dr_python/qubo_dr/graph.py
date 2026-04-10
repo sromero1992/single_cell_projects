@@ -46,28 +46,34 @@ def build_mnn_adjacency(X, method='mnn', K=15, n_svd=50):
     """
     n_genes, n_cells = X.shape
 
-    # Apply SVD reduction if needed
-    if n_cells > n_svd:
-        svd = TruncatedSVD(n_components=n_svd, random_state=42)
-        X_reduced = svd.fit_transform(X.T).T  # Transpose to get gene features
+    # Clamp SVD components and K to valid ranges
+    n_svd_safe = min(n_svd, n_genes - 1, n_cells - 1)
+    K_safe     = min(K, n_genes - 1)
+
+    # SVD of X (genes × cells) → gene embedding of shape (n_genes, n_svd)
+    # Each gene becomes a point in the n_svd-dimensional cell-variation space.
+    # Proximity between genes = similar expression variation across cells = co-expression.
+    if n_svd_safe > 0 and n_cells > n_svd_safe:
+        svd = TruncatedSVD(n_components=n_svd_safe, random_state=42)
+        X_reduced = svd.fit_transform(X)   # shape: (n_genes, n_svd_safe)
     else:
-        X_reduced = X.copy()
+        X_reduced = X.copy()               # shape: (n_genes, n_cells)
 
-    # Build KNN graph
-    nbrs = NearestNeighbors(n_neighbors=K + 1, metric='euclidean', n_jobs=-1)
-    nbrs.fit(X_reduced.T)  # Fit on cells; find neighbors in gene space
-    distances, indices = nbrs.kneighbors(X_reduced.T)
+    # KNN in gene space: each gene is a point, find its K nearest gene-neighbours
+    nbrs = NearestNeighbors(n_neighbors=K_safe + 1, metric='euclidean', n_jobs=-1)
+    nbrs.fit(X_reduced)                    # fit on genes, NOT on cells
+    distances, indices = nbrs.kneighbors(X_reduced)   # indices: (n_genes, K_safe+1)
 
-    # Build adjacency matrix from neighbor lists
+    # Build adjacency matrix from neighbour lists
     row_indices = []
     col_indices = []
 
     for i in range(n_genes):
-        # Add edges from gene i to its K neighbors
-        neighbors = indices[i, 1:]  # Skip self (first neighbor)
+        # Skip self (index 0 is always the gene itself)
+        neighbors = indices[i, 1:]
         for neighbor in neighbors:
             row_indices.append(i)
-            col_indices.append(neighbor)
+            col_indices.append(int(neighbor))
 
     # Create sparse matrix
     data = np.ones(len(row_indices))

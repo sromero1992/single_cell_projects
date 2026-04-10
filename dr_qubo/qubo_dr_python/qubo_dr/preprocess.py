@@ -119,70 +119,82 @@ def compute_gene_similarity(X):
     return Xnorm2, Xnorm
 
 
-def compute_differential(Xwt2norm, Xko2norm, Xwt_norm=None, Xko_norm=None,
-                        cs_wt=None, cs_ko=None):
+import numpy as np
+import warnings
+
+def compute_differential(Xref2norm, Xtest2norm, Xref_norm=None, Xtest_norm=None,
+                         cs_ref=None, cs_test=None):
     """
     Compute differential co-expression matrix and optional cell state vector.
 
-    Xdiff = Xwt2norm - Xko2norm, with diagonal set to zero.
+    dS = Xref2norm - Xtest2norm, with diagonal set to zero.
     Optionally computes Vdiff from cell state projections if provided.
 
     Parameters
     ----------
-    Xwt2norm : np.ndarray, shape (genes, genes)
-        WT Gram matrix (cosine similarity).
-    Xko2norm : np.ndarray, shape (genes, genes)
-        KO Gram matrix (cosine similarity).
-    Xwt_norm : np.ndarray, shape (genes, cells_wt), optional
-        WT normalized expression matrix (needed if cs_wt is provided).
-    Xko_norm : np.ndarray, shape (genes, cells_ko), optional
-        KO normalized expression matrix (needed if cs_ko is provided).
-    cs_wt : np.ndarray, shape (cells_wt,), optional
-        WT cell state vector (e.g., from trajectory or differentiation stage).
-        If provided, Vdiff is computed from projection onto gene space.
-    cs_ko : np.ndarray, shape (cells_ko,), optional
-        KO cell state vector.
+    Xref2norm : np.ndarray, shape (genes, genes)
+        Reference (WT) Gram matrix (cosine similarity).
+    Xtest2norm : np.ndarray, shape (genes, genes)
+        Test (KO) Gram matrix (cosine similarity).
+    Xref_norm : np.ndarray, shape (genes, cells_ref), optional
+        Reference normalized expression matrix.
+    Xtest_norm : np.ndarray, shape (genes, cells_test), optional
+        Test normalized expression matrix.
+    cs_ref : np.ndarray, shape (cells_ref,), optional
+        Reference cell state vector.
+    cs_test : np.ndarray, shape (cells_test,), optional
+        Test cell state vector.
 
     Returns
     -------
-    Xdiff : np.ndarray, shape (genes, genes)
-        Differential co-expression matrix. Diagonal set to 0.
-        Positive values: WT co-expression gain.
-        Negative values: KO co-expression gain.
+    dS : np.ndarray, shape (genes, genes)
+        Differential co-expression matrix.
+        Positive values: Reference co-expression gain.
+        Negative values: Test co-expression gain.
     Vdiff : np.ndarray, shape (genes,)
-        Differential cell state projection vector. All zeros if cell states not provided.
-
-    Notes
-    -----
-    If cell states are provided:
-    - They are L2-normalized per condition.
-    - Projected onto normalized gene space: proj_wt = Xwt_norm @ cs_wt / ||cs_wt||
-    - Vdiff = proj_wt - proj_ko
+        Differential cell state projection vector.
     """
-    Xdiff = Xwt2norm - Xko2norm
-    np.fill_diagonal(Xdiff, 0)
+    # dS represents Reference - Test
+    dS = Xref2norm - Xtest2norm
+
+    # ── Diagonal sanity check ─────────────────────────────────────────────
+    diag_abs  = np.abs(np.diag(dS))
+    mean_diag = diag_abs.mean()
+    n_nonzero = int((diag_abs > 0.1).sum())
+
+    if n_nonzero > 0:
+        print(f"  Diagonal check: {n_nonzero}/{len(diag_abs)} genes have "
+              f"|dS diagonal| > 0.1  (mean |diag| = {mean_diag:.3f}). "
+              f"Likely genes with near-zero expression in one condition.")
+
+    if mean_diag > 0.15:
+        warnings.warn(
+            f"compute_differential: mean |diag(dS)| = {mean_diag:.3f}. "
+            f"This may indicate systematic normalization issues between conditions.",
+            RuntimeWarning, stacklevel=2,
+        )
 
     # Compute Vdiff from cell states if provided
-    n_genes = Xwt2norm.shape[0]
+    n_genes = Xref2norm.shape[0]
     Vdiff = np.zeros(n_genes)
 
-    if cs_wt is not None and cs_ko is not None:
-        cs_wt = np.asarray(cs_wt)
-        cs_ko = np.asarray(cs_ko)
+    if cs_ref is not None and cs_test is not None:
+        # Convert to arrays and normalize
+        cs_ref = np.asarray(cs_ref)
+        cs_test = np.asarray(cs_test)
 
-        # Normalize cell state vectors
-        norm_wt = np.linalg.norm(cs_wt)
-        norm_ko = np.linalg.norm(cs_ko)
+        norm_ref = np.linalg.norm(cs_ref)
+        norm_test = np.linalg.norm(cs_test)
 
-        if norm_wt > 0:
-            cs_wt = cs_wt / norm_wt
-        if norm_ko > 0:
-            cs_ko = cs_ko / norm_ko
+        if norm_ref > 0:
+            cs_ref = cs_ref / norm_ref
+        if norm_test > 0:
+            cs_test = cs_test / norm_test
 
         # Project onto gene space
-        if Xwt_norm is not None and Xko_norm is not None:
-            proj_wt = Xwt_norm @ cs_wt
-            proj_ko = Xko_norm @ cs_ko
-            Vdiff = proj_wt - proj_ko
+        if Xref_norm is not None and Xtest_norm is not None:
+            proj_ref = Xref_norm @ cs_ref
+            proj_test = Xtest_norm @ cs_test
+            Vdiff = proj_ref - proj_test
 
-    return Xdiff, Vdiff
+    return dS, Vdiff
