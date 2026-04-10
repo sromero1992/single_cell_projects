@@ -34,6 +34,13 @@ try:
 except ImportError:
     HAS_DIMOD = False
 
+# SteepestDescentSolver lives in dwave.samplers (classical, no QPU required)
+try:
+    from dwave.samplers import SteepestDescentSolver
+    HAS_DWAVE_SAMPLERS = True
+except ImportError:
+    HAS_DWAVE_SAMPLERS = False
+
 
 def build_pathway_network_matrix(g, pathway_genes):
     """
@@ -109,15 +116,17 @@ def compute_spectral_penalty(Q1, penalty_scale=2.0):
     return P, sigma_max
 
 
-def assemble_qubo_matrix(Xdiff, Vdiff, Xmnn_A, Xmnn_B, K,
+def assemble_qubo_matrix(dS, Vdiff, A_mnn_test, A_mnn_ref, K,
                          Xnet_target=None, penalty_scale=2.0,
                          auto_penalty=True):
     """
     Assemble the QUBO matrix with cardinality constraint.
 
-    Constructs::
+    Constructs three nested matrices::
 
-        Q1 = Xdiff + diag(Vdiff) - (Xmnn_A + Xmnn_B) [+ Xnet_target]
+        Q0 = dS                                          (pure differential signal)
+        Q1 = Q0 + diag(Vdiff) - (A_mnn_test + A_mnn_ref)         (+ Xnet_target if provided)
+        Q  = Q1 + P * cardinality_constraint                (full penalised QUBO)
 
     then adds the cardinality penalty to enforce subnetwork size K.
 
@@ -129,7 +138,7 @@ def assemble_qubo_matrix(Xdiff, Vdiff, Xmnn_A, Xmnn_B, K,
 
     Parameters
     ----------
-    Xdiff : np.ndarray, shape (G, G)
+    dS : np.ndarray, shape (G, G)
         Differential co-expression matrix (S_B - S_A).
         Negative off-diagonal entries indicate co-expression gain in
         condition A (test).
@@ -141,9 +150,9 @@ def assemble_qubo_matrix(Xdiff, Vdiff, Xmnn_A, Xmnn_B, K,
         continuous per-cell measure: pathway activity (UCell), pseudotime,
         cell potency, differentiation rank, etc.  Pass np.zeros(G) to
         omit this term.
-    Xmnn_A : array-like or sparse, shape (G, G)
+    A_mnn_test : array-like or sparse, shape (G, G)
         MNN adjacency matrix for condition A (test).
-    Xmnn_B : array-like or sparse, shape (G, G)
+    A_mnn_ref : array-like or sparse, shape (G, G)
         MNN adjacency matrix for condition B (reference / control).
     K : int
         Target subnetwork size.
@@ -163,19 +172,30 @@ def assemble_qubo_matrix(Xdiff, Vdiff, Xmnn_A, Xmnn_B, K,
     Returns
     -------
     Q : np.ndarray, shape (G, G)
-        Final QUBO matrix (symmetric).
+        Final QUBO matrix with cardinality penalty (symmetric).
+        This is what the solver minimises.
     Q1 : np.ndarray, shape (G, G)
-        Unpenalised base matrix (useful for scoring and permutation tests).
+        Unpenalised model matrix (dS + MNN + Vdiff [+ Xnet]).
+        Useful for gene scoring, permutation tests, and comparison to Q0.
+    Q0 : np.ndarray, shape (G, G)
+        Pure differential co-expression (= dS, S_B - S_A).
+        Contains only the biological signal — no graph adjacency,
+        no pathway prior, no cardinality penalty.
+        Use this matrix for direct visualisation and as the baseline
+        signal before the other model terms are added.
     P : float
         Penalty coefficient used.
     """
-    if issparse(Xmnn_A):
-        Xmnn_A = Xmnn_A.toarray()
-    if issparse(Xmnn_B):
-        Xmnn_B = Xmnn_B.toarray()
+    if issparse(A_mnn_test):
+        A_mnn_test = A_mnn_test.toarray()
+    if issparse(A_mnn_ref):
+        A_mnn_ref = A_mnn_ref.toarray()
 
-    # --- Base QUBO matrix Q1 ---
-    Q1 = Xdiff + np.diag(Vdiff) - (Xmnn_A + Xmnn_B)
+    # --- Q0: pure biological differential signal ---
+    Q0 = dS.copy()
+
+    # --- Q1: base QUBO matrix (no penalty yet) ---
+    Q1 = dS + np.diag(Vdiff) - (A_mnn_test + A_mnn_ref)
 
     if Xnet_target is not None:
         Q1 = Q1 + Xnet_target
@@ -199,15 +219,12 @@ def assemble_qubo_matrix(Xdiff, Vdiff, Xmnn_A, Xmnn_B, K,
     Q = (Q + Q.T) / 2.0
 
     print(f"QUBO assembled: {n}×{n} | penalty P={P:.4f} | K={K}")
-    return Q, Q1, P
+    return Q, Q1, Q0, P
 
 
-def solve_qubo_simulated_annealing(Q, num_reads=1000, seed=42):
+def solve_qubo_simulated_annealing(Q, num_reads=1000, seed=42, solver='sa'):
     """
     Solve QUBO by minimising E(z) = z^T Q z over z ∈ {0,1}^G.
-
-    Uses D-Wave's neal (simulated annealing) when available, otherwise
-    falls back to a pure NumPy implementation.
 
     Parameters
     ----------
@@ -217,6 +234,20 @@ def solve_qubo_simulated_annealing(Q, num_reads=1000, seed=42):
         Number of annealing runs (default 1000).
     seed : int
         Random seed (default 42).
+    solver : str, {'sa', 'sd', 'fallback'}
+        Solver backend:
+
+        'sa'       — D-Wave neal SimulatedAnnealingSampler (default).
+                     Stochastic, temperature-scheduled.  Best global search.
+                     Requires: dwave-neal.
+        'sd'       — SteepestDescentSolver (classical greedy descent).
+                     Deterministic, very fast.  Fine for small K (≤ 30).
+                     Equivalent to the classical optimizer in other QUBO
+                     pipelines; useful when porting to R or non-D-Wave envs.
+                     Requires: dwave-samplers.
+        'fallback' — Pure NumPy SA.  No D-Wave dependency at all.
+                     Use when neither dwave-neal nor dwave-samplers is
+                     available, or to match R/MATLAB implementations exactly.
 
     Returns
     -------
@@ -228,27 +259,77 @@ def solve_qubo_simulated_annealing(Q, num_reads=1000, seed=42):
         All binary solutions.
     """
     np.random.seed(seed)
-    if HAS_DIMOD:
-        return _solve_dimod(Q, num_reads, seed)
-    return _solve_fallback(Q, num_reads, seed)
+    solver_lower = solver.lower()
+
+    if solver_lower == 'sa':
+        if HAS_DIMOD:
+            return _solve_dimod(Q, num_reads, seed)
+        print("  [solver] dwave-neal not found — falling back to NumPy SA")
+        return _solve_fallback(Q, num_reads, seed)
+
+    elif solver_lower == 'sd':
+        if HAS_DWAVE_SAMPLERS:
+            return _solve_steepest_descent(Q, num_reads, seed)
+        print("  [solver] dwave-samplers not found — falling back to NumPy SA")
+        return _solve_fallback(Q, num_reads, seed)
+
+    elif solver_lower == 'fallback':
+        return _solve_fallback(Q, num_reads, seed)
+
+    else:
+        raise ValueError(
+            f"Unknown solver '{solver}'. Choose 'sa', 'sd', or 'fallback'."
+        )
 
 
 # ------------------------------------------------------------------
 # Internal solvers
 # ------------------------------------------------------------------
 
-def _solve_dimod(Q, num_reads, seed):
+def _qubo_to_dict(Q):
+    """Convert a dense QUBO matrix to the {(i,j): value} dict that dimod samplers expect."""
     n = Q.shape[0]
-    bqm = dimod.BinaryQuadraticModel.from_numpy_matrix(Q, offset=0.0,
-                                                        vartype=dimod.BINARY)
-    sampler = neal.SimulatedAnnealingSampler()
-    response = sampler.sample(bqm, num_reads=num_reads, seed=seed,
-                               beta_range=(0.01, 3.0), num_sweeps=1000)
-    best = response.first.sample
+    return {(i, j): float(Q[i, j])
+            for i in range(n) for j in range(n)
+            if Q[i, j] != 0}
+
+
+def _solve_dimod(Q, num_reads, seed):
+    """Solve via D-Wave neal SimulatedAnnealingSampler using sample_qubo (dict API).
+
+    Uses sample_qubo() with a plain dict — no BinaryQuadraticModel construction,
+    so it's version-agnostic and avoids the deprecated from_numpy_matrix/vartype API.
+    """
+    n = Q.shape[0]
+    qubo = _qubo_to_dict(Q)
+    sampler  = neal.SimulatedAnnealingSampler()
+    response = sampler.sample_qubo(qubo, num_reads=num_reads, seed=seed,
+                                   beta_range=(0.01, 3.0), num_sweeps=1000)
+    best         = response.first.sample
     selected_idx = np.array([best[i] for i in range(n)], dtype=bool)
-    best_energy = response.first.energy
-    all_samples = np.array([[s[i] for i in range(n)]
-                             for s in response.samples()])
+    best_energy  = response.first.energy
+    all_samples  = np.array([[s[i] for i in range(n)] for s in response.samples()])
+    return selected_idx, best_energy, all_samples
+
+
+def _solve_steepest_descent(Q, num_reads, seed):
+    """Solve via SteepestDescentSolver (classical greedy, dwave.samplers).
+
+    Deterministic greedy descent — fast and dependency-light.
+    Equivalent to the classical optimizer used in other QUBO pipelines.
+    Works well for small K (≤ 30) where the landscape is not too rugged.
+    num_reads initializations are run from random starts; the best is returned.
+    """
+    n    = Q.shape[0]
+    qubo = _qubo_to_dict(Q)
+    np.random.seed(seed)
+    sampler  = SteepestDescentSolver()
+    response = sampler.sample_qubo(qubo, num_reads=num_reads,
+                                   initial_states_generator='random')
+    best         = response.first.sample
+    selected_idx = np.array([best[i] for i in range(n)], dtype=bool)
+    best_energy  = response.first.energy
+    all_samples  = np.array([[s[i] for i in range(n)] for s in response.samples()])
     return selected_idx, best_energy, all_samples
 
 
@@ -282,29 +363,119 @@ def _eval(z, Q):
 
 # ------------------------------------------------------------------
 
-def extract_subnetwork(Xdiff, Q1, selected_idx, z_vec=None):
+def extract_subnetwork(dS, Q1, selected_idx, z_vec=None):
     """
     Extract the differential co-expression submatrix and gene importance
     scores for the selected K-gene subnetwork.
 
     Parameters
     ----------
-    Xdiff : np.ndarray, shape (G, G)
+    dS : np.ndarray, shape (G, G)
     Q1 : np.ndarray, shape (G, G)
     selected_idx : np.ndarray, dtype bool, shape (G,)
+        Boolean mask.  Internally converted to integer indices so behaviour
+        is consistent across NumPy versions (np.ix_ with bool arrays is
+        version-specific).
     z_vec : np.ndarray, optional, shape (G,)
         Float selection vector (defaults to selected_idx.astype(float)).
 
     Returns
     -------
-    sub_Q_net : np.ndarray, shape (K, K)
-        Subnetwork differential co-expression (negated so positive = gain
-        in condition A).
+    sub_Q0 : np.ndarray, shape (K, K)
+        K×K submatrix of dS for the selected genes (Q0 restricted to hub).
+        Sign is preserved (positive = reference gain, negative = disease gain)
+        — same convention as dS itself, suitable for plot_gene_network.
+    sub_Q1 : np.ndarray, shape (K, K)
+        K×K submatrix of Q1 for the selected genes (optimisation landscape
+        restricted to hub).
     sub_Qv : np.ndarray, shape (K,)
-        Per-gene contribution scores (higher = more central).
+        Per-gene contribution scores (higher = more central in the hub).
     """
     if z_vec is None:
         z_vec = selected_idx.astype(float)
-    sub_Q_net = -Xdiff[np.ix_(selected_idx, selected_idx)]
-    sub_Qv = -(Q1 @ z_vec)[selected_idx]
-    return sub_Q_net, sub_Qv
+    # Use integer indices — avoids np.ix_ bool-array ambiguity across numpy versions
+    sel_int   = np.where(selected_idx)[0]
+    sub_Q0    = dS[np.ix_(sel_int, sel_int)]     # K×K dS (Q0)
+    sub_Q1    = Q1[np.ix_(sel_int, sel_int)]         # K×K Q1
+    sub_Qv    = -(Q1 @ z_vec)[selected_idx]          # per-gene score
+    return sub_Q0, sub_Q1, sub_Qv
+
+
+# ===========================================================================
+#  Classical baseline solver
+# ===========================================================================
+
+def solve_classical_topk(dS, K, adjacency=None, method='rowsum'):
+    """
+    Select K genes classically as a baseline for comparison with the QUBO solution.
+
+    No penalty terms, no annealing — pure algebraic ranking based on the
+    differential co-expression matrix dS.
+
+    Parameters
+    ----------
+    dS : np.ndarray, shape (G, G)
+        Differential co-expression matrix (S_B - S_A).
+        Negative values mean S_A > S_B, i.e. test/disease gains.
+    K : int
+        Number of genes to select.
+    adjacency : np.ndarray, shape (G, G), optional
+        MNN adjacency matrix.  When provided, scores are restricted to
+        adjacent pairs (same as Q1 in the QUBO), giving a fairer comparison.
+        If None, all gene pairs are used.
+    method : str, {'rowsum', 'absrowsum', 'spectral'}
+        Ranking criterion:
+
+        'rowsum'    — row sum of –dS (= Q1 diagonal contribution):
+                      score(i) = Σ_j (–dS[i,j]).  Selects genes whose
+                      net co-expression increased in condition A.  Directly
+                      comparable to the QUBO linear term.
+        'absrowsum' — row sum of |dS|: score(i) = Σ_j |dS[i,j]|.
+                      Selects genes with the most total co-expression change
+                      (direction-agnostic).
+        'spectral'  — leading eigenvector of –dS (or Q1 when adjacency
+                      is provided).  Captures the dominant differential
+                      co-expression pattern; equivalent to PCA-based ranking.
+
+    Returns
+    -------
+    selected_idx : np.ndarray, dtype bool, shape (G,)
+        Boolean mask of the K selected genes.
+    scores : np.ndarray, shape (G,)
+        Per-gene scores in the same order as the input genes.
+
+    Notes
+    -----
+    This is the natural classical reference for the QUBO problem:
+    instead of minimising z^T Q z subject to ||z||_0 = K (NP-hard),
+    we rank genes by a simple linear or spectral score derived from Q1
+    and take the top K.  The comparison highlights what the MNN graph
+    adjacency constraint and the joint combinatorial optimisation add
+    over a greedy ranking.
+    """
+    G = dS.shape[0]
+    Q1 = -dS                             # Q1 = -dS: positive = disease gain
+
+    if adjacency is not None:
+        Q1_adj = Q1 * adjacency             # restrict to MNN-connected pairs
+    else:
+        Q1_adj = Q1
+
+    if method == 'rowsum':
+        scores = Q1_adj.sum(axis=1)         # net disease co-expression gain per gene
+    elif method == 'absrowsum':
+        scores = np.abs(Q1_adj).sum(axis=1) # total change magnitude per gene
+    elif method == 'spectral':
+        # Leading eigenvector of Q1_adj (symmetric) — sign convention: positive = gain
+        eigvals, eigvecs = np.linalg.eigh(Q1_adj)
+        scores = eigvecs[:, -1]             # eigenvector of largest eigenvalue
+        if scores.sum() < 0:
+            scores = -scores                # flip sign so higher = more disease gain
+    else:
+        raise ValueError(f"Unknown method '{method}'. Choose 'rowsum', 'absrowsum', or 'spectral'.")
+
+    K_safe = min(K, G)
+    top_idx = np.argsort(scores)[-K_safe:][::-1]   # top-K indices, descending score
+    selected_idx = np.zeros(G, dtype=bool)
+    selected_idx[top_idx] = True
+    return selected_idx, scores

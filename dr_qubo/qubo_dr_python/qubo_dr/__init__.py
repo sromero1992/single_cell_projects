@@ -20,6 +20,19 @@ Key features:
 __version__ = "1.0.0"
 __author__ = "Selim Romero, Texas A&M University"
 
-from qubo_dr.pipeline import run_pipeline
+from qubo_dr.pipeline import run_pipeline, run_pipeline_classical
+from qubo_dr.plot import (
+    plot_hub_network,
+    plot_gene_network,
+    plot_condition_heatmaps,
+    plot_coexpr_heatmap,
+)
 
-__all__ = ["run_pipeline"]
+__all__ = [
+    "run_pipeline",
+    "run_pipeline_classical",
+    "plot_hub_network",
+    "plot_gene_network",
+    "plot_condition_heatmaps",
+    "plot_coexpr_heatmap",
+]

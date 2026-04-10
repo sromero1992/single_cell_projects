@@ -1,15 +1,15 @@
-function [Q, Q1, P] = assemble_qubo_matrix(Xdiff, Vdiff, Xmnn_A, Xmnn_B, K, Xnet_target, penalty_scale, auto_penalty)
+function [Q, Q1, P] = assemble_qubo_matrix(dS, Vdiff, Amnn_test, Amnn_ref, K, Xnet_target, penalty_scale, auto_penalty)
 % ASSEMBLE_QUBO_MATRIX  Construct the QUBO matrix with cardinality penalty.
 %
-%   [Q, Q1, P] = ASSEMBLE_QUBO_MATRIX(Xdiff, Vdiff, Xmnn_A, Xmnn_B, K)
-%   [Q, Q1, P] = ASSEMBLE_QUBO_MATRIX(Xdiff, Vdiff, Xmnn_A, Xmnn_B, K, Xnet_target)
-%   [Q, Q1, P] = ASSEMBLE_QUBO_MATRIX(Xdiff, Vdiff, Xmnn_A, Xmnn_B, K, Xnet_target, penalty_scale)
-%   [Q, Q1, P] = ASSEMBLE_QUBO_MATRIX(Xdiff, Vdiff, Xmnn_A, Xmnn_B, K, Xnet_target, penalty_scale, auto_penalty)
+%   [Q, Q1, P] = ASSEMBLE_QUBO_MATRIX(dS, Vdiff, Amnn_test, Amnn_ref, K)
+%   [Q, Q1, P] = ASSEMBLE_QUBO_MATRIX(dS, Vdiff, Amnn_test, Amnn_ref, K, Xnet_target)
+%   [Q, Q1, P] = ASSEMBLE_QUBO_MATRIX(dS, Vdiff, Amnn_test, Amnn_ref, K, Xnet_target, penalty_scale)
+%   [Q, Q1, P] = ASSEMBLE_QUBO_MATRIX(dS, Vdiff, Amnn_test, Amnn_ref, K, Xnet_target, penalty_scale, auto_penalty)
 %
 % DESCRIPTION:
 %   Assembles the base QUBO matrix
 %
-%       Q1 = Xdiff + diag(Vdiff) - (Xmnn_A + Xmnn_B)  [+ Xnet_target]
+%       Q1 = dS + diag(Vdiff) - (Amnn_test + Amnn_ref)  [+ Xnet_target]
 %
 %   then adds the cardinality penalty to enforce exactly K gene selections:
 %
@@ -32,7 +32,7 @@ function [Q, Q1, P] = assemble_qubo_matrix(Xdiff, Vdiff, Xmnn_A, Xmnn_B, K, Xnet
 %   Set auto_penalty = false to revert to the legacy heuristic.
 %
 % INPUTS (required):
-%   Xdiff         - Differential co-expression matrix, G×G.
+%   dS         - Differential co-expression matrix, G×G.
 %                   X_diff = S_B - S_A (condition B minus condition A).
 %                   Negative off-diagonal entries mean co-expression
 %                   increased in condition A (test).
@@ -43,8 +43,8 @@ function [Q, Q1, P] = assemble_qubo_matrix(Xdiff, Vdiff, Xmnn_A, Xmnn_B, K, Xnet
 %                   The scalar can be anything continuous: UCell pathway
 %                   activity score, pseudotime, cell potency, differentiation
 %                   rank, etc.  Pass zeros(G,1) to omit this term.
-%   Xmnn_A        - MNN adjacency matrix for condition A (test),  G×G sparse.
-%   Xmnn_B        - MNN adjacency matrix for condition B (reference), G×G sparse.
+%   Amnn_test        - MNN adjacency matrix for condition A (test),  G×G sparse.
+%   Amnn_ref        - MNN adjacency matrix for condition B (reference), G×G sparse.
 %   K             - Target subnetwork size (positive integer).
 %
 % INPUTS (optional):
@@ -85,18 +85,18 @@ function [Q, Q1, P] = assemble_qubo_matrix(Xdiff, Vdiff, Xmnn_A, Xmnn_B, K, Xnet
         auto_penalty = true;
     end
 
-    ng = size(Xdiff, 1);
+    ng = size(dS, 1);
 
     % --- Validate dimensions -----------------------------------------------
     assert(numel(Vdiff)       == ng, 'Vdiff length must equal number of genes.');
-    assert(size(Xmnn_A, 1)   == ng, 'Xmnn_A row dimension mismatch.');
-    assert(size(Xmnn_B, 1)   == ng, 'Xmnn_B row dimension mismatch.');
+    assert(size(Amnn_test, 1)   == ng, 'Amnn_test row dimension mismatch.');
+    assert(size(Amnn_ref, 1)   == ng, 'Amnn_ref row dimension mismatch.');
     if ~isempty(Xnet_target)
         assert(size(Xnet_target,1) == ng, 'Xnet_target dimension mismatch.');
     end
 
     % --- Base QUBO matrix Q1 -----------------------------------------------
-    Q1 = Xdiff + diag(Vdiff(:)) - (full(Xmnn_A) + full(Xmnn_B));
+    Q1 = dS + diag(Vdiff(:)) - (full(Amnn_test) + full(Amnn_ref));
 
     if ~isempty(Xnet_target)
         Q1 = Q1 + Xnet_target;

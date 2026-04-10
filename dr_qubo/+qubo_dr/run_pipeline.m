@@ -36,9 +36,13 @@ function results = run_pipeline(X, g, batch_id, genelist, K, opts)
 %                     If provided, skips internal computation.
 %                     Can encode any per-cell scalar: UCell pathway
 %                     activity, pseudotime, cell potency, etc.
-%   cell_state_A    - Per-cell scalar vector for condition A, N_A×1.
-%                     Used to compute V_diff internally if Vdiff not given.
-%   cell_state_B    - Per-cell scalar vector for condition B, N_B×1.
+%   cell_state      - Per-cell scalar vector for ALL cells (length N,
+%                     aligned with batch_id / X columns).  The pipeline
+%                     splits this into condition-A and condition-B subsets
+%                     automatically.  Can be any continuous per-cell
+%                     measure: UCell pathway activity score, pseudotime,
+%                     cell potency, differentiation rank, etc.
+%                     Pass [] (default) to omit the V_diff linear bias term.
 %   use_pathway_prior - Include X_net pathway membership prior (default false).
 %                     Set true only when extra candidate genes (outside
 %                     the core pathway) are appended to genelist.  When
@@ -56,7 +60,7 @@ function results = run_pipeline(X, g, batch_id, genelist, K, opts)
 %     sub_Qv        - Per-gene contribution scores (K×1)
 %     selected_idx  - Boolean index of selected genes (G×1)
 %     G_graph       - Graph object (if plotit=true)
-%     Xdiff         - Differential co-expression matrix (G×G)
+%     dS         - Differential co-expression matrix (G×G)
 %     Q1            - Unpenalised QUBO matrix (G×G)
 %     Q             - Penalised QUBO matrix (G×G)
 %     num_selected  - Number of selected genes
@@ -71,8 +75,7 @@ function results = run_pipeline(X, g, batch_id, genelist, K, opts)
     method            = getOpt(opts, 'method',            'mnn');
     n_neighbors       = getOpt(opts, 'n_neighbors',       15);
     Vdiff_ext         = getOpt(opts, 'Vdiff',             []);
-    cell_state_A      = getOpt(opts, 'cell_state_A',      []);
-    cell_state_B      = getOpt(opts, 'cell_state_B',      []);
+    cell_state        = getOpt(opts, 'cell_state',        []);
     use_pathway_prior = getOpt(opts, 'use_pathway_prior', false);
     penalty_scale     = getOpt(opts, 'penalty_scale',     10);
     plotit            = getOpt(opts, 'plotit',            true);
@@ -85,17 +88,18 @@ function results = run_pipeline(X, g, batch_id, genelist, K, opts)
 
     % ======================================================================
     % Step 1 – Partition X by condition  →  X_A (G × N_A), X_B (G × N_B)
+    %          cell_state (N×1) is split automatically along with X.
     % ======================================================================
-    cs_placeholder = zeros(size(X, 2), 1);
+    if isempty(cell_state)
+        cs_input = zeros(size(X, 2), 1);
+    else
+        cs_input = cell_state(:);
+    end
     [X_A, X_B, cs_A_out, cs_B_out] = qubo_dr.preprocess.subset_by_condition( ...
-        X, batch_id, cs_placeholder, cond_a_label, cond_b_label);
+        X, batch_id, cs_input, cond_a_label, cond_b_label);
 
     fprintf('Condition A (%s): %d cells | Condition B (%s): %d cells\n', ...
         cond_a_label, size(X_A,2), cond_b_label, size(X_B,2));
-
-    % Override cell-state vectors if provided externally
-    if ~isempty(cell_state_A); cs_A_out = cell_state_A; end
-    if ~isempty(cell_state_B); cs_B_out = cell_state_B; end
 
     % ======================================================================
     % Step 2 – Non-negative cosine similarity (Gram matrices)
@@ -106,9 +110,11 @@ function results = run_pipeline(X, g, batch_id, genelist, K, opts)
 
     % ======================================================================
     % Step 3 – Differential matrix and V_diff
-    %          X_diff = S_B - S_A
+    %          dS = S_ref − S_test  (positive = reference gain,
+    %          negative = test/disease gain).  Negate before plotting so
+    %          red = test gain (biologically natural).
     % ======================================================================
-    [Xdiff, Vdiff] = qubo_dr.preprocess.compute_differential( ...
+    [dS, Vdiff] = qubo_dr.preprocess.compute_differential( ...
         SB, SA, XB_norm, XA_norm, cs_B_out, cs_A_out);
 
     % Use externally supplied V_diff if provided
@@ -127,7 +133,7 @@ function results = run_pipeline(X, g, batch_id, genelist, K, opts)
     [~, idx] = ismember(upper(genelist), upper(g));
     idx(idx == 0) = [];
     g_sub       = g(idx);
-    Xdiff_sub   = Xdiff(idx, idx);
+    dS_sub   = dS(idx, idx);
     Vdiff_sub   = Vdiff(idx);
 
     % ======================================================================
@@ -135,10 +141,10 @@ function results = run_pipeline(X, g, batch_id, genelist, K, opts)
     %          SVD run on cells; gene embedding = U*Sigma in R^(G × d)
     % ======================================================================
     fprintf('Building %s adjacency matrices...\n', upper(method));
-    Xmnn_A = qubo_dr.graph.build_adjacency_subset(X_A, method, n_neighbors);
-    Xmnn_B = qubo_dr.graph.build_adjacency_subset(X_B, method, n_neighbors);
-    Xmnn_A_sub = Xmnn_A(idx, idx);
-    Xmnn_B_sub = Xmnn_B(idx, idx);
+    Amnn_test = qubo_dr.graph.build_adjacency_subset(X_A, method, n_neighbors);
+    Amnn_ref = qubo_dr.graph.build_adjacency_subset(X_B, method, n_neighbors);
+    Amnn_test_sub = Amnn_test(idx, idx);
+    Amnn_ref_sub = Amnn_ref(idx, idx);
 
     % ======================================================================
     % Step 6 – Optional pathway membership prior X_net
@@ -156,7 +162,7 @@ function results = run_pipeline(X, g, batch_id, genelist, K, opts)
     % Step 7 – Assemble QUBO matrix
     % ======================================================================
     [Q, Q1, ~] = qubo_dr.qubo.assemble_qubo_matrix( ...
-        Xdiff_sub, Vdiff_sub, Xmnn_A_sub, Xmnn_B_sub, K, ...
+        dS_sub, Vdiff_sub, Amnn_test_sub, Amnn_ref_sub, K, ...
         Xnet_target, penalty_scale);
 
     % ======================================================================
@@ -167,7 +173,7 @@ function results = run_pipeline(X, g, batch_id, genelist, K, opts)
     % ======================================================================
     % Step 9 – Extract subnetwork
     % ======================================================================
-    [sub_Q_net, sub_Qv] = qubo_dr.qubo.extract_subnetwork(Xdiff_sub, Q1, selected_idx, sol);
+    [sub_Q_net, sub_Qv] = qubo_dr.qubo.extract_subnetwork(dS_sub, Q1, selected_idx, sol);
 
     % ======================================================================
     % Step 10 – Plots
@@ -196,7 +202,7 @@ function results = run_pipeline(X, g, batch_id, genelist, K, opts)
     results.sub_Qv       = sub_Qv;
     results.selected_idx = selected_idx;
     results.G_graph      = G_graph;
-    results.Xdiff        = Xdiff_sub;
+    results.dS        = dS_sub;
     results.Q1           = Q1;
     results.Q            = Q;
     results.num_selected = nnz(selected_idx);
