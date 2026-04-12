@@ -1,0 +1,29 @@
+Package: TimeSCapeR
+Title: Circadian Rhythm Detection from Single-Cell RNA-Seq Data
+Version: 0.2.0
+Authors@R: c(
+  person("Translation", "Claude", email = "claude@anthropic.com", role = c("aut", "cre"))
+)
+Description: TimeSCape v0.2 translated from MATLAB to R. Detects circadian rhythms
+  in single-cell expression data through cosinor fitting, statistical testing,
+  and interactive visualization. Provides command-line pipeline (run_timescape)
+  and web-based GUI (Shiny app).
+License: MIT
+Depends:
+  R (>= 4.0)
+Imports:
+  SingleCellExperiment,
+  future.apply,
+  minpack.lm,
+  stats,
+  pheatmap,
+  ggplot2,
+  rhandsontable,
+  shiny,
+  bslib,
+  grid,
+  grDevices
+Suggests:
+  testthat
+Encoding: UTF-8
+RoxygenNote: 7.2.0

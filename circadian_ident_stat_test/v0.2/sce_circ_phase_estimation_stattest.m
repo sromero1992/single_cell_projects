@@ -1,357 +1,361 @@
 function [T1, T2] = sce_circ_phase_estimation_stattest(sce, tmeta, rm_low_conf, period12, ...
                                     custom_genelist, custom_celltype, plot_heat, norm_str)
+% SCE_CIRC_PHASE_ESTIMATION_STATTEST
+%   TimeSCape circadian-rhythm detection pipeline on a SingleCellExperiment.
+%
+% KEY ROBUSTNESS FEATURES:
+%   • Missing time points: if a cell type lacks cells at one or more ZT
+%     times, the cosine is fitted using only the time points that ARE
+%     present (at their true ZT hours).  No imputation, no zeros.
+%   • Parallel block processing for large gene sets.
+%   • Dual output: ALL genes + a second confident-only file.
+%
+% USAGE:
+%   times      = [0 3 6 9 12 15 18 21]';
+%   old_labels = unique(sce.c_batch_id);
+%   new_labels = string(arrayfun(@(t) sprintf('ZT%02d',t), times, 'UniformOutput',false));
+%   tmeta      = table(old_labels, new_labels, times, 'VariableNames',{'old_labels','new_labels','ZT_times'});
+%   [T1, T2]   = sce_circ_phase_estimation_stattest(sce, tmeta);
+%
+% INPUTS:
+%   sce            - SingleCellExperiment object.
+%   tmeta          - Table: old_labels | new_labels | ZT_times (numeric hrs).
+%   rm_low_conf    - (default true) Write the confident-only secondary files.
+%   period12       - (default false) Use 12-hr period.
+%   custom_genelist- (default []) Restrict to these genes.
+%   custom_celltype- (default []) Restrict to this cell type.
+%   plot_heat      - (default true) Generate heatmap after analysis.
+%   norm_str       - (default 'lib_size') 'lib_size' | 'magic_impute'.
+%
+% OUTPUTS:
+%   T1  - Circadian statistics table, ALL genes (no p-value filter).
+%   T2  - Per-timepoint mean expression (rows match T1).
+%
+% SAVED FILES (per cell type, prefix = "<CellType>_<period>_"):
+%   *circadian_analysis_all.csv              - All genes (T1)
+%   *circadian_analysis_confident.csv        - Both-test p<0.05 genes
+%   *circadian_ZTs_mean.csv                  - Raw ZT means (T2, all)
+%   *circadian_ZTs_mean_normalized.csv       - ZT00-normalised (T3, all)
+%   *circadian_ZTs_mean_confident.csv        - ZT means, confident only
+%   *circadian_ZTs_mean_normalized_confident.csv
+%   *summary_results.csv                     - Cross-cell-type summary
 
-    % USAGE:
-    % times = [0 3 6 9 12 15 18 21]'; 
-    % old_labels = unique(sce.c_batch_id);
-    % % Convert times to ZT labels
-    % new_labels = cell(numel(times), 1);
-    % for i = 1:numel(times)
-    %     if times(i) >= 0
-    %         new_labels{i} = sprintf('ZT%02d', times(i));
-    %     else
-    %         new_labels{i} = sprintf('%d', times(i));
-    %     end
-    % end
-    % new_labels = string(new_labels);
-    % tmeta = table(old_labels, new_labels, times);
-    % [T1, T2] = sce_circ_phase_estimation_stattest(sce, tmeta)
     tic;
     rng('default');
-    
-    if nargin < 3 || isempty(rm_low_conf); rm_low_conf = true; end
-    if nargin < 4 || isempty(period12); period12 = false; end
-    if nargin < 5 || isempty(custom_genelist); custom_genelist = {}; end
-    if nargin < 6 || isempty(custom_celltype); custom_celltype = {}; end
-    if nargin < 7 || isempty(plot_heat); plot_heat = true; end
-    if nargin < 8 || isempty(norm_str); norm_str ='lib_size'; end
 
-    if period12 
-        disp("Circadian identification with 12 hrs period...")
-    else
-        disp("Circadian identification with 24 hrs period...")
-    end
+    % ── Defaults ───────────────────────────────────────────────────────────
+    if nargin < 3  || isempty(rm_low_conf);     rm_low_conf     = true;       end
+    if nargin < 4  || isempty(period12);         period12        = false;      end
+    if nargin < 5  || isempty(custom_genelist);  custom_genelist = {};         end
+    if nargin < 6  || isempty(custom_celltype);  custom_celltype = {};         end
+    if nargin < 7  || isempty(plot_heat);        plot_heat       = true;       end
+    if nargin < 8  || isempty(norm_str);         norm_str        = 'lib_size'; end
 
-    % Merge replicates for this analysis or just re-label
-    batches = unique(sce.c_batch_id);
+    if period12; per_label = "_period_12_"; else; per_label = "_period_24_"; end
+    disp("Circadian identification — period: " + strtrim(per_label));
 
-    tmeta.times = sortrows(tmeta.times);
-    %time_cycle = max(tmeta.times);
+    % ── Re-label batches to ZT names ───────────────────────────────────────
+    batches    = unique(sce.c_batch_id);
+    %tmeta.times = sortrows(tmeta.times);
+    tmeta.ZT_times = sortrows(tmeta.ZT_times);
 
-    % Needs to be generalized... % Based on Sato data
-    time_step = mean(diff(tmeta.times)); 
-    % Rename batches 
     for ib = 1:length(batches)
         str_idx = find(batches(ib) == tmeta.old_labels);
+        if isempty(str_idx); continue; end
         idx = find(sce.c_batch_id == batches(ib));
         sce.c_batch_id(idx) = tmeta.new_labels(str_idx);
     end
     batches = unique(sce.c_batch_id);
-    
-    disp("New batches")
-    disp(batches')
+    disp("  Batches after re-labelling: " + strjoin(batches', ', '));
 
-    % Initialize parallel pool if not already running
+    % ── Parallel pool ──────────────────────────────────────────────────────
     if isempty(gcp('nocreate'))
-        numCores = ceil(feature('numcores')/4);
-        numCores = max(2,numCores);
+        numCores = max(2, ceil(feature('numcores') / 4));
         parpool(numCores);
-        disp(['Parallel pool initialized with ', num2str(numCores), ' cores.']);
-
-        % Warm up the parallel pool (optional but recommended)
-        disp('Warming up parallel pool...');
-        tic; % Start timer for warm-up
-        parfor i = 1:numCores
-            pause(0.01); % Small task to initialize workers
-        end
-        warmUpTime = toc; % Stop timer and get elapsed time
-        disp(['Parallel pool warmed up in ', num2str(warmUpTime), ' seconds.']);
+        tic_warm = tic;
+        parfor i = 1:numCores; pause(0.01); end
+        fprintf('  Parallel pool (%d workers) warmed up in %.1f s\n', numCores, toc(tic_warm));
     end
 
-    disp(['Normalization used: ', norm_str]);
-    % Normalize full set
-    %X = full(sce.X);
+    % ── Normalisation (once on the full object) ────────────────────────────
+    fprintf('  Normalisation: %s\n', norm_str);
     if strcmp(norm_str, 'lib_size')
-        % This is regular cells pipeline
-        %X = sc_norm(full(sce.X));
-        X = pkg.norm_libsize(sce.X, 1e4);
-        X = log1p(sce.X);
-    else % 'magic_impute'
-        % This for cancer cells
+        X = pkg.norm_libsize(sce.X, 1e4);  % scGEAtoolbox library-size norm
+        X = log1p(X);                       % log1p of the *normalised* matrix
+    else
         X = sc_impute(sce.X, 'MAGIC');
     end
-    X = sparse(X);
-    sce.X = X;
+    sce.X = sparse(X);
     clear X;
 
-    % All cell types available
+    % ── Cell-type loop ─────────────────────────────────────────────────────
     cell_type_list = unique(sce.c_cell_type_tx);
-    ncell_types = length(cell_type_list);
+    ncell_types    = length(cell_type_list);
+    nztps_expected = length(unique(tmeta.new_labels));  % expected # of ZT labels
 
-    % Number of time points
-    nztps = length(unique(tmeta.new_labels));
-    
     info_p_type = zeros(ncell_types, 9);
+
     for icell_type = 1:ncell_types
-        % Extract count matrix for ith cell type
+
         cell_type = cell_type_list(icell_type);
         if ~isempty(custom_celltype)
             if ~ismember(cell_type, custom_celltype); continue; end
         end
+        fprintf("\nProcessing cell type: %s\n", cell_type);
 
-        fprintf("Processing cell type %s \n", cell_type);
+        % ── Create per-cell-type output directory ──────────────────────────
+        outdir_name = regexprep(strtrim(char(cell_type)), '[^\w]', '_');
+        outdir      = fullfile(pwd, outdir_name);
+        if ~exist(outdir, 'dir'); mkdir(outdir); end
+        fprintf("  Output directory: %s\n", outdir);
 
-        % Gene genes and cells information
-        idx = find(sce.c_cell_type_tx == cell_type);
+        idx     = find(sce.c_cell_type_tx == cell_type);
         sce_sub = sce.selectcells(idx);
-        %sce_sub = sce_sub.qcfilter;
-        % Light QC to remove non needed genes and poor cells
-        %sce_sub = sce_sub.qcfilter(500, 0.20, 10);
-
-        % % Normalizing count data for that cell type
-        % X = full(sce_sub.X);
-        % use_magic = true;
-        % if use_magic 
-        %     % This for cancer cells
-        %     X = sc_impute(X, 'MAGIC');
-        % else
-        %     % This is regular cells pipeline
-        %     %X = sc_norm(X);
-        %     X = pkg.norm_libsize(full(X), 1e4);
-        %     X = log1p(X)
-        % end
-        % 
-        % X = sparse(X);
-        % sce_sub.X = X;
         clear idx;
 
+        % Gene list
         if isempty(custom_genelist)
-            disp("Circadian analysis for all genes");
             gene_list = sce_sub.g;
         else
-            disp("Circadian analysis for custom genes");
-            % Ensure custom_genelist is a cell array of strings
             if ischar(custom_genelist) || isstring(custom_genelist)
                 custom_genelist = cellstr(custom_genelist);
             end
-            % Ensure custom_genelist is a row vector
-            if iscolumn(custom_genelist)
-                custom_genelist = custom_genelist';
-            end
-            % Match the custom genes with those in sce_sub.g
+            if iscolumn(custom_genelist); custom_genelist = custom_genelist'; end
             [lic, ~] = ismember(custom_genelist, sce_sub.g);
-            % Filter only matching genes
             gene_list = custom_genelist(lic);
-            % Display matching genes
-            disp("Matching genes: " + strjoin(gene_list, ', '));
-        end
-        ngene = length(gene_list);
-
-        % Batch name for each time point 
-        batch_time = unique(sce_sub.c_batch_id);
-        % Number of time points
-        nzts = length(batch_time);
-        fprintf("Number of NZTS after sub-sample: %d \n", nzts);
-        
-        % If number of time points do not match experimental time points, dump cell type
-        if nzts ~= nztps
-            disp("Number of time points does not match to input metadata table")
-            continue; 
-        end
-   
-        % Gene blocking parameters
-        if sce.NumCells > 15000
-            block_size = 50; % Adjust block size as needed
-        else
-            block_size = 500; % Adjust block size as needed
+            disp("  Matching genes: " + strjoin(gene_list, ', '));
         end
         num_genes = length(gene_list);
+
+        % ── Time-point discovery ───────────────────────────────────────────
+        % Only use time points that actually have cells.
+        % Build actual_times: the true ZT hour for each present batch.
+        batch_time = unique(sce_sub.c_batch_id);
+        nzts       = length(batch_time);
+
+        actual_times = nan(nzts, 1);
+        for it = 1:nzts
+            idx_t = find(tmeta.new_labels == batch_time(it), 1);
+            if ~isempty(idx_t)
+                %actual_times(it) = tmeta.times(idx_t);
+                actual_times(it) = tmeta.ZT_times(idx_t);
+            end
+        end
+
+        % Drop any time points we could not map to a numeric ZT hour
+        valid_tp  = ~isnan(actual_times);
+        batch_time   = batch_time(valid_tp);
+        actual_times = actual_times(valid_tp);
+        nzts         = sum(valid_tp);
+
+        fprintf("  Time points found: %d / %d expected\n", nzts, nztps_expected);
+        if nzts < 4
+            warning("  Cell type '%s' has fewer than 4 time points — skipping.", cell_type);
+            continue;
+        end
+        if nzts < nztps_expected
+            fprintf("  ⚠ Missing %d time point(s) — fitting on available points only.\n", ...
+                    nztps_expected - nzts);
+        end
+
+        % ── Block-parallel cosinor fitting ─────────────────────────────────
+        if sce.NumCells > 15000; block_size = 50; else; block_size = 500; end
         num_blocks = ceil(num_genes / block_size);
-    
-        progressbar('Starting circadian analysis...'); % Initialize progress bar
-        
-        %Initialize final arrays.
-        acro = zeros(num_genes,1);
-        amp = zeros(num_genes,1);
-        T = zeros(num_genes,1);
-        mesor = zeros(num_genes,1);
-        R0 = zeros(num_genes,nzts);
-        p_value = zeros(num_genes,1);
-        rho = zeros(num_genes,1);
-        p_value_rho = zeros(num_genes,1);
+
+        acro        = zeros(num_genes, 1);
+        amp         = zeros(num_genes, 1);
+        T           = zeros(num_genes, 1);
+        mesor_arr   = zeros(num_genes, 1);
+        R0          = zeros(num_genes, nzts);
+        p_value     = zeros(num_genes, 1);
+        rho         = zeros(num_genes, 1);
+        p_value_rho = zeros(num_genes, 1);
+
+        % Snapshot variables needed inside parfor
+        actual_times_snap = actual_times;
+        batch_time_snap   = batch_time;
+        sce_sub_X         = sce_sub.X;
+        sce_sub_batch     = sce_sub.c_batch_id;
+        sce_sub_g         = sce_sub.g;
+
+        progressbar('Starting circadian analysis...');
 
         for block_idx = 1:num_blocks
-            start_idx = (block_idx - 1) * block_size + 1;
-            end_idx = min(block_idx * block_size, num_genes);
-            current_gene_block = gene_list(start_idx:end_idx);
-            num_genes_in_block = length(current_gene_block);
-    
-            % Initialize temporary arrays for the current block
-            tmp_acro = zeros(num_genes_in_block, 1);
-            tmp_amp = zeros(num_genes_in_block, 1);
-            tmp_T = zeros(num_genes_in_block, 1);
-            tmp_p_value = zeros(num_genes_in_block, 1);
-            tmp_R0 = zeros(num_genes_in_block, nzts);
-            tmp_mesor = zeros(num_genes_in_block, 1);
-            tmp_rho = zeros(num_genes_in_block, 1);
-            tmp_p_value_rho = zeros(num_genes_in_block, 1);
+            s_idx = (block_idx - 1) * block_size + 1;
+            e_idx = min(block_idx * block_size, num_genes);
+            cur_block = gene_list(s_idx:e_idx);
+            n_blk     = length(cur_block);
 
-            % Create gene index lookup table for current block
-            gene_indices = zeros(num_genes_in_block,1);
-            for gene_index_block = 1:num_genes_in_block
-                gene_indices(gene_index_block) = find(sce_sub.g == string(current_gene_block{gene_index_block}));
+            tmp_acro        = zeros(n_blk, 1);
+            tmp_amp         = zeros(n_blk, 1);
+            tmp_T           = zeros(n_blk, 1);
+            tmp_p_value     = zeros(n_blk, 1);
+            tmp_R0          = zeros(n_blk, nzts);
+            tmp_mesor       = zeros(n_blk, 1);
+            tmp_rho         = zeros(n_blk, 1);
+            tmp_p_value_rho = zeros(n_blk, 1);
+
+            gene_indices = zeros(n_blk, 1);
+            for gi = 1:n_blk
+                gene_indices(gi) = find(sce_sub_g == string(cur_block{gi}), 1);
             end
-    
-            parfor igene_block = 1:num_genes_in_block
-                ig = gene_indices(igene_block);
-                Xg_zts = {};
+
+            parfor igene_blk = 1:n_blk
+                ig     = gene_indices(igene_blk);
+                Xg_zts = cell(1, nzts);
+
                 for it = 1:nzts
-                    ics = find(sce_sub.c_batch_id == batch_time(it));
-                    if ~isempty(ig)
-                        Xg_zts{it} = full(sce_sub.X(ig, ics));
-                        tmp_R0(igene_block, it) = mean(Xg_zts{it});
+                    ics = find(sce_sub_batch == batch_time_snap(it));
+                    if ~isempty(ig) && ~isempty(ics)
+                        Xg_zts{it}              = full(sce_sub_X(ig, ics));
+                        tmp_R0(igene_blk, it)   = mean(Xg_zts{it});
                     else
-                        Xg_zts{it} = zeros(size(ics));
-                        tmp_R0(igene_block, it) = NaN;
+                        Xg_zts{it}              = [];   % empty → skipped inside estimate_phaseR
+                        tmp_R0(igene_blk, it)   = NaN;
                     end
                 end
-                [tmp_acro(igene_block), tmp_amp(igene_block), ...
-                 tmp_T(igene_block), tmp_mesor(igene_block), ...
-                 tmp_p_value(igene_block), tmp_rho(igene_block), ...
-                 tmp_p_value_rho(igene_block)] = ...
-                       estimate_phaseR(Xg_zts, time_step, ...
-                       period12, 'Ftest');
+
+                [tmp_acro(igene_blk), tmp_amp(igene_blk), tmp_T(igene_blk), ...
+                 tmp_mesor(igene_blk), tmp_p_value(igene_blk), ...
+                 tmp_rho(igene_blk), tmp_p_value_rho(igene_blk)] = ...
+                    estimate_phaseR(Xg_zts, actual_times_snap', period12, 'Ftest');
             end
-    
-            % Aggregate results for the current block
-            acro(start_idx:end_idx) = tmp_acro;
-            amp(start_idx:end_idx) = tmp_amp;
-            T(start_idx:end_idx) = tmp_T;
-            mesor(start_idx:end_idx) = tmp_mesor;
-            R0(start_idx:end_idx, :) = tmp_R0;
-            p_value(start_idx:end_idx) = tmp_p_value;
-            rho(start_idx:end_idx) = tmp_rho;
-            p_value_rho(start_idx:end_idx) = tmp_p_value_rho;
 
-            % Clear temporary variables to free memory
-            clear tmp_acro tmp_amp tmp_T tmp_mesor tmp_R0 tmp_p_value current_gene_block gene_indices;
-    
-            % Update progress bar
-            progress = (block_idx / num_blocks) * 100;
-            progressbar(progress);
+            acro(s_idx:e_idx)        = tmp_acro;
+            amp(s_idx:e_idx)         = tmp_amp;
+            T(s_idx:e_idx)           = tmp_T;
+            mesor_arr(s_idx:e_idx)   = tmp_mesor;
+            R0(s_idx:e_idx, :)       = tmp_R0;
+            p_value(s_idx:e_idx)     = tmp_p_value;
+            rho(s_idx:e_idx)         = tmp_rho;
+            p_value_rho(s_idx:e_idx) = tmp_p_value_rho;
+
+            clear tmp_acro tmp_amp tmp_T tmp_mesor tmp_R0 ...
+                  tmp_p_value tmp_rho tmp_p_value_rho cur_block gene_indices;
+
+            progressbar((block_idx / num_blocks) * 100);
         end
-        
-        clear tmp_mesor tmp_T tmp_amp tmp_acro;
 
-        acro_formatted = acro;
-        acro_formatted(acro < 0) = acro(acro < 0) + 24;
-        acro_formatted(acro > 24) = acro(acro > 24) - 24;
-    
-        % Pvalue adjusted with Benjamini-Hochberg (BH) Procedure
-        p_adj = bh_adjust_pvalues(p_value);
+        % ── Wrap acrophase into [0, 24) ────────────────────────────────────
+        acro_fmt            = acro;
+        acro_fmt(acro <  0) = acro(acro <  0) + 24;
+        acro_fmt(acro > 24) = acro(acro > 24) - 24;
+
+        % ── BH-adjusted p-values ───────────────────────────────────────────
+        p_adj     = bh_adjust_pvalues(p_value);
         p_adj_rho = bh_adjust_pvalues(p_value_rho);
 
-        T1 = table(gene_list, amp, abs(amp), mesor, acro, acro_formatted, T, ...
-                  p_value, p_adj, rho, p_value_rho, p_adj_rho);
+        % ── Result tables ──────────────────────────────────────────────────
+        T1 = table(gene_list, amp, abs(amp), mesor_arr, acro, acro_fmt, T, ...
+                   p_value, p_adj, rho, p_value_rho, p_adj_rho);
+        T1.Properties.VariableNames = ["Genes","Amp","Abs_Amp","Mesor", ...
+                                        "Acrophase","Acrophase_24","Period", ...
+                                        "pvalue","pvalue_adj", ...
+                                        "Sine_corr","pvalue_corr","pvalue_adj_corr"];
 
-        T1.Properties.VariableNames = ["Genes", "Amp", "Abs_Amp", "Mesor", "Acrophase", ...
-                                       "Acrophase_24", "Period", "pvalue","pvalue_adj", ...
-                                       "Sine_corr", "pvalue_corr", "pvalue_adj_corr"];
-        
-        T2 = table(gene_list, R0(:,1), R0(:,2), R0(:,3), R0(:,4), ...
-                               R0(:,5), R0(:,6), R0(:,7), R0(:,8));
-        
-        T2.Properties.VariableNames = ["Genes","ZT00","ZT03","ZT06","ZT09","ZT12","ZT15","ZT18","ZT21"];  
+        % T2: dynamic columns from actual time labels
+        zt_labels   = string(batch_time(:)');
+        T2_varnames = ["Genes", zt_labels];
+        %T2          = cell2table([gene_list, num2cell(R0)], 'VariableNames', T2_varnames);
+        T2 = array2table(R0, 'VariableNames', zt_labels);
+        T2 = [table(gene_list, 'VariableNames', {'Genes'}), T2];
 
-        % Remove NaNs (not optional)
-        rm_nans_idx = ~isnan(T1.pvalue);
-        T1 = T1(rm_nans_idx, :);
-        T2 = T2(rm_nans_idx, :);
-        rm_nans_idx = ~isnan(T1.pvalue_corr);
-        T1 = T1(rm_nans_idx, :);
-        T2 = T2(rm_nans_idx, :);
+        % Remove genes where either p-value is NaN (fit failed)
+        valid = ~isnan(T1.pvalue) & ~isnan(T1.pvalue_corr);
+        T1 = T1(valid, :);
+        T2 = T2(valid, :);
 
-        % Remove low confidence genes?
-        rm_nconfs_idx0 = T1.pvalue < 0.05;
-        rm_nconfs_idx1 = T1.pvalue_corr < 0.05;
-        num_pval_conf_ftest = sum(rm_nconfs_idx0);
-        num_pval_conf_corr = sum(rm_nconfs_idx1);
-        num_adj_conf_g_ftest = sum( T1.pvalue_adj <0.05);
-        num_adj_conf_g_corr = sum( T1.pvalue_adj_corr <0.05);
+        % ── Confidence statistics ──────────────────────────────────────────
+        conf_ftest = T1.pvalue      < 0.05;
+        conf_corr  = T1.pvalue_corr < 0.05;
+        conf_both  = conf_ftest & conf_corr;
 
-        % both Ftest and t-test confident
-        rm_nconfs_idx = and(rm_nconfs_idx0, rm_nconfs_idx1);
-        num_conf_g = sum(rm_nconfs_idx);
-        num_n_conf_g = sum(~rm_nconfs_idx);
+        num_pval_conf_ftest = sum(conf_ftest);
+        num_pval_conf_corr  = sum(conf_corr);
+        num_conf_both       = sum(conf_both);
+        num_n_conf          = sum(~conf_both);
+        num_adj_ftest       = sum(T1.pvalue_adj      < 0.05);
+        num_adj_corr        = sum(T1.pvalue_adj_corr < 0.05);
+
+        fprintf("  Total genes tested  : %d\n", height(T1));
+        fprintf("  Confident (F+corr)  : %d\n", num_conf_both);
+        fprintf("  F-test only p<0.05  : %d\n", num_pval_conf_ftest);
+        fprintf("  Corr-test only p<0.05: %d\n", num_pval_conf_corr);
+
+        % ── Sort by significance then phase then amplitude ─────────────────
+        [T1, sort_idx] = sortrows(T1, ...
+            ["pvalue_adj_corr","pvalue_adj","Acrophase_24","Abs_Amp"], ...
+            {'ascend','ascend','ascend','descend'});
+        T2 = T2(sort_idx, :);
+
+        % ── T3: ZT00-normalised means (fallback to 2nd col if ZT00 == 0) ──
+        T3       = T2;
+        R0_ref   = T3{:, 2};
+        zero_m   = (R0_ref == 0);
+        R0_ref(zero_m) = T3{zero_m, 3};
+        T3{:, 2:end} = T3{:, 2:end} ./ R0_ref;
+
+        % ── Write ALL-genes files ──────────────────────────────────────────
+        fbase = char(strcat(cell_type, per_label));
+        writetable(T1, fullfile(outdir, [fbase 'circadian_analysis_all.csv']));
+        writetable(T2, fullfile(outdir, [fbase 'circadian_ZTs_mean.csv']));
+        writetable(T3, fullfile(outdir, [fbase 'circadian_ZTs_mean_normalized.csv']));
+
+        % ── Write CONFIDENT-genes files ────────────────────────────────────
         if rm_low_conf
-            T1 = T1(rm_nconfs_idx, :);
-            T2 = T2(rm_nconfs_idx, :);
+            conf_after_sort = conf_both(sort_idx);
+            T1_conf = T1(conf_after_sort, :);
+            T2_conf = T2(conf_after_sort, :);
+            T3_conf = T3(conf_after_sort, :);
+            writetable(T1_conf, fullfile(outdir, [fbase 'circadian_analysis_confident.csv']));
+            writetable(T2_conf, fullfile(outdir, [fbase 'circadian_ZTs_mean_confident.csv']));
+            writetable(T3_conf, fullfile(outdir, [fbase 'circadian_ZTs_mean_normalized_confident.csv']));
         end
-        
+
+        % Summary row
         info_p_type(icell_type, :) = [sce_sub.NumCells, sce_sub.NumGenes, ...
-                                      length(T1.Genes), num_conf_g, num_n_conf_g, ...
-                                      num_pval_conf_ftest, num_pval_conf_corr, ...
-                                      num_adj_conf_g_ftest, num_adj_conf_g_corr];
+                                       height(T1), num_conf_both, num_n_conf, ...
+                                       num_pval_conf_ftest, num_pval_conf_corr, ...
+                                       num_adj_ftest, num_adj_corr];
 
-        % Sort by acrophase and amplitude to classify better
-        [T1, idx] = sortrows(T1, ["pvalue_adj_corr", "pvalue_adj", "Acrophase_24", "Abs_Amp"], ...
-                                {'ascend', 'ascend', 'ascend', 'descend'});
-        
-        T2 = T2(idx, :);
-        if period12
-            per_label = "_period_12_";
-        else
-            per_label = "_period_24_";
-        end
-    
-        fname = strcat(cell_type, per_label);
-        ftable_name = strcat(fname, "_macro_circadian_analysis.csv");
-        writetable(T1, ftable_name);
-        
-        ftable_name = strcat(fname, "_macro_circadian_ZTs.csv");
-        writetable(T2, ftable_name);
-
-        ftable_name = strcat(fname, "_macro_circadian_ZTs_normalized.csv");
-        writetable(T2, ftable_name);
-
-        % Assuming T2 is already defined and T3 = T2;
-        T3 = T2; % Your initial assignment
-        R0_scal = T3{:, 2};
-        zero_indices = (R0_scal == 0);% Find indices where R0_scal is zero
-        scaling_vector = R0_scal;
-        scaling_vector(zero_indices) = T3{zero_indices, 3};
-        T3{:, 2:end} = T3{:, 2:end} ./ scaling_vector;
-
-        ftable_name = strcat(fname, "_macro_circadian_ZTs_normalized.csv");
-        writetable(T3, ftable_name);
-    
         if plot_heat
-            generateHeatmap_circ_simple(sce_sub, cell_type, true, "", false)
+            generateHeatmap_circ_simple(cell_type, true, "", false, period12, outdir);
         end
-        
-    end
-        info_p_type(icell_type, :) = [sce_sub.NumCells, sce_sub.NumGenes, ...
-                                      length(T1.Genes), num_conf_g, num_n_conf_g, ...
-                                      num_pval_conf_ftest, num_pval_conf_corr, ...
-                                      num_adj_conf_g_ftest, num_adj_conf_g_corr];
 
-    T0 = table( cell_type_list, info_p_type(:,1), info_p_type(:,2), ...
-                info_p_type(:,3), info_p_type(:,4), info_p_type(:,5), ...
-                info_p_type(:, 6), info_p_type(:, 7), info_p_type(:, 8), ...
-                info_p_type(:, 9) );
-    T0.Properties.VariableNames = ["CellType", "NumCells", "NumGenes", "NumCircadian", ...
-                                    "NumConfident", "NumNonConfident", ...
-                                    "NumPvalConfFtest", "NumPvalConfCorr", ...
-                                    "NumAdjConfFtest", "NumAdjConfCorr"];
-    if isempty(custom_celltype) 
+    end  % cell-type loop
+
+    % ── Cross-cell-type summary ────────────────────────────────────────────
+    T0 = table(cell_type_list, ...
+               info_p_type(:,1), info_p_type(:,2), info_p_type(:,3), ...
+               info_p_type(:,4), info_p_type(:,5), info_p_type(:,6), ...
+               info_p_type(:,7), info_p_type(:,8), info_p_type(:,9));
+    T0.Properties.VariableNames = ["CellType","NumCells","NumGenes", ...
+                                    "NumTested","NumConfident_Both","NumNonConfident", ...
+                                    "NumPvalConf_Ftest","NumPvalConf_Corr", ...
+                                    "NumAdjConf_Ftest","NumAdjConf_Corr"];
+
+    if isempty(custom_celltype)
         if ncell_types == 1
-            custom_celltype = cell_type_list; 
+            custom_celltype = cell_type_list{1};
         else
-            custom_celltype = 'non_specific';
+            custom_celltype = "all_cell_types";
         end
     end
-    fname = strcat(custom_celltype, "_summary_results.csv");
-    writetable(T0, fname);
+    writetable(T0, strcat(custom_celltype, per_label, "summary_results.csv"));
+    fprintf('\n=== TimeSCape complete.  Total time: %.1f s ===\n', toc);
 
-    disp("Processing complete. Total time elapsed: " + num2str(toc) + " seconds");
+end  % sce_circ_phase_estimation_stattest
+
+% ── Local helper: Benjamini-Hochberg p-value adjustment ───────────────────
+function p_adj = bh_adjust_pvalues(p)
+    [p_sorted, sort_idx] = sort(p(:));
+    m                    = numel(p_sorted);
+    ranks                = (1 : m)';
+    p_adj_sorted         = min(1, p_sorted .* m ./ ranks);
+    % Enforce monotonicity (right-to-left minimum)
+    for k = m-1 : -1 : 1
+        p_adj_sorted(k) = min(p_adj_sorted(k), p_adj_sorted(k+1));
+    end
+    p_adj            = zeros(size(p));
+    p_adj(sort_idx)  = p_adj_sorted;
 end
