@@ -60,9 +60,16 @@ ui <- bslib::page_sidebar(
     p(class="section-header", "③ Analysis Settings"),
     uiOutput("ui_celltype_sel"),
     selectInput("sel_norm", "Normalization:",
-                choices = c("Library size (log1p)" = "lib_size",
-                            "Seurat normalized slot" = "seurat"),
+                choices = c(
+                  "Library size → log1p  (recommended)" = "lib_size",
+                  "Seurat NormalizedData slot"           = "seurat",
+                  "None  (raw counts or pre-normalized)" = "none"
+                ),
                 selected = "lib_size", width = "100%"),
+    helpText(style="font-size:0.78em; color:#555;",
+      "lib_size: per-cell CPM×10k+log1p (safe across stages/replicates). ",
+      "seurat: use slot already computed by NormalizeData()/SCTransform. ",
+      "none: pass counts as-is (use if already normalized externally)."),
     checkboxInput("chk_period12", "Use 12-hr period  (default: 24-hr)", value = FALSE),
     hr(),
 
@@ -95,6 +102,7 @@ ui <- bslib::page_sidebar(
                                    width = "100%", class = "btn-secondary btn-sm"))
     ),
     selectInput("sel_gene", "Single gene:", choices = NULL, width = "100%"),
+    uiOutput("ui_gene_group_sel"),   # appears only when group_col is set
     textInput("txt_gene", "Or type gene name:", value = "", width = "100%"),
     checkboxInput("chk_scdata", "Overlay single-cell data", value = TRUE),
     radioButtons("rad_style", "SC style:",
@@ -191,11 +199,33 @@ server <- function(input, output, session) {
       selectInput("sel_celltype_col", "Cell type column:",
                   choices = meta_cols, selected = ct_default, width = "100%"),
       selectInput("sel_zt_col", "ZT time column:",
-                  choices = meta_cols, selected = zt_default, width = "100%")
+                  choices = meta_cols, selected = zt_default, width = "100%"),
+      selectInput("sel_group_col", "Group by column  (optional):",
+                  choices = c("None", meta_cols), selected = "None", width = "100%"),
+      helpText(style="font-size:0.78em; color:#555;",
+        "Split analysis by a 2nd variable (e.g. cancer stage, replicate, treatment). ",
+        "Each cell-type × group pair is analysed independently and saved to its own folder.")
     )
   })
 
   output$ui_tmeta_status <- renderUI({ NULL })
+
+  # ── Helper: active group column (NULL when "None") ─────────────────────────
+  active_group_col <- reactive({
+    gc <- input$sel_group_col
+    if (is.null(gc) || gc == "None" || !isTruthy(gc)) NULL else gc
+  })
+
+  # ── Group value picker in Gene Explorer (only visible when group_col set) ──
+  output$ui_gene_group_sel <- renderUI({
+    req(rv$seurat_obj)
+    gc <- active_group_col()
+    if (is.null(gc)) return(NULL)
+    grp_vals <- sort(unique(as.character(rv$seurat_obj@meta.data[[gc]])))
+    selectInput("sel_gene_group",
+                paste0(gc, " (group value to plot):"),
+                choices = grp_vals, width = "100%")
+  })
 
   # ── Build / Preview ZT table ──────────────────────────────────────────────
   observeEvent(input$btn_build_tmeta, {
@@ -270,6 +300,7 @@ server <- function(input, output, session) {
 
     withProgress(message = paste("Analysing", ct, "…"), value = 0, {
       tryCatch({
+        gc <- active_group_col()
         res <- run_timescape(
           seurat_obj     = rv$seurat_obj,
           celltype_col   = input$sel_celltype_col,
@@ -280,15 +311,23 @@ server <- function(input, output, session) {
           custom_celltype = ct,
           plot_heat      = FALSE,
           norm_str       = input$sel_norm,
-          outdir         = rv$outdir
+          outdir         = rv$outdir,
+          group_col      = gc
         )
         rv$all_results <- res
-        if (!is.null(res[[ct]])) {
-          rv$T1 <- res[[ct]]$T1
-          rv$T2 <- res[[ct]]$T2
-          n_conf <- sum(res[[ct]]$T1$pvalue < 0.05 & res[[ct]]$T1$pvalue_corr < 0.05)
+        # When group_col active, results are keyed as "CellType_Group"
+        # Use first matching key to populate gene dropdown
+        matching_key <- names(res)[startsWith(names(res),
+                           gsub("[^[:alnum:]_]", "_", trimws(ct)))]
+        first_key <- if (length(matching_key) > 0) matching_key[1] else ct
+        if (!is.null(res[[first_key]])) {
+          rv$T1 <- res[[first_key]]$T1
+          rv$T2 <- res[[first_key]]$T2
+          n_conf <- sum(res[[first_key]]$T1$pvalue < 0.05 &
+                        res[[first_key]]$T1$pvalue_corr < 0.05)
           rv$status_run <- sprintf("✓ Done: %d genes tested, %d confident → %s",
-                                   nrow(rv$T1), n_conf, ct)
+                                   nrow(rv$T1), n_conf,
+                                   if (!is.null(gc)) paste0(ct, " (all groups)") else ct)
           # Populate gene dropdown with confident genes first
           conf_genes <- rv$T1$Genes[rv$T1$pvalue < 0.05 & rv$T1$pvalue_corr < 0.05]
           all_genes  <- rv$T1$Genes
@@ -316,10 +355,11 @@ server <- function(input, output, session) {
           period12     = input$chk_period12,
           plot_heat    = TRUE,
           norm_str     = input$sel_norm,
-          outdir       = rv$outdir
+          outdir       = rv$outdir,
+          group_col    = active_group_col()
         )
         rv$all_results <- res
-        rv$status_run  <- sprintf("✓ All types done (%d cell types)", length(res))
+        rv$status_run  <- sprintf("✓ All types done (%d combinations)", length(res))
       }, error = function(e) {
         rv$status_run <- paste("✗ Error:", e$message)
       })
@@ -329,14 +369,19 @@ server <- function(input, output, session) {
   # ── ⑤ GENERATE HEATMAP ────────────────────────────────────────────────────
   observeEvent(input$btn_heatmap, {
     req(rv$T1, rv$current_celltype)
-    ct     <- rv$current_celltype
+    ct      <- rv$current_celltype
     ct_safe <- gsub("[^[:alnum:]_]", "_", trimws(ct))
-    ct_outdir <- file.path(rv$outdir, ct_safe)
+    gc      <- active_group_col()
+    grp_safe <- if (!is.null(gc) && isTruthy(input$sel_gene_group))
+                  gsub("[^[:alnum:]_]", "_", trimws(input$sel_gene_group))
+                else NULL
+    combo_name <- if (!is.null(grp_safe)) paste0(ct_safe, "_", grp_safe) else ct_safe
+    ct_outdir <- file.path(rv$outdir, combo_name)
     per_label <- if (input$chk_period12) "_period_12_" else "_period_24_"
 
     tryCatch({
       ph <- generate_heatmap(
-        celltype    = ct_safe,
+        celltype    = combo_name,
         strict      = input$chk_strict_heat,
         custom_name = input$txt_custom_label,
         circ        = input$chk_circ_heat,
@@ -359,12 +404,17 @@ server <- function(input, output, session) {
     req(rv$T1, rv$tmeta, rv$current_celltype)
     ct      <- rv$current_celltype
     ct_safe <- gsub("[^[:alnum:]_]", "_", trimws(ct))
-    ct_outdir <- file.path(rv$outdir, ct_safe)
+    gc      <- active_group_col()
+    grp_safe <- if (!is.null(gc) && isTruthy(input$sel_gene_group))
+                  gsub("[^[:alnum:]_]", "_", trimws(input$sel_gene_group))
+                else NULL
+    combo_name <- if (!is.null(grp_safe)) paste0(ct_safe, "_", grp_safe) else ct_safe
+    ct_outdir <- file.path(rv$outdir, combo_name)
     withProgress(message = "Saving batch plots…", value = 0, {
       tryCatch({
         save_batch_plots(
           tmeta      = rv$tmeta,
-          cust_cells = ct_safe,
+          cust_cells = combo_name,
           plot_type  = as.integer(input$sel_batch_type),
           period12   = input$chk_period12,
           outdir     = ct_outdir
@@ -388,12 +438,17 @@ server <- function(input, output, session) {
 
     ct      <- rv$current_celltype
     ct_safe <- gsub("[^[:alnum:]_]", "_", trimws(ct))
-    ct_outdir <- file.path(rv$outdir, ct_safe)
+    gc      <- active_group_col()
+    grp_safe <- if (!is.null(gc) && isTruthy(input$sel_gene_group))
+                  gsub("[^[:alnum:]_]", "_", trimws(input$sel_gene_group))
+                else NULL
+    combo_name <- if (!is.null(grp_safe)) paste0(ct_safe, "_", grp_safe) else ct_safe
+    ct_outdir <- file.path(rv$outdir, combo_name)
 
     tryCatch({
       p <- plot_gene_single(
         tmeta         = rv$tmeta,
-        cust_cells    = ct_safe,
+        cust_cells    = combo_name,
         period12      = input$chk_period12,
         cust_gene     = gene,
         print_scdata  = input$chk_scdata,

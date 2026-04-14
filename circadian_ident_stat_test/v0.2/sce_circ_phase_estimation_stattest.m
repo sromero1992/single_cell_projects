@@ -25,7 +25,7 @@ function [T1, T2] = sce_circ_phase_estimation_stattest(sce, tmeta, rm_low_conf, 
 %   custom_genelist- (default []) Restrict to these genes.
 %   custom_celltype- (default []) Restrict to this cell type.
 %   plot_heat      - (default true) Generate heatmap after analysis.
-%   norm_str       - (default 'lib_size') 'lib_size' | 'magic_impute'.
+%   norm_str       - (default 'lib_size') 'lib_size' | 'none' | 'magic_impute'.
 %
 % OUTPUTS:
 %   T1  - Circadian statistics table, ALL genes (no p-value filter).
@@ -77,16 +77,31 @@ function [T1, T2] = sce_circ_phase_estimation_stattest(sce, tmeta, rm_low_conf, 
         fprintf('  Parallel pool (%d workers) warmed up in %.1f s\n', numCores, toc(tic_warm));
     end
 
-    % ── Normalisation (once on the full object) ────────────────────────────
+    % ── Normalisation strategy ─────────────────────────────────────────────
+    % MEMORY NOTE: For large datasets (>500k cells) 'lib_size' normalises
+    % per-cell-type inside the loop below to avoid holding the full dense
+    % matrix in RAM.  For lib-size/10k this is mathematically IDENTICAL to
+    % normalising the full matrix first, because each cell's size factor
+    % depends only on its own total count sum — not on which other cells
+    % or genes are present.  Cancer-stage mixing, replicate mixing, etc.
+    % do NOT affect the result.
+    %
+    % norm_str options:
+    %   'lib_size'     — library-size to 10k + log1p  (default, recommended)
+    %   'none'         — use sce.X as-is (pass already-normalised data,
+    %                    or raw counts if you know what you are doing)
+    %   'magic_impute' — MAGIC imputation (slow, for cancer/dropout-heavy data)
     fprintf('  Normalisation: %s\n', norm_str);
-    if strcmp(norm_str, 'lib_size')
-        X = pkg.norm_libsize(sce.X, 1e4);  % scGEAtoolbox library-size norm
-        X = log1p(X);                       % log1p of the *normalised* matrix
-    else
+
+    % For MAGIC we must normalise the full object upfront (MAGIC is not
+    % per-cell-independent).  For lib_size / none we defer to the loop.
+    if strcmp(norm_str, 'magic_impute')
         X = sc_impute(sce.X, 'MAGIC');
+        sce.X = sparse(X);
+        clear X;
     end
-    sce.X = sparse(X);
-    clear X;
+    % lib_size and none: sce.X left untouched here; normalisation (or not)
+    % happens inside the cell-type loop to keep peak RAM minimal.
 
     % ── Cell-type loop ─────────────────────────────────────────────────────
     cell_type_list = unique(sce.c_cell_type_tx);
@@ -112,6 +127,22 @@ function [T1, T2] = sce_circ_phase_estimation_stattest(sce, tmeta, rm_low_conf, 
         idx     = find(sce.c_cell_type_tx == cell_type);
         sce_sub = sce.selectcells(idx);
         clear idx;
+
+        % ── Per-cell-type normalisation (lib_size / none) ──────────────────
+        % Applying lib-size here uses only sce_sub — peak RAM = one cell type
+        % at a time, not the full object.  The result is bit-for-bit identical
+        % to normalising the full matrix because lib-size is per-cell.
+        if strcmp(norm_str, 'lib_size')
+            X_ct = pkg.norm_libsize(sce_sub.X, 1e4);
+            X_ct = log1p(X_ct);
+            sce_sub.X = sparse(X_ct);
+            clear X_ct;
+        elseif strcmp(norm_str, 'none')
+            % Use sce_sub.X unchanged (pass pre-normalised or raw counts)
+            % No copy needed — sce_sub already holds the subset.
+        end
+        % magic_impute path: sce.X was already replaced above, so sce_sub.X
+        % inherits the imputed values from selectcells().
 
         % Gene list
         if isempty(custom_genelist)

@@ -110,7 +110,18 @@ build_tmeta_from_seurat <- function(seurat_obj, zt_col) {
 #' @param norm_str       "lib_size" (default): library-size norm + log1p, identical
 #'                       to MATLAB pkg.norm_libsize(X,1e4).
 #'                       "seurat": use the Seurat normalized data slot directly.
+#'                       "none": use raw counts as-is (pass pre-normalised data or
+#'                       raw counts when no transformation is desired).
 #' @param outdir         Root output directory. Per-cell-type subdirs are created inside.
+#' @param group_col      Optional. Metadata column name for a second grouping variable
+#'                       (e.g. cancer stage, treatment, replicate).  When provided,
+#'                       the analysis is run independently for every
+#'                       (cell_type × group) combination, each written to its own
+#'                       subdirectory  outdir/CellType_Group/.
+#'                       NULL (default) = no secondary grouping (single loop over
+#'                       cell types only — equivalent to previous behaviour).
+#' @param custom_group   Character vector of group values to restrict analysis.
+#'                       NULL (default) = all unique values in group_col.
 #'
 #' @return Named list of lists; one entry per cell type processed, each with:
 #'   $T1 — stats data.frame (Genes, Amp, Abs_Amp, Mesor, Acrophase, Acrophase_24,
@@ -149,7 +160,9 @@ run_timescape <- function(
   custom_celltype = NULL,
   plot_heat      = TRUE,
   norm_str       = "lib_size",
-  outdir         = getwd()
+  outdir         = getwd(),
+  group_col      = NULL,
+  custom_group   = NULL
 ) {
   tic <- proc.time()["elapsed"]
 
@@ -161,6 +174,33 @@ run_timescape <- function(
   if (!zt_col %in% colnames(meta))
     stop(sprintf("zt_col='%s' not in metadata. Available: %s",
                  zt_col, paste(colnames(meta), collapse=", ")))
+
+  # ── Optional second grouping column ──────────────────────────────────────────
+  # When group_col is provided, the analysis loops over every
+  # (cell_type × group) combination independently.  Each combo is saved to its
+  # own sub-directory outdir/CellType_Group/ and file prefix CellType_Group_.
+  # Because lib_size normalisation is per-cell, splitting by group is always
+  # mathematically equivalent to processing all cells together — no bias.
+  use_groups <- !is.null(group_col) &&
+                length(trimws(group_col)) > 0 &&
+                trimws(group_col) != "None"
+  if (use_groups) {
+    if (!group_col %in% colnames(meta))
+      stop(sprintf("group_col='%s' not in metadata. Available: %s",
+                   group_col, paste(colnames(meta), collapse=", ")))
+    group_vec  <- as.character(meta[[group_col]])
+    groups_all <- sort(unique(group_vec))
+    if (!is.null(custom_group))
+      groups_all <- groups_all[groups_all %in% custom_group]
+    if (length(groups_all) == 0)
+      stop("No group values remain after applying custom_group filter.")
+    message("  Group column: '", group_col, "'  (",
+            length(groups_all), " values: ",
+            paste(groups_all, collapse=", "), ")")
+  } else {
+    group_vec  <- NULL
+    groups_all <- NULL   # sentinel: single NULL means "no inner loop"
+  }
 
   # ── Build tmeta if not provided ─────────────────────────────────────────────
   if (is.null(tmeta)) {
@@ -176,25 +216,44 @@ run_timescape <- function(
 
   if (!dir.exists(outdir)) dir.create(outdir, showWarnings = FALSE, recursive = TRUE)
 
-  # ── Extract and normalize expression matrix ─────────────────────────────────
+  # ── Normalisation strategy ────────────────────────────────────────────────
+  # norm_str options:
+  #   "lib_size" — library-size to 10k + log1p, computed per-cell-type inside
+  #                the loop below to minimise peak RAM.  IDENTICAL result to
+  #                normalising the full matrix first because lib-size is a
+  #                per-cell operation (each cell divided by its own sum).
+  #                Cancer-stage mixing, replicate mixing, etc. do NOT affect
+  #                the result.  Safe to use even when stages are in the same
+  #                Seurat object.
+  #   "seurat"   — use Seurat's pre-computed NormalizedData slot (RNA$data or
+  #                GetAssayData slot="data").  Use this if you already ran
+  #                NormalizeData() / SCTransform.
+  #   "none"     — use raw counts as-is from the counts slot.  Use when you
+  #                have already normalised and stored results in counts, or
+  #                when you explicitly want no transformation.
   message("  Normalisation: ", norm_str)
-  if (norm_str == "seurat") {
-    X_norm <- as.matrix(.get_seurat_matrix(seurat_obj, use_normalized = TRUE))
-  } else {
-    # lib_size: same as MATLAB pkg.norm_libsize(X, 1e4) + log1p
-    X_raw  <- as.matrix(.get_seurat_matrix(seurat_obj, use_normalized = FALSE))
-    csumsX <- colSums(X_raw)
-    csumsX[csumsX == 0] <- 1   # avoid /0
-    X_norm <- log1p(t(t(X_raw) / csumsX * 1e4))
-    rm(X_raw)
-  }
-  gene_names <- rownames(X_norm)
 
-  # Optional gene filter
+  # For "seurat" we pull the full normalised matrix once (it is already in RAM
+  # inside the Seurat object, so no extra cost).
+  # For "lib_size" and "none" we defer to the cell-type loop.
+  if (norm_str == "seurat") {
+    X_global <- as.matrix(.get_seurat_matrix(seurat_obj, use_normalized = TRUE))
+    gene_names_global <- rownames(X_global)
+  } else {
+    # Store only the raw sparse matrix reference — no dense copy yet
+    X_global_raw      <- .get_seurat_matrix(seurat_obj, use_normalized = FALSE)
+    gene_names_global <- rownames(X_global_raw)
+  }
+
+  # Optional gene filter applied to the global gene list
   if (!is.null(custom_genelist)) {
-    keep       <- gene_names %in% custom_genelist
-    X_norm     <- X_norm[keep, , drop = FALSE]
-    gene_names <- gene_names[keep]
+    keep_genes <- gene_names_global %in% custom_genelist
+    gene_names_global <- gene_names_global[keep_genes]
+    if (norm_str == "seurat") {
+      X_global <- X_global[keep_genes, , drop = FALSE]
+    } else {
+      X_global_raw <- X_global_raw[keep_genes, , drop = FALSE]
+    }
   }
 
   # ── Cell-type loop ───────────────────────────────────────────────────────────
@@ -210,18 +269,54 @@ run_timescape <- function(
   summary_rows    <- list()
 
   for (ct in cell_types_all) {
-    message("\nProcessing cell type: ", ct)
 
-    # Per-cell-type output directory (sanitised name)
-    ct_safe  <- gsub("[^[:alnum:]_]", "_", trimws(ct))
-    ct_outdir <- file.path(outdir, ct_safe)
-    if (!dir.exists(ct_outdir)) dir.create(ct_outdir, showWarnings=FALSE, recursive=TRUE)
-    message("  Output directory: ", ct_outdir)
+    # When group_col is active we loop over group values; otherwise a single
+    # NULL pass replicates the original single-loop behaviour.
+    iter_groups <- if (use_groups) groups_all else list(NULL)
 
-    # Subset cells
-    ct_mask   <- cell_type_vec == ct
-    X_ct      <- X_norm[, ct_mask, drop = FALSE]
-    zt_ct_str <- zt_str_vec[ct_mask]
+    for (grp in iter_groups) {
+
+      # ── Combo label for directory / file naming ──────────────────────────
+      ct_safe   <- gsub("[^[:alnum:]_]", "_", trimws(ct))
+      grp_safe  <- if (!is.null(grp))
+                     gsub("[^[:alnum:]_]", "_", trimws(as.character(grp)))
+                   else NULL
+      combo_name <- if (!is.null(grp_safe)) paste0(ct_safe, "_", grp_safe)
+                    else ct_safe
+
+      if (use_groups) {
+        message("\nProcessing cell type: ", ct,
+                "  [", group_col, " = ", grp, "]")
+      } else {
+        message("\nProcessing cell type: ", ct)
+      }
+
+      # Per-(cell-type × group) output directory
+      ct_outdir <- file.path(outdir, combo_name)
+      if (!dir.exists(ct_outdir)) dir.create(ct_outdir, showWarnings=FALSE, recursive=TRUE)
+      message("  Output directory: ", ct_outdir)
+
+      # Subset cells — cell type, and optionally group
+      ct_mask   <- cell_type_vec == ct
+      if (!is.null(grp)) ct_mask <- ct_mask & (group_vec == grp)
+      zt_ct_str <- zt_str_vec[ct_mask]
+
+    # ── Per-cell-type normalisation (low-RAM path) ─────────────────────────
+    # Extracting and normalising only the cells for this cell type keeps peak
+    # RAM to one dense cell-type matrix at a time instead of the full dataset.
+    if (norm_str == "seurat") {
+      X_ct <- as.matrix(X_global[, ct_mask, drop = FALSE])
+    } else if (norm_str == "lib_size") {
+      X_ct_raw  <- as.matrix(X_global_raw[, ct_mask, drop = FALSE])
+      csumsX    <- colSums(X_ct_raw)
+      csumsX[csumsX == 0] <- 1
+      X_ct      <- log1p(t(t(X_ct_raw) / csumsX * 1e4))
+      rm(X_ct_raw)
+    } else {  # "none"
+      X_ct <- as.matrix(X_global_raw[, ct_mask, drop = FALSE])
+    }
+
+    gene_names <- gene_names_global
 
     # Map ZT strings → numeric times using tmeta
     zt_num_ct <- tmeta$ZT_times[match(zt_ct_str, tmeta$zt_str)]
@@ -348,7 +443,7 @@ run_timescape <- function(
     message("  Confident (F+corr p<0.05): ", sum(conf_both))
 
     # ── Write CSVs ────────────────────────────────────────────────────────────
-    fbase <- paste0(ct_safe, per_label)
+    fbase <- paste0(combo_name, per_label)
     write.csv(T1,      file.path(ct_outdir, paste0(fbase, "circadian_analysis_all.csv")),      row.names=FALSE)
     write.csv(T2,      file.path(ct_outdir, paste0(fbase, "circadian_ZTs_mean.csv")),          row.names=FALSE)
     write.csv(T3,      file.path(ct_outdir, paste0(fbase, "circadian_ZTs_mean_normalized.csv")),row.names=FALSE)
@@ -361,15 +456,17 @@ run_timescape <- function(
     # ── Optional heatmap ─────────────────────────────────────────────────────
     if (plot_heat && nrow(T1_conf) > 1) {
       tryCatch(
-        generate_heatmap(ct_safe, strict=TRUE, custom_name="", circ=FALSE,
+        generate_heatmap(combo_name, strict=TRUE, custom_name="", circ=FALSE,
                          period12=period12, outdir=ct_outdir),
         error = function(e) message("  Heatmap warning: ", e$message)
       )
     }
 
-    all_results[[ct]] <- list(T1 = T1, T2 = T2)
-    summary_rows[[ct]] <- data.frame(
+    all_results[[combo_name]] <- list(T1 = T1, T2 = T2)
+    summary_rows[[combo_name]] <- data.frame(
       CellType            = ct,
+      Group               = if (!is.null(grp)) grp else NA_character_,
+      ComboName           = combo_name,
       NumCells            = sum(ct_mask),
       NumGenes            = ngenes,
       NumTested           = nrow(T1),
@@ -377,6 +474,8 @@ run_timescape <- function(
       NumNonConfident     = sum(!conf_both),
       stringsAsFactors    = FALSE
     )
+
+    }  # end group loop
   }  # end cell-type loop
 
   # ── Cross-cell-type summary CSV ──────────────────────────────────────────────

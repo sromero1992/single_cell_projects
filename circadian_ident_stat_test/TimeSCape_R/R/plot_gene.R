@@ -189,7 +189,7 @@ plot_gene_single <- function(
                         vjust=-0.4, hjust=-0.1, colour=col_acro, size=3.5) +
       ggplot2::scale_colour_manual(
         values = c("Cosine fit" = col_cos, "Mean per ZT" = col_mean),
-        breaks = c("Violin", "Cosine fit", "Mean per ZT")
+        breaks = c("Cosine fit", "Mean per ZT")   # "Violin" is shown via fill scale
       ) +
       ggplot2::ylim(0, y_max)
 
@@ -221,7 +221,8 @@ plot_gene_single <- function(
       ggplot2::scale_colour_manual(
         values = c("Cosine fit"   = col_cos,
                    "Mean per ZT"  = col_mean,
-                   "Single cells" = col_dots),
+                   "Single cells" = col_dots,
+                   "Acrophase"    = col_acro),   # needed so swatch gets correct colour
         breaks = c("Cosine fit", "Mean per ZT",
                    if (print_scdata && nc_cum > 0) "Single cells",
                    "Acrophase")
@@ -353,12 +354,6 @@ save_batch_plots <- function(
                         label=sprintf("ZT%.1f",acro24),
                         vjust=-0.4, hjust=-0.1, colour=col_acro, size=3.2) +
       ggplot2::scale_colour_manual(
-        values = c("Cosine fit"="$col_cos", "Mean per ZT"=col_mean),
-        breaks = c("Cosine fit","Mean per ZT","Acrophase")
-      )
-
-    # Fix colour literal
-    p <- p + ggplot2::scale_colour_manual(
         values = c("Cosine fit"  = col_cos,
                    "Mean per ZT" = col_mean),
         breaks = c("Cosine fit", "Mean per ZT")

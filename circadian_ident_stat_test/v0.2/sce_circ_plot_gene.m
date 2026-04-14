@@ -15,7 +15,8 @@ function sce_circ_plot_gene(sce, tmeta, cust_cells, period12, cust_gene, ...
 %   cust_gene      - Gene name string.
 %   axHandle       - Axes handle to plot into.
 %   print_scdata   - Logical; overlay single-cell scatter/violin.
-%   norm_str       - 'lib_size' or 'magic_impute'.
+%   norm_str       - 'lib_size' | 'magic_impute' | 'none'.
+%                    'none' = use sce.X as-is (no transformation).
 %   use_violin_plot- Logical; violin (true) or scatter (false).
 %   outdir         - Full path to cell-type output directory.
 
@@ -83,10 +84,12 @@ function sce_circ_plot_gene(sce, tmeta, cust_cells, period12, cust_gene, ...
         if strcmp(norm_str, 'lib_size')
             X_norm = pkg.norm_libsize(sce.X, 1e4);
             X_norm = log1p(X_norm);
-        else
+            sce.X  = X_norm; clear X_norm;
+        elseif strcmp(norm_str, 'magic_impute')
             X_norm = sc_impute(sce.X, 'MAGIC');
+            sce.X  = X_norm; clear X_norm;
         end
-        sce.X = X_norm; clear X_norm;
+        % 'none': sce.X already holds data as-is — no transformation applied.
 
         ic0     = find(sce.c_cell_type_tx == cust_cells);
         sce_sub = sce.selectcells(ic0);
