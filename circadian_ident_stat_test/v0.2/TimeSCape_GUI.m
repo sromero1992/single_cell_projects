@@ -89,9 +89,17 @@ function TimeSCape_GUI
     % magic_impute = MAGIC imputation (slow; for dropout-heavy / cancer data)
 
     hPeriod12 = uicontrol('Parent',cpan,'Style','checkbox',...
-        'Position',pn(12,534,310,22),...
-        'String','Use 12-hr period  (default: 24-hr period)',...
+        'Position',pn(12,534,188,22),...
+        'String','Use 12-hr period',...
         'BackgroundColor',PAN_BG);
+
+    uicontrol('Parent',cpan,'Style','text','Position',pn(204,537,54,16),...
+        'String','Workers:','BackgroundColor',PAN_BG,'HorizontalAlignment','left');
+    default_cores = max(2, ceil(feature('numcores') / 4));
+    hCores = uicontrol('Parent',cpan,'Style','edit',...
+        'Position',pn(260,534,68,22),...
+        'String',num2str(default_cores),'BackgroundColor','white',...
+        'TooltipString',sprintf('Parallel workers (default = max(2, numcores/4) = %d)', default_cores));
 
     % ── ③ Run Analysis ─────────────────────────────────────────────────────
     section_label(cpan, pn(8,504,320,18), '③ Run Analysis  →  writes ALL + Confident files', ACCENT, PAN_BG);
@@ -319,15 +327,16 @@ function TimeSCape_GUI
     % ── ③ Run Analysis ─────────────────────────────────────────────────────
     function runAnalysisCallback(~,~)
         if ~check_tmeta(); return; end
-        celltype = get_sel(hCells);
-        period12 = logical(hPeriod12.Value);
-        norm_str = get_sel(hNorm);
+        celltype  = get_sel(hCells);
+        period12  = logical(hPeriod12.Value);
+        norm_str  = get_sel(hNorm);
+        n_workers = parse_cores(hCores, default_cores);
 
         set(hRunStatus,'String','⏳  Running analysis…','ForegroundColor',[0.4 0.2 0]);
         drawnow;
         try
             [T1, T2] = sce_circ_phase_estimation_stattest(sce, guiData.tmeta, ...
-                           true, period12, [], celltype, false, norm_str);
+                           true, period12, [], celltype, false, norm_str, n_workers);
             n_all  = height(T1);
             n_conf = sum((T1.pvalue < 0.05) & (T1.pvalue_corr < 0.05));
             % Store output directory so other callbacks can find the files
@@ -346,8 +355,9 @@ function TimeSCape_GUI
     % ── ③b Run ALL cell types ─────────────────────────────────────────────
     function runAllCallback(~,~)
         if ~check_tmeta(); return; end
-        period12 = logical(hPeriod12.Value);
-        norm_str = get_sel(hNorm);
+        period12  = logical(hPeriod12.Value);
+        norm_str  = get_sel(hNorm);
+        n_workers = parse_cores(hCores, default_cores);
 
         all_types = unique(sce.c_cell_type_tx);
         n_types   = numel(all_types);
@@ -364,7 +374,7 @@ function TimeSCape_GUI
         % leaving every subsequent call with no matching cells.
         try
             [T1, ~] = sce_circ_phase_estimation_stattest(sce, guiData.tmeta, ...
-                           true, period12, [], {}, false, norm_str);
+                           true, period12, [], {}, false, norm_str, n_workers);
             n_all_total  = height(T1);
             n_conf_total = sum((T1.pvalue < 0.05) & (T1.pvalue_corr < 0.05));
             set(hRunStatus,'String', ...
@@ -582,6 +592,15 @@ function TimeSCape_GUI
     function str = get_sel(hctrl)
         opts = cellstr(hctrl.String);
         str  = opts{hctrl.Value};
+    end
+
+    function n = parse_cores(hctrl, fallback)
+        % Read the Workers edit box; fall back to default if invalid.
+        n = round(str2double(strtrim(hctrl.String)));
+        if isnan(n) || n < 1
+            n = fallback;
+            hctrl.String = num2str(n);   % reset display to valid value
+        end
     end
 
     function sce = load_sce_data()

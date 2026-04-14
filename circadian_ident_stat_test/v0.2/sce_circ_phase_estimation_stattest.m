@@ -1,5 +1,5 @@
 function [T1, T2] = sce_circ_phase_estimation_stattest(sce, tmeta, rm_low_conf, period12, ...
-                                    custom_genelist, custom_celltype, plot_heat, norm_str)
+                                    custom_genelist, custom_celltype, plot_heat, norm_str, num_cores)
 % SCE_CIRC_PHASE_ESTIMATION_STATTEST
 %   TimeSCape circadian-rhythm detection pipeline on a SingleCellExperiment.
 %
@@ -26,6 +26,7 @@ function [T1, T2] = sce_circ_phase_estimation_stattest(sce, tmeta, rm_low_conf, 
 %   custom_celltype- (default []) Restrict to this cell type.
 %   plot_heat      - (default true) Generate heatmap after analysis.
 %   norm_str       - (default 'lib_size') 'lib_size' | 'none' | 'magic_impute'.
+%   num_cores      - (default max(2,ceil(numcores/4))) parallel pool workers.
 %
 % OUTPUTS:
 %   T1  - Circadian statistics table, ALL genes (no p-value filter).
@@ -50,6 +51,10 @@ function [T1, T2] = sce_circ_phase_estimation_stattest(sce, tmeta, rm_low_conf, 
     if nargin < 6  || isempty(custom_celltype);  custom_celltype = {};         end
     if nargin < 7  || isempty(plot_heat);        plot_heat       = true;       end
     if nargin < 8  || isempty(norm_str);         norm_str        = 'lib_size'; end
+    if nargin < 9  || isempty(num_cores)
+        num_cores = max(2, ceil(feature('numcores') / 4));
+    end
+    num_cores = max(1, round(num_cores));
 
     if period12; per_label = "_period_12_"; else; per_label = "_period_24_"; end
     disp("Circadian identification — period: " + strtrim(per_label));
@@ -69,12 +74,27 @@ function [T1, T2] = sce_circ_phase_estimation_stattest(sce, tmeta, rm_low_conf, 
     disp("  Batches after re-labelling: " + strjoin(batches', ', '));
 
     % ── Parallel pool ──────────────────────────────────────────────────────
-    if isempty(gcp('nocreate'))
-        numCores = max(2, ceil(feature('numcores') / 4));
-        parpool(numCores);
+    fprintf('  Parallel workers requested: %d\n', num_cores);
+    pool = gcp('nocreate');
+    if isempty(pool)
+        % No pool exists — start fresh
+        parpool(num_cores);
         tic_warm = tic;
-        parfor i = 1:numCores; pause(0.01); end
-        fprintf('  Parallel pool (%d workers) warmed up in %.1f s\n', numCores, toc(tic_warm));
+        parfor i = 1:num_cores; pause(0.01); end  % warm up workers
+        fprintf('  Parallel pool started and warmed up (%d workers, %.1f s)\n', ...
+                num_cores, toc(tic_warm));
+    elseif pool.NumWorkers ~= num_cores
+        % Pool exists but wrong size — restart with correct count
+        fprintf('  Resizing pool: %d → %d workers…\n', pool.NumWorkers, num_cores);
+        delete(pool);
+        parpool(num_cores);
+        tic_warm = tic;
+        parfor i = 1:num_cores; pause(0.01); end
+        fprintf('  Parallel pool resized and warmed up (%d workers, %.1f s)\n', ...
+                num_cores, toc(tic_warm));
+    else
+        % Correct pool already running — reuse, no warm-up needed
+        fprintf('  Parallel pool already running (%d workers) — reusing.\n', pool.NumWorkers);
     end
 
     % ── Normalisation strategy ─────────────────────────────────────────────
