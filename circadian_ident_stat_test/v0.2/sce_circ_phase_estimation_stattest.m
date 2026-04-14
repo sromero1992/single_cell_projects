@@ -94,13 +94,13 @@ function [T1, T2] = sce_circ_phase_estimation_stattest(sce, tmeta, rm_low_conf, 
     fprintf('  Normalisation: %s\n', norm_str);
 
     % For MAGIC we must normalise the full object upfront (MAGIC is not
-    % per-cell-independent).  For lib_size / none we defer to the loop.
+    % per-cell-independent).  Store in X_magic — never mutate sce.X so
+    % that repeated per-cell-type calls all see the original handle object.
+    X_magic = [];
     if strcmp(norm_str, 'magic_impute')
-        X = sc_impute(sce.X, 'MAGIC');
-        sce.X = sparse(X);
-        clear X;
+        X_magic = sparse(sc_impute(sce.X, 'MAGIC'));
     end
-    % lib_size and none: sce.X left untouched here; normalisation (or not)
+    % lib_size and none: sce.X left untouched; normalisation (or not)
     % happens inside the cell-type loop to keep peak RAM minimal.
 
     % ── Cell-type loop ─────────────────────────────────────────────────────
@@ -124,35 +124,37 @@ function [T1, T2] = sce_circ_phase_estimation_stattest(sce, tmeta, rm_low_conf, 
         if ~exist(outdir, 'dir'); mkdir(outdir); end
         fprintf("  Output directory: %s\n", outdir);
 
-        idx     = find(sce.c_cell_type_tx == cell_type);
-        sce_sub = sce.selectcells(idx);
-        clear idx;
+        % ── Direct-index subset — NEVER call selectcells() on a handle object ─
+        % selectcells() mutates the caller's sce in place (handle semantics),
+        % permanently restricting sce.c_cell_type_tx for all future iterations.
+        % Instead, keep all data in sce untouched and use column indices.
+        ct_idx     = find(sce.c_cell_type_tx == cell_type);
+        n_cells_ct = length(ct_idx);
 
-        % ── Per-cell-type normalisation (lib_size / none) ──────────────────
-        % Applying lib-size here uses only sce_sub — peak RAM = one cell type
-        % at a time, not the full object.  The result is bit-for-bit identical
-        % to normalising the full matrix because lib-size is per-cell.
+        % ── Per-cell-type normalisation ────────────────────────────────────
+        % lib_size: peak RAM = one dense submatrix at a time; result is
+        % bit-for-bit identical to normalising the full matrix because
+        % lib-size depends only on each cell's own total count sum.
         if strcmp(norm_str, 'lib_size')
-            X_ct = pkg.norm_libsize(sce_sub.X, 1e4);
-            X_ct = log1p(X_ct);
-            sce_sub.X = sparse(X_ct);
-            clear X_ct;
-        elseif strcmp(norm_str, 'none')
-            % Use sce_sub.X unchanged (pass pre-normalised or raw counts)
-            % No copy needed — sce_sub already holds the subset.
+            X_sub = pkg.norm_libsize(sce.X(:, ct_idx), 1e4);
+            X_sub = sparse(log1p(X_sub));
+        elseif strcmp(norm_str, 'magic_impute')
+            X_sub = X_magic(:, ct_idx);
+        else  % 'none'
+            X_sub = sce.X(:, ct_idx);
         end
-        % magic_impute path: sce.X was already replaced above, so sce_sub.X
-        % inherits the imputed values from selectcells().
+        batch_sub = sce.c_batch_id(ct_idx);
+        clear ct_idx;
 
         % Gene list
         if isempty(custom_genelist)
-            gene_list = sce_sub.g;
+            gene_list = sce.g;
         else
             if ischar(custom_genelist) || isstring(custom_genelist)
                 custom_genelist = cellstr(custom_genelist);
             end
             if iscolumn(custom_genelist); custom_genelist = custom_genelist'; end
-            [lic, ~] = ismember(custom_genelist, sce_sub.g);
+            [lic, ~] = ismember(custom_genelist, sce.g);
             gene_list = custom_genelist(lic);
             disp("  Matching genes: " + strjoin(gene_list, ', '));
         end
@@ -161,7 +163,7 @@ function [T1, T2] = sce_circ_phase_estimation_stattest(sce, tmeta, rm_low_conf, 
         % ── Time-point discovery ───────────────────────────────────────────
         % Only use time points that actually have cells.
         % Build actual_times: the true ZT hour for each present batch.
-        batch_time = unique(sce_sub.c_batch_id);
+        batch_time = unique(batch_sub);
         nzts       = length(batch_time);
 
         actual_times = nan(nzts, 1);
@@ -190,7 +192,7 @@ function [T1, T2] = sce_circ_phase_estimation_stattest(sce, tmeta, rm_low_conf, 
         end
 
         % ── Block-parallel cosinor fitting ─────────────────────────────────
-        if sce.NumCells > 15000; block_size = 50; else; block_size = 500; end
+        if n_cells_ct > 15000; block_size = 50; else; block_size = 500; end
         num_blocks = ceil(num_genes / block_size);
 
         acro        = zeros(num_genes, 1);
@@ -202,12 +204,12 @@ function [T1, T2] = sce_circ_phase_estimation_stattest(sce, tmeta, rm_low_conf, 
         rho         = zeros(num_genes, 1);
         p_value_rho = zeros(num_genes, 1);
 
-        % Snapshot variables needed inside parfor
+        % Snapshot variables needed inside parfor (plain arrays, not handles)
         actual_times_snap = actual_times;
         batch_time_snap   = batch_time;
-        sce_sub_X         = sce_sub.X;
-        sce_sub_batch     = sce_sub.c_batch_id;
-        sce_sub_g         = sce_sub.g;
+        sce_sub_X         = X_sub;
+        sce_sub_batch     = batch_sub;
+        sce_sub_g         = sce.g;
 
         progressbar('Starting circadian analysis...');
 
@@ -344,7 +346,7 @@ function [T1, T2] = sce_circ_phase_estimation_stattest(sce, tmeta, rm_low_conf, 
         end
 
         % Summary row
-        info_p_type(icell_type, :) = [sce_sub.NumCells, sce_sub.NumGenes, ...
+        info_p_type(icell_type, :) = [n_cells_ct, length(sce.g), ...
                                        height(T1), num_conf_both, num_n_conf, ...
                                        num_pval_conf_ftest, num_pval_conf_corr, ...
                                        num_adj_ftest, num_adj_corr];

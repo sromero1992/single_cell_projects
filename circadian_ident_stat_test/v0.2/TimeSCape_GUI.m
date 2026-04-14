@@ -357,39 +357,26 @@ function TimeSCape_GUI
             'ForegroundColor',[0.4 0.2 0]);
         drawnow;
 
-        n_all_total  = 0;
-        n_conf_total = 0;
-        errors       = {};
-
-        for ii = 1:n_types
-            ct = char(all_types(ii));
-            set(hRunStatus,'String', ...
-                sprintf('⏳  [%d/%d]  %s…', ii, n_types, ct), ...
-                'ForegroundColor',[0.4 0.2 0]);
-            drawnow;
-            try
-                [T1, ~] = sce_circ_phase_estimation_stattest(sce, guiData.tmeta, ...
-                               true, period12, [], ct, false, norm_str);
-                n_all_total  = n_all_total  + height(T1);
-                n_conf_total = n_conf_total + sum((T1.pvalue < 0.05) & (T1.pvalue_corr < 0.05));
-            catch ME
-                errors{end+1} = sprintf('%s: %s', ct, ME.message); %#ok<AGROW>
-            end
-        end
-
-        if isempty(errors)
+        % Pass custom_celltype = {} (empty) so the function processes ALL
+        % cell types in its own internal loop.  This avoids calling
+        % selectcells() on the handle object from outside — which would
+        % permanently restrict sce to the first cell type processed,
+        % leaving every subsequent call with no matching cells.
+        try
+            [T1, ~] = sce_circ_phase_estimation_stattest(sce, guiData.tmeta, ...
+                           true, period12, [], {}, false, norm_str);
+            n_all_total  = height(T1);
+            n_conf_total = sum((T1.pvalue < 0.05) & (T1.pvalue_corr < 0.05));
             set(hRunStatus,'String', ...
                 sprintf('✓  All %d types done — %d genes, %d confident', ...
                         n_types, n_all_total, n_conf_total), ...
                 'ForegroundColor',[0.1 0.5 0.1]);
-        else
-            set(hRunStatus,'String', ...
-                sprintf('⚠  Done with %d error(s) — see Command Window', numel(errors)), ...
-                'ForegroundColor',[0.65 0.3 0]);
-            fprintf('\n--- Run-All errors ---\n');
-            for e = errors; disp(e{1}); end
+        catch ME
+            set(hRunStatus,'String','✗  Error – see Command Window', ...
+                'ForegroundColor',[0.7 0 0]);
+            errordlg(['Run-All error: ' ME.message], 'Error');
         end
-        % Point outdir to the last successfully processed cell type directory
+        % Point outdir to the last cell type directory (alphabetically last)
         outdir_name    = regexprep(strtrim(char(all_types(end))), '[^\w]', '_');
         guiData.outdir = fullfile(pwd, outdir_name);
     end
