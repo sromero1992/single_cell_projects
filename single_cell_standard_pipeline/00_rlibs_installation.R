@@ -66,8 +66,7 @@ github_pkgs <- c(
   "SplineDV" = "Xenon8778/SplineDV",
   "CellChat" = "jinworks/CellChat",
   "scSGS" = "Xenon8778/scSGS",
-  "leidenbase" = "cole-trapnell-lab/leidenbase",
-  "monocle3" = "cole-trapnell-lab/monocle3"
+  "leidenbase" = "cole-trapnell-lab/leidenbase"
 )
 
 # 3. AUTOMATED INSTALLATION LOGIC
