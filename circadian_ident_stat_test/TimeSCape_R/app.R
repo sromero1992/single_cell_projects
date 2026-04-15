@@ -1,5 +1,5 @@
 # ============================================================================
-# TimeSCape v0.2 — Shiny GUI (Seurat-native)
+# TimeSCape v0.2 — Shiny GUI  (Seurat + SingleCellExperiment)
 # Run with: shiny::runApp("app.R")
 # ============================================================================
 
@@ -26,7 +26,6 @@ ui <- bslib::page_sidebar(
   ),
   theme = bslib::bs_theme(bootswatch = "flatly", base_font = "Helvetica Neue"),
 
-  # ── TOP BAR: load data ────────────────────────────────────────────────────
   tags$head(tags$style(HTML("
     .section-header { color: #1a6ebd; font-weight: bold; margin-top: 8px; }
     .status-ok  { color: #27ae60; font-size: 0.85em; }
@@ -41,7 +40,7 @@ ui <- bslib::page_sidebar(
     open  = "desktop",
 
     # ① LOAD DATA
-    p(class="section-header", "① Load Seurat Object"),
+    p(class="section-header", "① Load Object (.rds)"),
     fileInput("file_seurat", NULL, accept = ".rds",
               buttonLabel = "Browse .rds…", placeholder = "No file selected",
               width = "100%"),
@@ -50,7 +49,7 @@ ui <- bslib::page_sidebar(
 
     # ② DEFINE ZT METADATA
     p(class="section-header", "② Define ZT Time Metadata"),
-    uiOutput("ui_col_selectors"),   # cell-type col + ZT col pickers (appear after load)
+    uiOutput("ui_col_selectors"),
     actionButton("btn_build_tmeta", "Build / Preview ZT Table",
                  width = "100%", class = "btn-primary btn-sm"),
     uiOutput("ui_tmeta_status"),
@@ -62,13 +61,13 @@ ui <- bslib::page_sidebar(
     selectInput("sel_norm", "Normalization:",
                 choices = c(
                   "Library size → log1p  (recommended)" = "lib_size",
-                  "Seurat NormalizedData slot"           = "seurat",
-                  "None  (raw counts or pre-normalized)" = "none"
+                  "Pre-normalized slot (NormData / logcounts)" = "logcounts",
+                  "None  (raw counts or pre-normalized)"       = "none"
                 ),
                 selected = "lib_size", width = "100%"),
     helpText(style="font-size:0.78em; color:#555;",
-      "lib_size: per-cell CPM×10k+log1p (safe across stages/replicates). ",
-      "seurat: use slot already computed by NormalizeData()/SCTransform. ",
+      "lib_size: per-cell CPM×10k + log1p (safe across stages/replicates). ",
+      "Pre-normalized: Seurat NormalizeData slot or SCE 'logcounts' assay. ",
       "none: pass counts as-is (use if already normalized externally)."),
     checkboxInput("chk_period12", "Use 12-hr period  (default: 24-hr)", value = FALSE),
     hr(),
@@ -102,7 +101,7 @@ ui <- bslib::page_sidebar(
                                    width = "100%", class = "btn-secondary btn-sm"))
     ),
     selectInput("sel_gene", "Single gene:", choices = NULL, width = "100%"),
-    uiOutput("ui_gene_group_sel"),   # appears only when group_col is set
+    uiOutput("ui_gene_group_sel"),
     textInput("txt_gene", "Or type gene name:", value = "", width = "100%"),
     checkboxInput("chk_scdata", "Overlay single-cell data", value = TRUE),
     radioButtons("rad_style", "SC style:",
@@ -136,43 +135,75 @@ ui <- bslib::page_sidebar(
 server <- function(input, output, session) {
 
   rv <- reactiveValues(
-    seurat_obj   = NULL,
-    seurat_path  = NULL,
-    tmeta        = NULL,
-    outdir       = getwd(),
-    T1           = NULL,    # last analysis T1 (stats table)
-    T2           = NULL,    # last analysis T2 (per-ZT means)
-    all_results  = NULL,    # full list from run_timescape()
-    current_plot = NULL,    # ggplot or "heatmap" tag for save
+    obj              = NULL,   # Seurat or SingleCellExperiment
+    obj_type         = NULL,   # "Seurat" or "SCE"
+    meta_data        = NULL,   # plain data.frame extracted once on load
+    obj_path         = NULL,
+    tmeta            = NULL,
+    outdir           = getwd(),
+    T1               = NULL,
+    T2               = NULL,
+    all_results      = NULL,
+    current_plot     = NULL,
     current_celltype = NULL,
-    status_run   = "Not yet run"
+    status_run       = "Not yet run"
   )
 
-  # ── ① LOAD SEURAT RDS ─────────────────────────────────────────────────────
+  # ── ① LOAD OBJECT RDS ─────────────────────────────────────────────────────
   output$ui_load_status <- renderUI({ NULL })
 
   observeEvent(input$file_seurat, {
     req(input$file_seurat)
-    withProgress(message = "Loading Seurat object…", value = 0.5, {
+    withProgress(message = "Loading object…", value = 0.5, {
       tryCatch({
         obj <- readRDS(input$file_seurat$datapath)
-        if (!inherits(obj, "Seurat"))
-          stop("The .rds file does not contain a Seurat object.")
-        rv$seurat_obj  <- obj
-        rv$seurat_path <- input$file_seurat$datapath
-        rv$outdir      <- dirname(input$file_seurat$datapath)
 
-        ncells <- ncol(obj); ngenes <- nrow(obj)
-        meta_cols <- colnames(obj@meta.data)
+        if (!inherits(obj, c("Seurat", "SingleCellExperiment", "SummarizedExperiment")))
+          stop("The .rds file must contain a Seurat or SingleCellExperiment object. Got: ",
+               class(obj)[1])
+
+        obj_type <- if (inherits(obj, "Seurat")) "Seurat" else "SCE"
+
+        rv$obj       <- obj
+        rv$obj_type  <- obj_type
+        rv$meta_data <- .get_meta(obj)
+        rv$obj_path  <- input$file_seurat$datapath
+        rv$outdir    <- dirname(input$file_seurat$datapath)
+
+        ncells    <- ncol(obj)
+        ngenes    <- nrow(obj)
+        meta_cols <- colnames(rv$meta_data)
+
         output$ui_load_status <- renderUI(
           tags$p(class = "status-ok",
-                 sprintf("✓ Loaded: %d cells × %d genes | %d metadata columns",
-                         ncells, ngenes, length(meta_cols)))
+                 sprintf("✓ Loaded [%s]: %d cells × %d genes | %d metadata columns",
+                         obj_type, ncells, ngenes, length(meta_cols)))
         )
 
-        # Set parallel workers (use half the cores, min 2)
+        # Set parallel workers (half the cores, min 2)
         nw <- max(2, floor(parallel::detectCores() / 2))
         future::plan(future::multisession, workers = nw)
+
+        # Update normalization selector to suggest pre-norm label based on type
+        if (obj_type == "SCE") {
+          updateSelectInput(session, "sel_norm",
+            choices = c(
+              "Library size → log1p  (recommended)"    = "lib_size",
+              "logcounts assay (SCE pre-normalized)"   = "logcounts",
+              "None  (raw counts or pre-normalized)"   = "none"
+            ),
+            selected = "lib_size"
+          )
+        } else {
+          updateSelectInput(session, "sel_norm",
+            choices = c(
+              "Library size → log1p  (recommended)"              = "lib_size",
+              "Seurat NormalizedData slot (pre-normalized)"      = "logcounts",
+              "None  (raw counts or pre-normalized)"             = "none"
+            ),
+            selected = "lib_size"
+          )
+        }
 
       }, error = function(e) {
         output$ui_load_status <- renderUI(
@@ -182,10 +213,10 @@ server <- function(input, output, session) {
     })
   })
 
-  # ── ② COLUMN SELECTORS (appear once Seurat object is loaded) ─────────────
+  # ── ② COLUMN SELECTORS (appear once object is loaded) ─────────────────────
   output$ui_col_selectors <- renderUI({
-    req(rv$seurat_obj)
-    meta_cols <- colnames(rv$seurat_obj@meta.data)
+    req(rv$obj)
+    meta_cols <- colnames(rv$meta_data)
     # Guess defaults
     ct_default <- if ("cell_type"    %in% meta_cols) "cell_type"
                   else if ("celltype" %in% meta_cols) "celltype"
@@ -216,12 +247,12 @@ server <- function(input, output, session) {
     if (is.null(gc) || gc == "None" || !isTruthy(gc)) NULL else gc
   })
 
-  # ── Group value picker in Gene Explorer (only visible when group_col set) ──
+  # ── Group value picker in Gene Explorer ───────────────────────────────────
   output$ui_gene_group_sel <- renderUI({
-    req(rv$seurat_obj)
+    req(rv$obj)
     gc <- active_group_col()
     if (is.null(gc)) return(NULL)
-    grp_vals <- sort(unique(as.character(rv$seurat_obj@meta.data[[gc]])))
+    grp_vals <- sort(unique(as.character(rv$meta_data[[gc]])))
     selectInput("sel_gene_group",
                 paste0(gc, " (group value to plot):"),
                 choices = grp_vals, width = "100%")
@@ -229,12 +260,11 @@ server <- function(input, output, session) {
 
   # ── Build / Preview ZT table ──────────────────────────────────────────────
   observeEvent(input$btn_build_tmeta, {
-    req(rv$seurat_obj, input$sel_zt_col)
+    req(rv$obj, input$sel_zt_col)
     tryCatch({
-      tmeta <- build_tmeta_from_seurat(rv$seurat_obj, input$sel_zt_col)
+      tmeta <- build_tmeta(rv$obj, input$sel_zt_col)
       rv$tmeta <- tmeta
 
-      # Show editable preview in a modal
       showModal(modalDialog(
         title   = "ZT Time Metadata  –  verify & adjust if needed",
         size    = "m",
@@ -269,19 +299,18 @@ server <- function(input, output, session) {
                      paste(rv$tmeta$zt_str, collapse=", ")))
     )
     # Populate cell-type dropdown
-    ct_vals <- sort(unique(as.character(
-      rv$seurat_obj@meta.data[[input$sel_celltype_col]])))
+    ct_vals <- sort(unique(as.character(rv$meta_data[[input$sel_celltype_col]])))
     updateSelectInput(session, "sel_celltype_run", choices = ct_vals)
   })
 
-  # ── ③ CELL TYPE DROPDOWN (populated after tmeta is confirmed) ─────────────
+  # ── ③ CELL TYPE DROPDOWN ──────────────────────────────────────────────────
   output$ui_celltype_sel <- renderUI({
     selectInput("sel_celltype_run", "Cell Type:",
-                choices = if (!is.null(rv$seurat_obj))
+                choices = if (!is.null(rv$obj))
                   sort(unique(as.character(
-                    rv$seurat_obj@meta.data[[
+                    rv$meta_data[[
                       if (!is.null(input$sel_celltype_col)) input$sel_celltype_col
-                      else colnames(rv$seurat_obj@meta.data)[1]
+                      else colnames(rv$meta_data)[1]
                     ]])))
                 else "Load data first",
                 width = "100%")
@@ -293,7 +322,7 @@ server <- function(input, output, session) {
 
   # ── ④ RUN ANALYSIS (single cell type) ─────────────────────────────────────
   observeEvent(input$btn_run, {
-    req(rv$seurat_obj, rv$tmeta, input$sel_celltype_run)
+    req(rv$obj, rv$tmeta, input$sel_celltype_run)
     ct <- input$sel_celltype_run
     rv$status_run <- paste("Running:", ct, "…")
     rv$current_celltype <- ct
@@ -302,7 +331,7 @@ server <- function(input, output, session) {
       tryCatch({
         gc <- active_group_col()
         res <- run_timescape(
-          seurat_obj     = rv$seurat_obj,
+          obj            = rv$obj,
           celltype_col   = input$sel_celltype_col,
           zt_col         = input$sel_zt_col,
           tmeta          = rv$tmeta,
@@ -315,8 +344,6 @@ server <- function(input, output, session) {
           group_col      = gc
         )
         rv$all_results <- res
-        # When group_col active, results are keyed as "CellType_Group"
-        # Use first matching key to populate gene dropdown
         matching_key <- names(res)[startsWith(names(res),
                            gsub("[^[:alnum:]_]", "_", trimws(ct)))]
         first_key <- if (length(matching_key) > 0) matching_key[1] else ct
@@ -328,7 +355,6 @@ server <- function(input, output, session) {
           rv$status_run <- sprintf("✓ Done: %d genes tested, %d confident → %s",
                                    nrow(rv$T1), n_conf,
                                    if (!is.null(gc)) paste0(ct, " (all groups)") else ct)
-          # Populate gene dropdown with confident genes first
           conf_genes <- rv$T1$Genes[rv$T1$pvalue < 0.05 & rv$T1$pvalue_corr < 0.05]
           all_genes  <- rv$T1$Genes
           updateSelectInput(session, "sel_gene",
@@ -342,12 +368,12 @@ server <- function(input, output, session) {
 
   # ── RUN ALL CELL TYPES ─────────────────────────────────────────────────────
   observeEvent(input$btn_run_all, {
-    req(rv$seurat_obj, rv$tmeta)
+    req(rv$obj, rv$tmeta)
     rv$status_run <- "Running all cell types…"
     withProgress(message = "Running all cell types…", value = 0, {
       tryCatch({
         res <- run_timescape(
-          seurat_obj   = rv$seurat_obj,
+          obj          = rv$obj,
           celltype_col = input$sel_celltype_col,
           zt_col       = input$sel_zt_col,
           tmeta        = rv$tmeta,
@@ -376,8 +402,7 @@ server <- function(input, output, session) {
                   gsub("[^[:alnum:]_]", "_", trimws(input$sel_gene_group))
                 else NULL
     combo_name <- if (!is.null(grp_safe)) paste0(ct_safe, "_", grp_safe) else ct_safe
-    ct_outdir <- file.path(rv$outdir, combo_name)
-    per_label <- if (input$chk_period12) "_period_12_" else "_period_24_"
+    ct_outdir  <- file.path(rv$outdir, combo_name)
 
     tryCatch({
       ph <- generate_heatmap(
@@ -387,7 +412,7 @@ server <- function(input, output, session) {
         circ        = input$chk_circ_heat,
         period12    = input$chk_period12,
         outdir      = ct_outdir,
-        return_obj  = TRUE   # returns pheatmap object for display
+        return_obj  = TRUE
       )
       output$main_plot <- renderPlot({
         grid::grid.newpage()
@@ -409,7 +434,7 @@ server <- function(input, output, session) {
                   gsub("[^[:alnum:]_]", "_", trimws(input$sel_gene_group))
                 else NULL
     combo_name <- if (!is.null(grp_safe)) paste0(ct_safe, "_", grp_safe) else ct_safe
-    ct_outdir <- file.path(rv$outdir, combo_name)
+    ct_outdir  <- file.path(rv$outdir, combo_name)
     withProgress(message = "Saving batch plots…", value = 0, {
       tryCatch({
         save_batch_plots(
@@ -443,7 +468,7 @@ server <- function(input, output, session) {
                   gsub("[^[:alnum:]_]", "_", trimws(input$sel_gene_group))
                 else NULL
     combo_name <- if (!is.null(grp_safe)) paste0(ct_safe, "_", grp_safe) else ct_safe
-    ct_outdir <- file.path(rv$outdir, combo_name)
+    ct_outdir  <- file.path(rv$outdir, combo_name)
 
     tryCatch({
       p <- plot_gene_single(
@@ -452,7 +477,7 @@ server <- function(input, output, session) {
         period12      = input$chk_period12,
         cust_gene     = gene,
         print_scdata  = input$chk_scdata,
-        sce           = if (input$chk_scdata) rv$seurat_obj else NULL,
+        sce           = if (input$chk_scdata) rv$obj else NULL,
         celltype_col  = input$sel_celltype_col,
         zt_col        = input$sel_zt_col,
         use_violin    = (input$rad_style == "violin"),
@@ -476,7 +501,6 @@ server <- function(input, output, session) {
           ggplot2::ggsave(file, cp$p, width=10, height=6.5, dpi=200,
                           device=fmt, bg="white")
         } else {
-          # heatmap
           if (fmt == "pdf") {
             pdf(file, width=10, height=8, bg="white")
           } else if (fmt == "svg") {
@@ -501,8 +525,8 @@ server <- function(input, output, session) {
                         label="TimeSCape v0.2",
                         size=9, fontface="bold", colour="#1a6ebd") +
       ggplot2::annotate("text", x=0.5, y=0.42,
-                        label="Load a Seurat .rds  →  pick metadata columns  →  run analysis",
-                        size=4.5, colour="#555555") +
+                        label="Load a Seurat or SingleCellExperiment .rds  →  pick metadata columns  →  run analysis",
+                        size=4.2, colour="#555555") +
       ggplot2::theme_void() +
       ggplot2::theme(plot.background = ggplot2::element_rect(fill="white", colour=NA))
   }, bg = "white")

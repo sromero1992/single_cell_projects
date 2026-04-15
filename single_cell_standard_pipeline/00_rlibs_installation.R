@@ -31,14 +31,32 @@
 CRAN_mirror <- "https://cloud.r-project.org"
 
 # 1. SET THE PERSONAL LIBRARY PATH
-personal_lib <- if (.Platform$OS.type == "windows") {
-  file.path(Sys.getenv("USERPROFILE"), "Documents", "R_libs_scRNA")
+USE_CUSTOM_LIB <- FALSE 
+
+# 1. SET THE TARGET LIBRARY PATH
+if (USE_CUSTOM_LIB) {
+  personal_lib <- if (.Platform$OS.type == "windows") {
+    file.path(Sys.getenv("USERPROFILE"), "Documents", "R_libs_scRNA")
+  } else {
+    file.path(Sys.getenv("HOME"), "R_libs_scRNA")
+  }
+  
+  if (!dir.exists(personal_lib)) {
+    dir.create(personal_lib, recursive = TRUE)
+    cat("Created new custom library at:", personal_lib, "\n")
+  }
+  
+  # Inject custom path into the front of R's search list
+  .libPaths(c(personal_lib, .libPaths()))
 } else {
-  file.path(Sys.getenv("HOME"), "R_libs_scRNA")
+  # Use the first path in R's default list (usually the user's standard library)
+  personal_lib <- .libPaths()[1]
+  cat("Using default R library path.\n")
 }
-if (!dir.exists(personal_lib)) {
-  dir.create(personal_lib, recursive = TRUE)
-}
+
+cat("Active Installation Library:", personal_lib, "\n")
+
+
 # CRITICAL: Force R to use the personal library FIRST and check it for dependencies.
 .libPaths(c(personal_lib, .libPaths()))
 cat("Using Library Paths:\n")

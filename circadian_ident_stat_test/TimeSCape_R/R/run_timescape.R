@@ -23,43 +23,98 @@
 # ============================================================================
 
 
-#' Build tmeta from Seurat metadata
+#' Extract metadata from a Seurat or SingleCellExperiment object
 #'
-#' Extracts unique ZT time-point strings from a Seurat metadata column and
-#' parses numeric ZT hours.  Supports formats: "ZT00", "ZT03", "zt12",
-#' "ZT_00", "ZT 0", plain numeric strings "0","3", etc.
+#' @param obj  A Seurat or SingleCellExperiment object.
+#' @return A plain data.frame of cell-level metadata.
+#' @keywords internal
+.get_meta <- function(obj) {
+  if (inherits(obj, "Seurat")) {
+    return(obj@meta.data)
+  } else if (inherits(obj, c("SingleCellExperiment", "SummarizedExperiment"))) {
+    return(as.data.frame(SummarizedExperiment::colData(obj)))
+  }
+  stop("obj must be a Seurat or SingleCellExperiment object. Got: ", class(obj)[1])
+}
+
+
+#' Get expression matrix from Seurat or SingleCellExperiment (handles v4/v5 API)
 #'
-#' @param seurat_obj  A Seurat object.
-#' @param zt_col      Name of the metadata column holding ZT strings.
+#' @param obj            A Seurat or SingleCellExperiment object.
+#' @param use_normalized If TRUE, use pre-normalised slot (Seurat: "data";
+#'                       SCE: "logcounts" then "normcounts").
+#' @return A genes × cells sparse matrix.
+#' @keywords internal
+.get_matrix <- function(obj, use_normalized = FALSE) {
+  if (inherits(obj, "Seurat")) {
+    slot_name <- if (use_normalized) "data" else "counts"
+    tryCatch(
+      Seurat::GetAssayData(obj, assay = "RNA", slot = slot_name),
+      error = function(e) tryCatch(
+        Seurat::LayerData(obj, layer = slot_name),
+        error = function(e2) stop(
+          "Cannot extract matrix from Seurat object (RNA assay missing?). ",
+          e2$message)))
+  } else {
+    # SingleCellExperiment / SummarizedExperiment
+    if (use_normalized) {
+      tryCatch(
+        SummarizedExperiment::assay(obj, "logcounts"),
+        error = function(e) tryCatch(
+          SummarizedExperiment::assay(obj, "normcounts"),
+          error = function(e2) stop(
+            "No 'logcounts' or 'normcounts' assay found. ",
+            "Run scuttle::logNormCounts() first, or use norm_str='lib_size'.")))
+    } else {
+      tryCatch(
+        SummarizedExperiment::assay(obj, "counts"),
+        error = function(e) SummarizedExperiment::assay(obj, 1))   # first assay as fallback
+    }
+  }
+}
+
+# Keep old name as alias for backward compatibility
+.get_seurat_matrix <- function(seurat_obj, use_normalized = FALSE)
+  .get_matrix(seurat_obj, use_normalized)
+
+
+#' Build tmeta from a Seurat or SingleCellExperiment object
+#'
+#' Extracts unique ZT time-point strings from a metadata column and parses
+#' numeric ZT hours.  Supports both Seurat and SingleCellExperiment inputs.
+#' Formats recognised: "ZT00", "ZT03", "zt12", "ZT_00", "ZT 0", plain
+#' numeric strings "0", "3", etc.
+#'
+#' @param obj     A Seurat or SingleCellExperiment object.
+#' @param zt_col  Name of the metadata column holding ZT strings.
 #' @return A data.frame with columns: zt_str (original values), ZT_times (numeric hrs).
 #'         Rows are sorted by ZT_times.  Inspect and adjust ZT_times manually
 #'         if automatic parsing fails for your naming convention.
-#'
 #' @export
-build_tmeta_from_seurat <- function(seurat_obj, zt_col) {
-  meta     <- seurat_obj@meta.data
+build_tmeta <- function(obj, zt_col) {
+  meta <- .get_meta(obj)
   if (!zt_col %in% colnames(meta))
-    stop(sprintf("Column '%s' not found in Seurat metadata. Available: %s",
+    stop(sprintf("Column '%s' not found in metadata. Available: %s",
                  zt_col, paste(colnames(meta), collapse=", ")))
 
   zt_vals  <- sort(unique(as.character(meta[[zt_col]])))
-  # Strip leading "ZT", "zt", "ZT_", "ZT " etc. then convert to numeric
   zt_clean <- gsub("(?i)^ZT[_ ]?", "", zt_vals, perl = TRUE)
   zt_num   <- suppressWarnings(as.numeric(zt_clean))
 
-  if (any(is.na(zt_num))) {
+  if (any(is.na(zt_num)))
     warning(sprintf(
       "Could not parse numeric ZT from: %s\nSet ZT_times manually in the returned data.frame.",
       paste(zt_vals[is.na(zt_num)], collapse=", ")))
-  }
 
-  tmeta <- data.frame(zt_str   = zt_vals,
-                      ZT_times = zt_num,
-                      stringsAsFactors = FALSE)
+  tmeta <- data.frame(zt_str = zt_vals, ZT_times = zt_num, stringsAsFactors = FALSE)
   tmeta <- tmeta[order(tmeta$ZT_times), ]
   rownames(tmeta) <- NULL
   tmeta
 }
+
+#' @rdname build_tmeta
+#' @export
+build_tmeta_from_seurat <- function(seurat_obj, zt_col) build_tmeta(seurat_obj, zt_col)
 
 
 #' Get expression matrix from Seurat (handles v4 and v5 API)
@@ -85,13 +140,18 @@ build_tmeta_from_seurat <- function(seurat_obj, zt_col) {
 }
 
 
-#' Run Full TimeSCape Circadian Analysis Pipeline (Seurat version)
+#' Run Full TimeSCape Circadian Analysis Pipeline
 #'
 #' Loops over cell types, fits a cosinor model per gene, applies dual
 #' significance criterion (F-test AND Pearson correlation), BH-corrects
 #' p-values, writes 6 CSVs per cell type, and optionally generates heatmaps.
 #'
-#' @param seurat_obj     A Seurat object.
+#' Accepts either a \strong{Seurat} object or a \strong{SingleCellExperiment}
+#' (Bioconductor) object — the type is detected automatically.
+#'
+#' @param obj            A Seurat \emph{or} SingleCellExperiment object.
+#'                       Cell-level metadata is read from \code{obj@meta.data}
+#'                       (Seurat) or \code{colData(obj)} (SCE).
 #' @param celltype_col   Metadata column name for cell type annotations.
 #'                       Can be any layer of annotation (e.g. "cell_type",
 #'                       "subtype", "seurat_clusters").
@@ -110,6 +170,10 @@ build_tmeta_from_seurat <- function(seurat_obj, zt_col) {
 #' @param norm_str       "lib_size" (default): library-size norm + log1p, identical
 #'                       to MATLAB pkg.norm_libsize(X,1e4).
 #'                       "seurat": use the Seurat normalized data slot directly.
+#'                       "logcounts": use the SCE \code{logcounts} assay (or
+#'                       \code{normcounts} as fallback) — SCE equivalent of
+#'                       "seurat".  Seurat objects also accept "logcounts" as
+#'                       an alias for "seurat".
 #'                       "none": use raw counts as-is (pass pre-normalised data or
 #'                       raw counts when no transformation is desired).
 #' @param outdir         Root output directory. Per-cell-type subdirs are created inside.
@@ -150,7 +214,7 @@ build_tmeta_from_seurat <- function(seurat_obj, zt_col) {
 #' }
 #' @export
 run_timescape <- function(
-  seurat_obj,
+  obj,
   celltype_col   = "cell_type",
   zt_col         = "ZT_str",
   tmeta          = NULL,
@@ -167,7 +231,16 @@ run_timescape <- function(
   tic <- proc.time()["elapsed"]
 
   # ── Validate inputs ─────────────────────────────────────────────────────────
-  meta <- seurat_obj@meta.data
+  if (!inherits(obj, c("Seurat", "SingleCellExperiment", "SummarizedExperiment")))
+    stop("obj must be a Seurat or SingleCellExperiment object. Got: ", class(obj)[1])
+
+  obj_type <- if (inherits(obj, "Seurat")) "Seurat" else "SCE"
+  message("Input type detected: ", obj_type)
+
+  # "logcounts" is accepted as an alias for "seurat" (pre-normalised slot)
+  if (norm_str == "logcounts") norm_str <- if (obj_type == "Seurat") "seurat" else "logcounts"
+
+  meta <- .get_meta(obj)
   if (!celltype_col %in% colnames(meta))
     stop(sprintf("celltype_col='%s' not in metadata. Available: %s",
                  celltype_col, paste(colnames(meta), collapse=", ")))
@@ -204,7 +277,7 @@ run_timescape <- function(
 
   # ── Build tmeta if not provided ─────────────────────────────────────────────
   if (is.null(tmeta)) {
-    tmeta <- build_tmeta_from_seurat(seurat_obj, zt_col)
+    tmeta <- build_tmeta(obj, zt_col)
     message("Auto-built tmeta from '", zt_col, "':")
     print(tmeta)
   }
@@ -236,12 +309,12 @@ run_timescape <- function(
   # For "seurat" we pull the full normalised matrix once (it is already in RAM
   # inside the Seurat object, so no extra cost).
   # For "lib_size" and "none" we defer to the cell-type loop.
-  if (norm_str == "seurat") {
-    X_global <- as.matrix(.get_seurat_matrix(seurat_obj, use_normalized = TRUE))
+  use_prebuilt_norm <- norm_str %in% c("seurat", "logcounts")
+  if (use_prebuilt_norm) {
+    X_global          <- as.matrix(.get_matrix(obj, use_normalized = TRUE))
     gene_names_global <- rownames(X_global)
   } else {
-    # Store only the raw sparse matrix reference — no dense copy yet
-    X_global_raw      <- .get_seurat_matrix(seurat_obj, use_normalized = FALSE)
+    X_global_raw      <- .get_matrix(obj, use_normalized = FALSE)
     gene_names_global <- rownames(X_global_raw)
   }
 
@@ -249,7 +322,7 @@ run_timescape <- function(
   if (!is.null(custom_genelist)) {
     keep_genes <- gene_names_global %in% custom_genelist
     gene_names_global <- gene_names_global[keep_genes]
-    if (norm_str == "seurat") {
+    if (use_prebuilt_norm) {
       X_global <- X_global[keep_genes, , drop = FALSE]
     } else {
       X_global_raw <- X_global_raw[keep_genes, , drop = FALSE]
@@ -304,7 +377,7 @@ run_timescape <- function(
     # ── Per-cell-type normalisation (low-RAM path) ─────────────────────────
     # Extracting and normalising only the cells for this cell type keeps peak
     # RAM to one dense cell-type matrix at a time instead of the full dataset.
-    if (norm_str == "seurat") {
+    if (use_prebuilt_norm) {
       X_ct <- as.matrix(X_global[, ct_mask, drop = FALSE])
     } else if (norm_str == "lib_size") {
       X_ct_raw  <- as.matrix(X_global_raw[, ct_mask, drop = FALSE])

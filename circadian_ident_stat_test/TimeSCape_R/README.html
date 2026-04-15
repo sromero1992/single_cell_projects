@@ -352,144 +352,465 @@ display: none;
 </div>
 
 
-<div id="timescape-v0.2---r-translation" class="section level1">
-<h1>TimeSCape v0.2 - R Translation</h1>
-<p>A complete translation of the MATLAB TimeSCape v0.2 circadian rhythm
-detection pipeline to R, with both command-line and interactive GUI
-interfaces.</p>
-<div id="overview" class="section level2">
-<h2>Overview</h2>
-<p>TimeSCape detects and visualizes circadian rhythms in single-cell
-RNA-seq data through: - <strong>Cosinor fitting</strong>: Nonlinear
-least squares fitting of cosine model to expression data -
-<strong>Statistical testing</strong>: F-test and correlation-based
-significance testing with multiple testing correction -
-<strong>Interactive visualization</strong>: Heatmaps, gene-level plots,
-and Shiny web GUI</p>
+<div id="timescape-v0.2-r-seurat-native" class="section level1">
+<h1>TimeSCape v0.2 — R (Seurat-native)</h1>
+<p>Circadian rhythm detection pipeline for single-cell RNA-seq data.
+Direct translation of the MATLAB v0.2 pipeline, accepting <strong>Seurat
+objects</strong> as input. Includes a Shiny web GUI as the equivalent of
+the MATLAB <code>TimeSCape_GUI.m</code>.</p>
+<hr />
+<div id="installation" class="section level2">
+<h2>Installation</h2>
+<div id="r-packages" class="section level3">
+<h3>1 — R packages</h3>
+<pre class="r"><code>install.packages(c(
+  &quot;Seurat&quot;,           # input object format
+  &quot;minpack.lm&quot;,       # Levenberg-Marquardt NLS solver
+  &quot;future&quot;,           # parallel workers
+  &quot;future.apply&quot;,     # future_lapply (block parallelism)
+  &quot;pheatmap&quot;,         # heatmap rendering
+  &quot;ggplot2&quot;,          # gene plots
+  &quot;shiny&quot;,            # GUI (optional, only for app.R)
+  &quot;bslib&quot;,            # GUI theme
+  &quot;rhandsontable&quot;     # editable ZT table in GUI
+))</code></pre>
+<p>All packages are on CRAN — no Bioconductor needed.</p>
 </div>
-<div id="files-structure" class="section level2">
-<h2>Files &amp; Structure</h2>
-<pre><code>TimeSCape_R/
-├── README.md                    # This file
-├── INSTALL.md                   # Installation and usage guide
-├── DESCRIPTION                  # R package metadata
-├── app.R                         # Shiny interactive GUI application
-└── R/
-    ├── estimate_phaseR.R        # Core cosinor fitting (176 lines)
-    ├── run_timescape.R          # Main pipeline orchestration (351 lines)
-    ├── generate_heatmap.R       # Heatmap generation (174 lines)
-    └── plot_gene.R              # Gene plotting functions (372 lines)</code></pre>
-<p><strong>Total</strong>: 1,641 lines of production-ready R code</p>
+<div id="source-the-functions" class="section level3">
+<h3>2 — Source the functions</h3>
+<pre class="r"><code>source(&quot;R/estimate_phaseR.R&quot;)
+source(&quot;R/run_timescape.R&quot;)
+source(&quot;R/generate_heatmap.R&quot;)
+source(&quot;R/plot_gene.R&quot;)</code></pre>
+<p>Or simply open <code>app.R</code> in RStudio and click <strong>Run
+App</strong> — it sources everything automatically.</p>
+<hr />
 </div>
-<div id="quick-start" class="section level2">
-<h2>Quick Start</h2>
-<div id="command-line-pipeline" class="section level3">
-<h3>Command-Line Pipeline</h3>
-<pre class="r"><code>library(TimeSCapeR)
-future::plan(multisession, workers = 4)  # Optional: enable parallelism
+</div>
+<div id="quick-start-command-line" class="section level2">
+<h2>Quick Start — Command Line</h2>
+<pre class="r"><code>library(Seurat)
+library(future)
 
-result &lt;- run_timescape(
-  sce = sce_object,
-  tmeta = metadata_df,
-  period12 = FALSE,
-  outdir = &quot;./output&quot;
+# Optional: parallel workers (recommended for &gt; 5 000 genes)
+plan(multisession, workers = 4)
+
+# Load your Seurat object
+seu &lt;- readRDS(&quot;my_data.rds&quot;)
+
+# Preview metadata columns and ZT strings
+head(seu@meta.data)
+
+# Auto-parse ZT times (expects &quot;ZT00&quot;, &quot;ZT03&quot;, ... in the ZT column)
+tmeta &lt;- build_tmeta_from_seurat(seu, zt_col = &quot;ZT_str&quot;)
+print(tmeta)   # verify ZT_times; edit manually if your naming differs
+
+# Run full pipeline
+results &lt;- run_timescape(
+  seurat_obj   = seu,
+  celltype_col = &quot;cell_type&quot;,   # column with cell-type labels
+  zt_col       = &quot;ZT_str&quot;,      # column with ZT time strings
+  tmeta        = tmeta,
+  norm_str     = &quot;lib_size&quot;,    # recommended
+  outdir       = &quot;TimeSCape_output&quot;
 )</code></pre>
+<hr />
 </div>
-<div id="interactive-gui" class="section level3">
-<h3>Interactive GUI</h3>
-<pre class="r"><code>shiny::runApp(&quot;path/to/app.R&quot;)
-# Opens in browser at http://localhost:3838</code></pre>
-</div>
-<div id="single-gene-plot" class="section level3">
-<h3>Single Gene Plot</h3>
-<pre class="r"><code>p &lt;- plot_gene_single(
-  tmeta = tmeta,
-  cust_cells = c(&quot;Neurons&quot;),
-  cust_gene = &quot;Clock&quot;,
-  print_scdata = TRUE,
-  use_violin = TRUE,
-  sce = sce
-)</code></pre>
-<p>See <code>INSTALL.md</code> for detailed installation and
-comprehensive usage examples.</p>
-</div>
-</div>
-<div id="key-functions" class="section level2">
-<h2>Key Functions</h2>
-<div id="estimate_phaser" class="section level3">
-<h3><code>estimate_phaseR()</code></h3>
-<p><strong>Core cosinor fitting function</strong> - Fits cosine model to
-expression data using nonlinear least squares - Performs F-test or
-likelihood ratio test - Computes Pearson correlation between per-ZT
-means and fitted curve - Returns: acrophase, amplitude, period, MESOR,
-p-values, correlation</p>
-</div>
-<div id="run_timescape" class="section level3">
-<h3><code>run_timescape()</code></h3>
-<p><strong>Main analysis pipeline</strong> - Normalizes expression
-(library size + log1p transformation) - Fits cosine to each gene using
-<code>estimate_phaseR()</code> - Applies Benjamini-Hochberg multiple
-testing correction - Generates 6 CSV output tables per cell type -
-Optionally generates heatmaps - Parallel processing via
-<code>future.apply::future_lapply()</code></p>
-</div>
-<div id="generate_heatmap" class="section level3">
-<h3><code>generate_heatmap()</code></h3>
-<p><strong>Publication-quality heatmap visualization</strong> - Filters
-genes by significance (strict mode: p&lt;0.05 for both tests) -
-Optional: restrict to classical circadian genes - Z-scores rows and
-generates blue→white→red heatmap - Outputs PNG file + gene list CSV</p>
-</div>
-<div id="plot_gene_single" class="section level3">
-<h3><code>plot_gene_single()</code></h3>
-<p><strong>Individual gene visualization</strong> - Blue cosine fit line
-- Orange per-ZT mean expression ± individual points - Red dashed
-acrophase marker - Optional single-cell data overlay (violin or scatter)
-- Returns ggplot2 object for customization</p>
-</div>
-<div id="save_batch_plots" class="section level3">
-<h3><code>save_batch_plots()</code></h3>
-<p><strong>Batch gene plot generation</strong> - Generates PNG for
-multiple genes at once - Filters by type: confident, non-confident, or
-classical circadian - One PNG per gene saved to subdirectory</p>
-</div>
-</div>
-<div id="outputs" class="section level2">
-<h2>Outputs</h2>
-<div id="statistics-tables-csv" class="section level3">
-<h3>Statistics Tables (CSV)</h3>
-<p><strong>Main results table</strong>
-(<code>*_circadian_analysis_all.csv</code>): | Column | Definition |
-|——–|———–| | Genes | Gene name | | Amp | Cosine amplitude (signed) | |
-Abs_Amp | Absolute amplitude | | Mesor | Mean level | | Acrophase | Peak
-time (0 to period) | | Acrophase_24 | Peak time (0 to 24 hours) | |
-Period | 12 or 24 hours | | pvalue | F-test p-value | | pvalue_adj |
-BH-corrected p-value | | Sine_corr | Pearson r with fitted line | |
-pvalue_corr | Correlation p-value | | pvalue_adj_corr | BH-corrected
-correlation p-value |</p>
-<p>Sorted by: <code>pvalue_adj_corr</code> → <code>pvalue_adj</code> →
-<code>Acrophase_24</code> → <code>Abs_Amp</code> (desc)</p>
-<p><strong>Per-ZT means</strong> (<code>*_ZTs_mean.csv</code>,
-<code>*_ZTs_mean_normalized.csv</code>): - Rows: ZT time points -
-Columns: Gene names - Values: Mean expression at each ZT</p>
-</div>
-<div id="visualizations" class="section level3">
-<h3>Visualizations</h3>
-<ul>
-<li><code>*_heatmap.png</code>: Publication-quality heatmap of
-significant genes</li>
-<li><code>batch_plots_confident/*.png</code>: Individual gene plots
-(confident genes)</li>
-<li><code>batch_plots_non_confident/*.png</code>: Individual gene plots
-(all genes)</li>
-<li><code>batch_plots_classical_circ/*.png</code>: Individual gene plots
-(circadian genes)</li>
-</ul>
-</div>
-</div>
-<div id="translation-differences-from-matlab" class="section level2">
-<h2>Translation Differences from MATLAB</h2>
+<div id="quick-start-shiny-gui" class="section level2">
+<h2>Quick Start — Shiny GUI</h2>
+<pre class="r"><code>shiny::runApp(&quot;app.R&quot;)</code></pre>
+<p>Opens in your browser. Workflow mirrors the MATLAB GUI:</p>
 <table>
+<colgroup>
+<col width="42%" />
+<col width="57%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th>Step</th>
+<th>Action</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>①</td>
+<td>Browse and load a <code>.rds</code> Seurat file</td>
+</tr>
+<tr class="even">
+<td>②</td>
+<td>Pick cell-type column, ZT column, optional group column</td>
+</tr>
+<tr class="odd">
+<td>②</td>
+<td>Click <strong>Build / Preview ZT Table</strong> → verify numeric ZT
+hours</td>
+</tr>
+<tr class="even">
+<td>③</td>
+<td>Choose normalization, period; click <strong>▶ Run Analysis</strong>
+or <strong>▶▶ All Types</strong></td>
+</tr>
+<tr class="odd">
+<td>④</td>
+<td>Click <strong>Generate Heatmap</strong></td>
+</tr>
+<tr class="even">
+<td>⑤</td>
+<td>Select gene → <strong>Plot Single Gene</strong>; or <strong>Save
+(Batch)</strong> for all genes</td>
+</tr>
+<tr class="odd">
+<td>—</td>
+<td>Download PNG / PDF / SVG from the plot header</td>
+</tr>
+</tbody>
+</table>
+<hr />
+</div>
+<div id="key-parameters-run_timescape" class="section level2">
+<h2>Key Parameters — <code>run_timescape()</code></h2>
+<table style="width:100%;">
+<colgroup>
+<col width="33%" />
+<col width="27%" />
+<col width="39%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th>Parameter</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>seurat_obj</code></td>
+<td>—</td>
+<td>Seurat object (v4 or v5)</td>
+</tr>
+<tr class="even">
+<td><code>celltype_col</code></td>
+<td><code>&quot;cell_type&quot;</code></td>
+<td>Metadata column with cell-type labels</td>
+</tr>
+<tr class="odd">
+<td><code>zt_col</code></td>
+<td><code>&quot;ZT_str&quot;</code></td>
+<td>Metadata column with ZT strings (<code>&quot;ZT00&quot;</code>,
+<code>&quot;ZT03&quot;</code>, …)</td>
+</tr>
+<tr class="even">
+<td><code>tmeta</code></td>
+<td><code>NULL</code></td>
+<td>data.frame from <code>build_tmeta_from_seurat()</code>. Auto-built
+if NULL.</td>
+</tr>
+<tr class="odd">
+<td><code>norm_str</code></td>
+<td><code>&quot;lib_size&quot;</code></td>
+<td>See <strong>Normalization</strong> section below</td>
+</tr>
+<tr class="even">
+<td><code>period12</code></td>
+<td><code>FALSE</code></td>
+<td><code>TRUE</code> = 12-hr period; <code>FALSE</code> = 24-hr
+(default)</td>
+</tr>
+<tr class="odd">
+<td><code>rm_low_conf</code></td>
+<td><code>TRUE</code></td>
+<td>Write confident-only CSV subsets</td>
+</tr>
+<tr class="even">
+<td><code>plot_heat</code></td>
+<td><code>TRUE</code></td>
+<td>Save heatmap PNG after each cell type</td>
+</tr>
+<tr class="odd">
+<td><code>custom_genelist</code></td>
+<td><code>NULL</code></td>
+<td>Restrict to these genes only</td>
+</tr>
+<tr class="even">
+<td><code>custom_celltype</code></td>
+<td><code>NULL</code></td>
+<td>Restrict to these cell types only</td>
+</tr>
+<tr class="odd">
+<td><code>group_col</code></td>
+<td><code>NULL</code></td>
+<td><strong>Optional second grouping column</strong> (see below)</td>
+</tr>
+<tr class="even">
+<td><code>custom_group</code></td>
+<td><code>NULL</code></td>
+<td>Filter to specific group values</td>
+</tr>
+<tr class="odd">
+<td><code>outdir</code></td>
+<td><code>getwd()</code></td>
+<td>Root output directory</td>
+</tr>
+</tbody>
+</table>
+<hr />
+</div>
+<div id="normalization-norm_str" class="section level2">
+<h2>Normalization (<code>norm_str</code>)</h2>
+<table>
+<colgroup>
+<col width="38%" />
+<col width="61%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th>Value</th>
+<th>Behaviour</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>&quot;lib_size&quot;</code></td>
+<td>Per-cell library-size normalisation to 10 000 counts +
+<code>log1p</code>. Identical to MATLAB
+<code>pkg.norm_libsize(X, 1e4)</code>. <strong>Recommended.</strong>
+Safe across cancer stages and replicates because each cell’s factor
+depends only on its own total count sum.</td>
+</tr>
+<tr class="even">
+<td><code>&quot;seurat&quot;</code></td>
+<td>Use the <code>NormalizedData</code> slot already computed by
+<code>NormalizeData()</code> or <code>SCTransform</code>. Pass if you
+want to use Seurat’s pre-computed values.</td>
+</tr>
+<tr class="odd">
+<td><code>&quot;none&quot;</code></td>
+<td>Use raw counts as-is from the <code>counts</code> slot. Use when
+data is already normalised externally and stored in the counts slot, or
+when you explicitly want no transformation.</td>
+</tr>
+</tbody>
+</table>
+<p>Normalisation happens <strong>inside the cell-type loop</strong> (or
+cell-type × group loop) so only one dense submatrix is in RAM at a time
+— memory-efficient even for large datasets.</p>
+<hr />
+</div>
+<div id="second-grouping-variable-group_col" class="section level2">
+<h2>Second Grouping Variable (<code>group_col</code>)</h2>
+<p>When all cancer stages (or replicates, treatments, …) are in a single
+Seurat object, use <code>group_col</code> to run the analysis
+independently for every <strong>(cell type × group)</strong> combination
+without splitting the object manually.</p>
+<pre class="r"><code>results &lt;- run_timescape(
+  seurat_obj   = seu,
+  celltype_col = &quot;cell_type&quot;,
+  zt_col       = &quot;ZT_str&quot;,
+  group_col    = &quot;cancer_stage&quot;,   # e.g. &quot;early&quot;, &quot;mid&quot;, &quot;late&quot;
+  norm_str     = &quot;lib_size&quot;,
+  outdir       = &quot;TimeSCape_output&quot;
+)</code></pre>
+<p><strong>Output structure:</strong></p>
+<pre><code>TimeSCape_output/
+  Hepatocytes_early/
+    Hepatocytes_early_period_24_circadian_analysis_all.csv
+    Hepatocytes_early_period_24_circadian_analysis_confident.csv
+    Hepatocytes_early_period_24_heatmap_strict.png
+    ...
+  Hepatocytes_mid/
+    ...
+  Hepatocytes_late/
+    ...
+  T_cells_early/
+    ...
+  all_cell_types_period_24_summary_results.csv   ← Group column included</code></pre>
+<p>The returned list is keyed by the combo name:</p>
+<pre class="r"><code>results[[&quot;Hepatocytes_early&quot;]]$T1   # stats table
+results[[&quot;Hepatocytes_early&quot;]]$T2   # per-ZT means</code></pre>
+<p>In the <strong>Shiny GUI</strong>, select the group column in step ②
+and a group value picker appears in the Gene Explorer — no code changes
+needed.</p>
+<hr />
+</div>
+<div id="output-files-per-cell-type-combo" class="section level2">
+<h2>Output Files (per cell type / combo)</h2>
+<table>
+<colgroup>
+<col width="37%" />
+<col width="62%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th>File</th>
+<th>Contents</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>*_circadian_analysis_all.csv</code></td>
+<td>All genes tested — stats table (see columns below)</td>
+</tr>
+<tr class="even">
+<td><code>*_circadian_analysis_confident.csv</code></td>
+<td>Genes with F-test <strong>and</strong> corr p &lt; 0.05 (raw)</td>
+</tr>
+<tr class="odd">
+<td><code>*_circadian_ZTs_mean.csv</code></td>
+<td>Per-ZT mean expression (rows = genes)</td>
+</tr>
+<tr class="even">
+<td><code>*_circadian_ZTs_mean_normalized.csv</code></td>
+<td>ZT00-normalised means</td>
+</tr>
+<tr class="odd">
+<td><code>*_circadian_ZTs_mean_confident.csv</code></td>
+<td>Per-ZT means, confident genes only</td>
+</tr>
+<tr class="even">
+<td><code>*_circadian_ZTs_mean_normalized_confident.csv</code></td>
+<td>Normalised, confident only</td>
+</tr>
+<tr class="odd">
+<td><code>*_heatmap_strict.png</code></td>
+<td>Blue→white→red z-score heatmap, confident genes</td>
+</tr>
+<tr class="even">
+<td><code>*_heatmap_genes.csv</code></td>
+<td>Gene table used to draw the heatmap</td>
+</tr>
+<tr class="odd">
+<td><code>all_cell_types_*_summary_results.csv</code></td>
+<td>Cross-cell-type / cross-group summary</td>
+</tr>
+</tbody>
+</table>
+<div id="stats-table-columns" class="section level3">
+<h3>Stats table columns</h3>
+<table>
+<colgroup>
+<col width="42%" />
+<col width="57%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th>Column</th>
+<th>Definition</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>Genes</code></td>
+<td>Gene name</td>
+</tr>
+<tr class="even">
+<td><code>Amp</code></td>
+<td>Cosine amplitude (signed; negative = peak shifted by 12 h)</td>
+</tr>
+<tr class="odd">
+<td><code>Abs_Amp</code></td>
+<td>|Amplitude|</td>
+</tr>
+<tr class="even">
+<td><code>Mesor</code></td>
+<td>Midline estimating statistic of rhythm (mean expression level)</td>
+</tr>
+<tr class="odd">
+<td><code>Acrophase</code></td>
+<td>Raw peak time from NLS fit (hrs)</td>
+</tr>
+<tr class="even">
+<td><code>Acrophase_24</code></td>
+<td>Peak time wrapped to [0, 24)</td>
+</tr>
+<tr class="odd">
+<td><code>Period</code></td>
+<td>12 or 24 hrs</td>
+</tr>
+<tr class="even">
+<td><code>pvalue</code></td>
+<td>F-test p-value</td>
+</tr>
+<tr class="odd">
+<td><code>pvalue_adj</code></td>
+<td>BH-corrected F-test p-value</td>
+</tr>
+<tr class="even">
+<td><code>Sine_corr</code></td>
+<td>Pearson r (per-ZT means vs fitted cosine)</td>
+</tr>
+<tr class="odd">
+<td><code>pvalue_corr</code></td>
+<td>Pearson correlation p-value (raw)</td>
+</tr>
+<tr class="even">
+<td><code>pvalue_adj_corr</code></td>
+<td>BH-corrected correlation p-value</td>
+</tr>
+</tbody>
+</table>
+<p>Rows sorted:
+<code>pvalue_adj_corr ↑ → pvalue_adj ↑ → Acrophase_24 ↑ → Abs_Amp ↓</code></p>
+<p><strong>Confident criterion</strong>: <code>pvalue &lt; 0.05</code>
+<strong>AND</strong> <code>pvalue_corr &lt; 0.05</code> (raw, not
+BH-adjusted).</p>
+<hr />
+</div>
+</div>
+<div id="zt-metadata-build_tmeta_from_seurat" class="section level2">
+<h2>ZT Metadata — <code>build_tmeta_from_seurat()</code></h2>
+<p>Parses numeric ZT hours from a string metadata column. Supports:
+<code>&quot;ZT00&quot;</code>, <code>&quot;ZT03&quot;</code>, <code>&quot;zt12&quot;</code>,
+<code>&quot;ZT_06&quot;</code>, <code>&quot;ZT 3&quot;</code>, <code>&quot;0&quot;</code>,
+<code>&quot;3&quot;</code> …</p>
+<pre class="r"><code>tmeta &lt;- build_tmeta_from_seurat(seu, zt_col = &quot;ZT_str&quot;)
+# Returns data.frame with columns: zt_str, ZT_times
+# Edit ZT_times manually if auto-parsing fails for your naming convention:
+tmeta$ZT_times[tmeta$zt_str == &quot;custom_label&quot;] &lt;- 6</code></pre>
+<hr />
+</div>
+<div id="individual-gene-plot" class="section level2">
+<h2>Individual Gene Plot</h2>
+<pre class="r"><code>p &lt;- plot_gene_single(
+  tmeta        = tmeta,
+  cust_cells   = &quot;Hepatocytes&quot;,   # must match directory name (sanitised)
+  cust_gene    = &quot;Nr1d1&quot;,
+  period12     = FALSE,
+  print_scdata = TRUE,            # overlay single-cell data
+  sce          = seu,             # Seurat object for overlay
+  celltype_col = &quot;cell_type&quot;,
+  zt_col       = &quot;ZT_str&quot;,
+  use_violin   = TRUE,            # TRUE = violin, FALSE = dots scatter
+  outdir       = &quot;TimeSCape_output/Hepatocytes&quot;
+)
+print(p)   # ggplot2 object — fully customisable</code></pre>
+<p>When <code>group_col</code> is active, pass the combo directory:</p>
+<pre class="r"><code>p &lt;- plot_gene_single(
+  ...,
+  cust_cells = &quot;Hepatocytes_early&quot;,
+  outdir     = &quot;TimeSCape_output/Hepatocytes_early&quot;
+)</code></pre>
+<hr />
+</div>
+<div id="batch-gene-plots" class="section level2">
+<h2>Batch Gene Plots</h2>
+<pre class="r"><code>save_batch_plots(
+  tmeta      = tmeta,
+  cust_cells = &quot;Hepatocytes&quot;,
+  plot_type  = 1,   # 1 = confident, 2 = non-confident, 3 = classical circadian
+  period12   = FALSE,
+  outdir     = &quot;TimeSCape_output/Hepatocytes&quot;
+)
+# Saves one PNG per gene to outdir/Hepatocytes_period_24_plots_confident/</code></pre>
+<hr />
+</div>
+<div id="differences-from-matlab-v0.2" class="section level2">
+<h2>Differences from MATLAB v0.2</h2>
+<table>
+<colgroup>
+<col width="27%" />
+<col width="44%" />
+<col width="27%" />
+</colgroup>
 <thead>
 <tr class="header">
 <th>Aspect</th>
@@ -499,201 +820,67 @@ significant genes</li>
 </thead>
 <tbody>
 <tr class="odd">
-<td>NLS Solver</td>
-<td>Trust-Region</td>
-<td>Levenberg-Marquardt (minpack.lm)</td>
+<td>Input format</td>
+<td><code>SingleCellExperiment</code> (scGEAtoolbox)</td>
+<td><code>Seurat</code> object (v4 or v5)</td>
 </tr>
 <tr class="even">
-<td>SCE API</td>
-<td>scGEAtoolbox</td>
-<td>SingleCellExperiment (Bioconductor)</td>
+<td>NLS solver</td>
+<td>Trust-Region (<code>fit()</code>)</td>
+<td>Levenberg-Marquardt (<code>minpack.lm::nlsLM</code>)</td>
 </tr>
 <tr class="odd">
 <td>Parallelism</td>
-<td>Implicit parfor</td>
-<td>Explicit future_lapply() + plan()</td>
+<td><code>parfor</code> (implicit pool)</td>
+<td><code>future.apply::future_lapply()</code> +
+<code>plan()</code></td>
 </tr>
 <tr class="even">
-<td>Heatmaps</td>
-<td>imagesc + custom code</td>
-<td>pheatmap package</td>
+<td>Heatmap</td>
+<td><code>imagesc</code> + custom colormap</td>
+<td><code>pheatmap</code></td>
 </tr>
 <tr class="odd">
 <td>Gene plots</td>
-<td>plot + scatter</td>
-<td>ggplot2</td>
+<td>MATLAB <code>plot</code> / <code>violinplot</code></td>
+<td><code>ggplot2</code></td>
 </tr>
 <tr class="even">
 <td>GUI</td>
-<td>MATLAB uicontrol</td>
+<td><code>uicontrol</code> figures</td>
 <td>Shiny web app</td>
+</tr>
+<tr class="odd">
+<td>Group column</td>
+<td>Not supported</td>
+<td><code>group_col</code> parameter</td>
+</tr>
+<tr class="even">
+<td>Numerical agreement</td>
+<td>—</td>
+<td>&lt; 0.1 % difference vs MATLAB</td>
 </tr>
 </tbody>
 </table>
-<p><strong>Result accuracy</strong>: &lt;0.1% difference in typical
-data</p>
-</div>
-<div id="dependencies" class="section level2">
-<h2>Dependencies</h2>
-<div id="required-all-platforms" class="section level3">
-<h3>Required (all platforms)</h3>
-<ul>
-<li>SingleCellExperiment</li>
-<li>future.apply</li>
-<li>minpack.lm</li>
-<li>pheatmap</li>
-<li>ggplot2</li>
-<li>stats (base R)</li>
-</ul>
-</div>
-<div id="optional-gui-only" class="section level3">
-<h3>Optional (GUI only)</h3>
-<ul>
-<li>shiny</li>
-<li>bslib</li>
-<li>rhandsontable</li>
-<li>grid</li>
-</ul>
-<p>Install with:</p>
-<pre class="r"><code>BiocManager::install(&quot;SingleCellExperiment&quot;)
-install.packages(c(&quot;future.apply&quot;, &quot;minpack.lm&quot;, &quot;pheatmap&quot;, &quot;ggplot2&quot;, 
-                   &quot;shiny&quot;, &quot;bslib&quot;, &quot;rhandsontable&quot;))</code></pre>
-</div>
-</div>
-<div id="design-principles" class="section level2">
-<h2>Design Principles</h2>
-<ol style="list-style-type: decimal">
-<li><strong>Statistical Rigor</strong>: Exact translation of MATLAB
-formulas</li>
-<li><strong>Production Ready</strong>: Full error handling, Roxygen
-documentation, type checking</li>
-<li><strong>Performance</strong>: Block-based parallel processing via
-future framework</li>
-<li><strong>Usability</strong>: Both programmatic API and interactive
-GUI</li>
-<li><strong>Reproducibility</strong>: All outputs to CSV; no binary
-formats</li>
-<li><strong>Extensibility</strong>: Well-structured code with clear
-function boundaries</li>
-</ol>
-</div>
-<div id="example-workflow" class="section level2">
-<h2>Example Workflow</h2>
-<pre class="r"><code># 1. Load data and metadata
-sce &lt;- readH5AD(&quot;data.h5ad&quot;)
-tmeta &lt;- read.csv(&quot;metadata.csv&quot;)
-
-# 2. Configure parallelism
-future::plan(multisession, workers = 8)
-
-# 3. Run analysis
-result &lt;- run_timescape(
-  sce = sce,
-  tmeta = tmeta,
-  period12 = FALSE,
-  plot_heat = TRUE,
-  outdir = &quot;./timescape_results&quot;
-)
-
-# 4. Explore results
-significant_genes &lt;- result$T1[result$T1$pvalue_adj_corr &lt; 0.05, ]
-head(significant_genes)
-
-# 5. Generate publication plots
-for (gene in head(significant_genes$Genes, 5)) {
-  p &lt;- plot_gene_single(
-    tmeta = tmeta,
-    cust_cells = &quot;Neurons&quot;,
-    cust_gene = gene,
-    print_scdata = TRUE,
-    sce = sce,
-    use_violin = TRUE
-  )
-  ggplot2::ggsave(paste0(gene, &quot;.png&quot;), p, width = 10, height = 6)
-}
-
-# 6. Open interactive GUI for exploration
-shiny::runApp(&quot;app.R&quot;)</code></pre>
-</div>
-<div id="testing" class="section level2">
-<h2>Testing</h2>
-<p>Functions include comprehensive error handling via
-<code>tryCatch()</code>. Manual testing recommended with sample
-data.</p>
-<p>To test individual functions:</p>
-<pre class="r"><code># Create minimal test data
-Xg_zts &lt;- list(
-  &quot;0&quot; = c(1.2, 1.5, 1.3),
-  &quot;6&quot; = c(1.1, 1.4, 1.2),
-  &quot;12&quot; = c(0.8, 0.9, 0.85),
-  &quot;18&quot; = c(1.0, 1.1, 0.95)
-)
-actual_times &lt;- c(0, 6, 12, 18)
-
-# Test estimate_phaseR
-result &lt;- estimate_phaseR(Xg_zts, actual_times, period12 = FALSE, test_type = &quot;Ftest&quot;)
-print(result)  # Should return list with acrophase, amp, period, mesor, p-values</code></pre>
-</div>
-<div id="performance" class="section level2">
-<h2>Performance</h2>
-<ul>
-<li><strong>Normalization</strong>: &lt;1 sec for 20K genes × 100K
-cells</li>
-<li><strong>Cosinor fitting</strong> (single gene): ~10 ms</li>
-<li><strong>Full pipeline</strong> (10K genes × 100 cells, 4 cell
-types): ~5 minutes with 4 workers</li>
-<li><strong>Memory</strong>: ~5 GB peak for large datasets (scales with
-cell count × gene count)</li>
-</ul>
-<p>Parallel speedup: ~3.5x with 4 workers; diminishing returns beyond 8
-workers.</p>
-</div>
-<div id="known-limitations" class="section level2">
-<h2>Known Limitations</h2>
-<ol style="list-style-type: decimal">
-<li>NLS solver can fail on noisy data; returns NA for failed genes</li>
-<li>No built-in FACS-like gating; requires pre-filtered SCE</li>
-<li>Assumes balanced time sampling across ZT points</li>
-<li>No correction for circadian phase differences between cell
-types</li>
-</ol>
-</div>
-<div id="future-enhancements" class="section level2">
-<h2>Future Enhancements</h2>
-<p>Potential additions (not in MATLAB v0.2): - Zero-phase filtering for
-pre-processing - Multiple circadian model fitting (damped oscillations)
-- Cross-cell-type phase comparison statistics - Interactive phase
-alignment tool - Export to GEO/ArrayExpress format</p>
-</div>
-<div id="citation" class="section level2">
-<h2>Citation</h2>
-<p>If you use TimeSCape R in published work, please cite: 1. The
-original MATLAB publication (if available) 2. This R package (provide
-version: v0.2.0)</p>
-</div>
-<div id="license" class="section level2">
-<h2>License</h2>
-<p>See LICENSE file (if included).</p>
-</div>
-<div id="contact-support" class="section level2">
-<h2>Contact &amp; Support</h2>
-<p>For installation help, see <code>INSTALL.md</code>. For function
-documentation, use: <code>?function_name</code></p>
-</div>
-<div id="version-history" class="section level2">
-<h2>Version History</h2>
-<ul>
-<li><strong>v0.2.0</strong> (2026-04): R translation from MATLAB v0.2
-<ul>
-<li>Complete implementation of all MATLAB features</li>
-<li>Shiny web GUI</li>
-<li>Future-based parallelism</li>
-<li>Publication-ready visualization</li>
-</ul></li>
-</ul>
 <hr />
-<p><strong>Last Updated</strong>: April 2026 <strong>Author</strong>:
-MATLAB→R Translation (Bioconductor-compatible)</p>
+</div>
+<div id="file-structure" class="section level2">
+<h2>File Structure</h2>
+<pre><code>TimeSCape_R/
+├── app.R                    # Shiny GUI — run with shiny::runApp(&quot;app.R&quot;)
+├── README.md                # This file
+├── INSTALL.md               # Extended installation notes
+├── DESCRIPTION              # R package metadata
+└── R/
+    ├── estimate_phaseR.R    # Cosinor NLS fitting + F-test + Pearson corr
+    ├── run_timescape.R      # Main pipeline (cell-type × group loop)
+    ├── generate_heatmap.R   # pheatmap z-score heatmap
+    └── plot_gene.R          # plot_gene_single() + save_batch_plots()</code></pre>
+<hr />
+</div>
+<div id="version" class="section level2">
+<h2>Version</h2>
+<p><strong>v0.2</strong> — April 2026</p>
 </div>
 </div>
 
