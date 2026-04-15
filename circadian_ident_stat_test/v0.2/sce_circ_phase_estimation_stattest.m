@@ -139,7 +139,9 @@ function [T1, T2] = sce_circ_phase_estimation_stattest(sce, tmeta, rm_low_conf, 
         fprintf("\nProcessing cell type: %s\n", cell_type);
 
         % ── Create per-cell-type output directory ──────────────────────────
-        outdir_name = regexprep(strtrim(char(cell_type)), '[^\w]', '_');
+        outdir_name = regexprep(strtrim(char(cell_type)), '[^a-zA-Z0-9_]', '_');
+        outdir_name = regexprep(outdir_name, '_+', '_');   % collapse runs: Cd163__Mrc1 → Cd163_Mrc1
+        outdir_name = regexprep(outdir_name, '^_|_$', ''); % strip leading/trailing underscores
         outdir      = fullfile(pwd, outdir_name);
         if ~exist(outdir, 'dir'); mkdir(outdir); end
         fprintf("  Output directory: %s\n", outdir);
@@ -349,7 +351,10 @@ function [T1, T2] = sce_circ_phase_estimation_stattest(sce, tmeta, rm_low_conf, 
         T3{:, 2:end} = T3{:, 2:end} ./ R0_ref;
 
         % ── Write ALL-genes files ──────────────────────────────────────────
-        fbase = char(strcat(cell_type, per_label));
+        % Use the already-sanitized outdir_name as file prefix so that any
+        % special characters in the cell type name (+, /, \, spaces, etc.)
+        % never reach writetable and get misinterpreted as path separators.
+        fbase = [outdir_name, char(per_label)];
         writetable(T1, fullfile(outdir, [fbase 'circadian_analysis_all.csv']));
         writetable(T2, fullfile(outdir, [fbase 'circadian_ZTs_mean.csv']));
         writetable(T3, fullfile(outdir, [fbase 'circadian_ZTs_mean_normalized.csv']));
@@ -394,7 +399,12 @@ function [T1, T2] = sce_circ_phase_estimation_stattest(sce, tmeta, rm_low_conf, 
             custom_celltype = "all_cell_types";
         end
     end
-    writetable(T0, strcat(custom_celltype, per_label, "summary_results.csv"));
+    % Sanitise before building the file path — same rules as outdir_name so
+    % special characters (+, /, \, spaces) never reach the filesystem.
+    ct_safe = regexprep(strtrim(char(custom_celltype)), '[^a-zA-Z0-9_]', '_');
+    ct_safe = regexprep(ct_safe, '_+', '_');
+    ct_safe = regexprep(ct_safe, '^_|_$', '');
+    writetable(T0, strcat(ct_safe, per_label, "summary_results.csv"));
     fprintf('\n=== TimeSCape complete.  Total time: %.1f s ===\n', toc);
 
 end  % sce_circ_phase_estimation_stattest

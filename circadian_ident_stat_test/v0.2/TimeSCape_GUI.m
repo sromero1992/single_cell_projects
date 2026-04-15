@@ -43,7 +43,11 @@ function TimeSCape_GUI
 
     % ── Load SCE ──────────────────────────────────────────────────────────
     sce     = load_sce_data();
-    guiData = struct('tmeta', [], 'outdir', '', 'dark', false);   % shared state
+    % Snapshot list_cell_attributes immediately into guiData so the GUI
+    % always has a stable plain cell array to work from — independent of
+    % any handle-class setter side-effects that may clear the property later.
+    guiData = struct('tmeta', [], 'outdir', '', 'dark', false, ...
+                     'list_attrs', {sce.list_cell_attributes});   % {} wraps cell in struct field
 
     % ──────────────────────────────────────────────────────────────────────
     %   LEFT CONTROL PANEL
@@ -77,7 +81,10 @@ function TimeSCape_GUI
         'String','Cell Type:','BackgroundColor',PAN_BG,'HorizontalAlignment','left');
     cell_types = unique(sce.c_cell_type_tx);
     hCells = uicontrol('Parent',cpan,'Style','popupmenu',...
-        'Position',pn(135,594,195,22),'String',cell_types,'BackgroundColor','white');
+        'Position',pn(135,594,158,22),'String',cell_types,'BackgroundColor','white');
+    % ⚙ button — opens scrollable list of sce.list_cell_attributes keys;
+    % selecting one reassigns sce.c_cell_type_tx and refreshes the dropdown.
+    mk_btn(cpan, pn(297,594,30,22), '⚙', @setAttrSourceCallback, [0.35 0.35 0.40], BTN_FG);
 
     uicontrol('Parent',cpan,'Style','text','Position',pn(10,562,120,20),...
         'String','Normalization:','BackgroundColor',PAN_BG,'HorizontalAlignment','left');
@@ -288,26 +295,44 @@ function TimeSCape_GUI
                       'VariableNames', {'old_labels','new_labels','ZT_times'}), ...
                 'ZT_times');
 
-            % Remove excluded batches from working sce
+            % ── Mark excluded batches, build keep mask ────────────────────
             excluded = old_labels(strcmp(new_labels,'-1'));
             for ib = 1:length(excluded)
                 sce.c_batch_id(strcmp(sce.c_batch_id, excluded{ib})) = "-1";
             end
-            keep      = ~strcmp(sce.c_batch_id,"-1");
-            sce_new   = SingleCellExperiment(sce.X(:,keep), sce.g);
-            sce_new.c_cell_type_tx = sce.c_cell_type_tx(keep);
-            sce_new.c_cell_id      = sce.c_cell_id(keep);
-            sce_new.c_batch_id     = sce.c_batch_id(keep);
+            keep = ~strcmp(sce.c_batch_id, "-1");
 
-            % Merge batches sharing the same new label
+            % ── Deep-copy via subsetcopy — transfers EVERYTHING ───────────
+            % subsetcopy is the class's own method: copies X, g, s, all
+            % c_* fields, embeddings, and any other internal state while
+            % applying the cell index.  No need to list properties manually.
+            sce_new = sce.subsetcopy(keep);
+
+            % ── Re-label batches to canonical ZT names ────────────────────
             [uniq,~,li] = unique(guiData.tmeta.new_labels);
             for ii = 1:length(uniq)
                 m = ismember(sce_new.c_batch_id, guiData.tmeta.old_labels(li==ii));
                 sce_new.c_batch_id(m) = uniq{ii};
             end
 
+            % ── Restore list_cell_attributes from snapshot ────────────────
+            % subsetcopy or any subsequent setter may clear list_cell_attributes
+            % as a side-effect.  guiData.list_attrs is immune — restore from it.
+            if ~isempty(guiData.list_attrs)
+                new_attrs = guiData.list_attrs;
+                for ia = 2 : 2 : numel(new_attrs)
+                    v = new_attrs{ia};
+                    if numel(v) == numel(keep)       % full length → apply mask
+                        new_attrs{ia} = v(keep);
+                    end
+                    % numel(v) == sum(keep): subsetcopy already handled it
+                end
+                sce_new.list_cell_attributes = new_attrs;
+                guiData.list_attrs           = new_attrs;   % update snapshot
+            end
+
             clear sce; sce = sce_new; clear sce_new;
-            assignin('base','sce',sce);
+            assignin('base', 'sce', sce);
 
             set(hTmetaStatus,'String', ...
                 sprintf('✓  Tmeta set: %d time points', sum(times >= 0)), ...
@@ -322,6 +347,51 @@ function TimeSCape_GUI
                 disp(['SCE saved → ', fullfile(path,file)]);
             end
         end
+    end
+
+    % ── ②b  Cell-type attribute source selector ──────────────────────────────
+    function setAttrSourceCallback(~,~)
+        % Work from the snapshot in guiData.list_attrs rather than reading
+        % sce.list_cell_attributes directly — the SCE handle-class setter for
+        % c_cell_type_tx clears list_cell_attributes as a side-effect, and
+        % evalin()-based workspace loading can produce stale property reads.
+        if isempty(guiData.list_attrs)
+            msgbox(['No cell-type attributes found.  ' ...
+                    'Make sure list_cell_attributes is populated before opening the GUI.'], ...
+                   'No Attributes', 'warn');
+            return;
+        end
+        keys = guiData.list_attrs(1:2:end);   % key names from snapshot
+
+        % Show scrollable selection dialog
+        [sel, ok] = listdlg( ...
+            'ListString',    keys, ...
+            'SelectionMode', 'single', ...
+            'PromptString',  'Select attribute  →  sce.c_cell_type_tx:', ...
+            'ListSize',      [280, 220], ...
+            'Name',          'Cell Type Source', ...
+            'OKString',      'Apply', ...
+            'CancelString',  'Cancel');
+        if ~ok; return; end
+
+        chosen_key = keys{sel};
+        idx      = find(strcmp(guiData.list_attrs(1:2:end), chosen_key), 1);
+        new_vals = string(guiData.list_attrs{idx * 2});
+
+        % Assign to SCE — setter clears list_cell_attributes as a side-effect;
+        % restore from our snapshot which is unaffected.
+        sce.c_cell_type_tx     = new_vals;
+        sce.list_cell_attributes = guiData.list_attrs;   % always restore from snapshot
+
+        % Refresh the Cell Type dropdown
+        new_types = cellstr(unique(new_vals));
+        set(hCells, 'String', new_types, 'Value', 1);
+
+        % Brief confirmation in the run-status bar
+        set(hRunStatus, ...
+            'String', sprintf('✓  Cell type source → "%s"  (%d types)', ...
+                              chosen_key, numel(new_types)), ...
+            'ForegroundColor', [0.1 0.5 0.1]);
     end
 
     % ── ③ Run Analysis ─────────────────────────────────────────────────────
@@ -340,7 +410,7 @@ function TimeSCape_GUI
             n_all  = height(T1);
             n_conf = sum((T1.pvalue < 0.05) & (T1.pvalue_corr < 0.05));
             % Store output directory so other callbacks can find the files
-            outdir_name        = regexprep(strtrim(char(celltype)), '[^\w]', '_');
+            outdir_name        = safe_name(celltype);
             guiData.outdir     = fullfile(pwd, outdir_name);
             set(hRunStatus,'String', ...
                 sprintf('✓  Done: %d genes tested, %d confident  →  %s', ...
@@ -387,7 +457,7 @@ function TimeSCape_GUI
             errordlg(['Run-All error: ' ME.message], 'Error');
         end
         % Point outdir to the last cell type directory (alphabetically last)
-        outdir_name    = regexprep(strtrim(char(all_types(end))), '[^\w]', '_');
+        outdir_name    = safe_name(all_types(end));
         guiData.outdir = fullfile(pwd, outdir_name);
     end
 
@@ -401,7 +471,7 @@ function TimeSCape_GUI
         customName  = strtrim(hCustomName.String);
         if period12; pl = '_period_12_'; else; pl = '_period_24_'; end
 
-        fname_chk = fullfile(guiData.outdir, [char(celltype) pl 'circadian_analysis_all.csv']);
+        fname_chk = fullfile(guiData.outdir, [safe_name(celltype) pl 'circadian_analysis_all.csv']);
         if ~exist(fname_chk, 'file')
             warndlg(sprintf(['Analysis file not found:\n%s\n\n' ...
                              'Please run the analysis first (Step ③).'], fname_chk), ...
@@ -594,6 +664,16 @@ function TimeSCape_GUI
         str  = opts{hctrl.Value};
     end
 
+    function s = safe_name(raw)
+        % Convert any cell type name to a filesystem-safe string.
+        % Replaces every character that is not [a-zA-Z0-9_] with '_',
+        % collapses runs of underscores, and strips leading/trailing ones.
+        % Identical logic to the sanitisation in sce_circ_phase_estimation_stattest.
+        s = regexprep(strtrim(char(raw)), '[^a-zA-Z0-9_]', '_');
+        s = regexprep(s, '_+', '_');
+        s = regexprep(s, '^_|_$', '');
+    end
+
     function n = parse_cores(hctrl, fallback)
         % Read the Workers edit box; fall back to default if invalid.
         n = round(str2double(strtrim(hctrl.String)));
@@ -604,12 +684,65 @@ function TimeSCape_GUI
     end
 
     function sce = load_sce_data()
-        [fn,fp] = uigetfile('*.mat','Select SCE .mat file');
-        if isequal(fn,0); error('No file selected.'); end
-        loaded = load(fullfile(fp,fn));
-        if isfield(loaded,'sce'); sce = loaded.sce;
-        else; error('The .mat file does not contain a variable named "sce".'); end
-        fprintf('SCE loaded: %d genes × %d cells\n', size(sce.X,1), size(sce.X,2));
+        % ── Ask user: file or base-workspace variable ──────────────────────
+        choice = questdlg('Where is your SCE object?', 'Load SCE', ...
+                          'From .mat file', 'From workspace', 'From .mat file');
+
+        if isempty(choice)           % dialog closed with X
+            error('TimeSCape:cancelled', 'Load cancelled.');
+        end
+
+        if strcmp(choice, 'From workspace')
+            % ── List base-workspace variables, annotated with class ────────
+            try
+                ws = evalin('base', 'whos');
+            catch
+                error('Cannot read base workspace.');
+            end
+            if isempty(ws)
+                error('Base workspace is empty — run your setup script first.');
+            end
+
+            % Build display strings: "varname  [ClassName  N×M]"
+            labels = arrayfun(@(v) sprintf('%-20s  [%s  %s]', ...
+                              v.name, v.class, ...
+                              strjoin(arrayfun(@num2str, v.size, 'UniformOutput',false),'×')), ...
+                              ws, 'UniformOutput', false);
+
+            [sel, ok] = listdlg( ...
+                'ListString',    labels, ...
+                'SelectionMode', 'single', ...
+                'PromptString',  'Select the SCE variable:', ...
+                'ListSize',      [340, 220], ...
+                'Name',          'Load from Workspace', ...
+                'OKString',      'Load', ...
+                'CancelString',  'Cancel');
+            if ~ok; error('TimeSCape:cancelled', 'No variable selected.'); end
+
+            var_name = ws(sel).name;
+            sce = evalin('base', var_name);
+            fprintf('SCE loaded from workspace variable "%s"\n', var_name);
+
+        else
+            % ── File dialog (original behaviour) ──────────────────────────
+            [fn, fp] = uigetfile('*.mat', 'Select SCE .mat file');
+            if isequal(fn, 0)
+                error('TimeSCape:cancelled', 'No file selected.');
+            end
+            loaded = load(fullfile(fp, fn));
+            if isfield(loaded, 'sce')
+                sce = loaded.sce;
+            else
+                % Fall back: use the first variable in the file
+                fnames = fieldnames(loaded);
+                sce = loaded.(fnames{1});
+                fprintf('  Note: no variable named "sce" — loaded "%s" instead.\n', fnames{1});
+            end
+            clear loaded;   % drop the struct immediately; sce handle keeps the object alive
+            fprintf('SCE loaded from file: %s\n', fn);
+        end
+
+        fprintf('  %d genes × %d cells\n', size(sce.X,1), size(sce.X,2));
     end
 
     function section_label(parent, pos, txt, col, bg)
