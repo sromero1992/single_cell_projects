@@ -315,15 +315,28 @@ run_timescape <- function(
   #                when you explicitly want no transformation.
   message("  Normalisation: ", norm_str)
 
-  # For "seurat" we pull the full normalised matrix once (it is already in RAM
-  # inside the Seurat object, so no extra cost).
-  # For "lib_size" and "none" we defer to the cell-type loop.
+  # Warn if the user is likely passing ScaleData output (scale.data = mean 0,
+  # sd 1 per gene) through norm_str="none" — the MESOR would be ~0 for every
+  # gene, making cosinor amplitude estimates meaningless.
+  if (norm_str == "none")
+    message("  ⚠  norm_str='none': make sure counts/data slot contains raw or ",
+            "log-normalised counts, NOT ScaleData output. ScaleData (mean=0, ",
+            "sd=1 per gene) removes the MESOR and should not be used here.")
+
+  # Raise the future global-size limit for this call only; restored on exit.
+  old_maxsize <- getOption("future.globals.maxSize")
+  options(future.globals.maxSize = 4 * 1024^3)   # 4 GiB
+  on.exit(options(future.globals.maxSize = old_maxsize), add = TRUE)
+
+  # Pull the global expression matrix ONCE, keeping it SPARSE.
+  # NEVER call as.matrix() at the full-dataset level — that densifies 19k × 224k
+  # = ~34 GB and causes OOM.  Densification happens inside each per-gene block.
   use_prebuilt_norm <- norm_str %in% c("seurat", "logcounts")
   if (use_prebuilt_norm) {
-    X_global          <- as.matrix(.get_matrix(obj, use_normalized = TRUE))
+    X_global          <- .get_matrix(obj, use_normalized = TRUE)  # sparse
     gene_names_global <- rownames(X_global)
   } else {
-    X_global_raw      <- .get_matrix(obj, use_normalized = FALSE)
+    X_global_raw      <- .get_matrix(obj, use_normalized = FALSE) # sparse
     gene_names_global <- rownames(X_global_raw)
   }
 
@@ -383,20 +396,26 @@ run_timescape <- function(
       if (!is.null(grp)) ct_mask <- ct_mask & (group_vec == grp)
       zt_ct_str <- zt_str_vec[ct_mask]
 
-    # ── Per-cell-type normalisation (low-RAM path) ─────────────────────────
-    # Extracting and normalising only the cells for this cell type keeps peak
-    # RAM to one dense cell-type matrix at a time instead of the full dataset.
+    # ── Per-cell-type matrix slice (SPARSE — no as.matrix() here) ─────────────
+    # Keep the slice sparse.  Workers densify only their own block of ≤500 genes.
+    # t(t(X) * v) is the standard sparse-safe column-wise scaling idiom in R:
+    # t(X) gives a cells×genes matrix; multiplying by vector v (length=cells)
+    # scales each row (= original column) by its factor; t() flips back.
     if (use_prebuilt_norm) {
-      X_ct <- as.matrix(X_global[, ct_mask, drop = FALSE])
+      X_ct <- X_global[, ct_mask, drop = FALSE]          # sparse slice
     } else if (norm_str == "lib_size") {
-      X_ct_raw  <- as.matrix(X_global_raw[, ct_mask, drop = FALSE])
-      csumsX    <- colSums(X_ct_raw)
-      csumsX[csumsX == 0] <- 1
-      X_ct      <- log1p(t(t(X_ct_raw) / csumsX * 1e4))
-      rm(X_ct_raw)
+      X_ct_raw <- X_global_raw[, ct_mask, drop = FALSE]  # sparse slice
+      cs <- Matrix::colSums(X_ct_raw)
+      cs[cs == 0] <- 1
+      X_ct <- Matrix::t(Matrix::t(X_ct_raw) * (1e4 / cs)) # sparse column-scale
+      X_ct <- log1p(X_ct)                                  # log1p(0)=0 → stays sparse
+      rm(X_ct_raw); gc()
     } else {  # "none"
-      X_ct <- as.matrix(X_global_raw[, ct_mask, drop = FALSE])
+      X_ct <- X_global_raw[, ct_mask, drop = FALSE]      # sparse slice
     }
+    message(sprintf("  Matrix slice: %d genes x %d cells  (%.1f MB sparse)",
+                    nrow(X_ct), ncol(X_ct),
+                    object.size(X_ct) / 1024^2))
 
     gene_names <- gene_names_global
 
@@ -422,41 +441,69 @@ run_timescape <- function(
     if (ngenes == 0) { warning("No genes for cell type '", ct, "' — skipping."); next }
 
     # ── Block-parallel cosinor fitting ────────────────────────────────────────
-    block_size   <- ifelse(ncol(X_ct) > 15000, 50, 500)
-    gene_blocks  <- split(seq_len(ngenes), ceiling(seq_len(ngenes) / block_size))
+    # Block size: smaller blocks for huge cell counts to cap per-worker RAM.
+    # A block of 500 genes × 10k cells ≈ 40 MB dense — safe to send.
+    block_size  <- ifelse(ncol(X_ct) > 20000, 100, 500)
+    gene_blocks <- split(seq_len(ngenes), ceiling(seq_len(ngenes) / block_size))
 
     message("  Fitting ", ngenes, " genes in ", length(gene_blocks),
             " blocks of ≤", block_size, " ...")
 
-    results_blocks <- future.apply::future_lapply(gene_blocks, function(g_idx_block) {
-      nb <- length(g_idx_block)
-      res <- list(
-        amp   = numeric(nb), mesor = numeric(nb), acro = numeric(nb),
-        pval  = numeric(nb), rho   = numeric(nb), pmac = numeric(nb),
-        R0mat = matrix(NA_real_, nrow=nb, ncol=nzts)
-      )
-      for (i in seq_along(g_idx_block)) {
-        gi <- g_idx_block[i]
-        Xg_zts <- lapply(zt_present, function(z) {
-          idx <- which(zt_num_ct == z)
-          if (length(idx) == 0) return(numeric(0))
-          as.numeric(X_ct[gi, idx])
-        })
-        fit <- estimate_phaseR(Xg_zts, zt_present, period12, "Ftest")
-        res$amp[i]     <- fit$amp
-        res$mesor[i]   <- fit$mesor
-        res$acro[i]    <- fit$acrophase
-        res$pval[i]    <- fit$p_value
-        res$rho[i]     <- fit$rho
-        res$pmac[i]    <- fit$p_value_macro
-        # Per-ZT means
-        for (j in seq_along(zt_present)) {
-          idx <- which(zt_num_ct == zt_present[j])
-          if (length(idx) > 0) res$R0mat[i, j] <- mean(as.numeric(X_ct[gi, idx]), na.rm=TRUE)
+    # ── Snapshot only the objects workers actually need ─────────────────────
+    # future_lapply captures the ENTIRE calling environment by default, which
+    # includes X_global_raw / the Seurat object → dozens of GiB exported.
+    # Using future.globals = list(...) tells future to export ONLY these named
+    # objects — nothing else from the parent frame is serialised.
+    # X_ct is still sparse here; workers densify only their own block.
+    .fpar_X   <- X_ct
+    .fpar_zt  <- zt_num_ct
+    .fpar_zts <- zt_present
+    .fpar_nz  <- nzts
+    .fpar_p12 <- period12
+    .fpar_fit <- estimate_phaseR
+
+    results_blocks <- future.apply::future_lapply(
+      gene_blocks,
+      FUN = function(g_idx_block) {
+        nb    <- length(g_idx_block)
+        # Densify only this block: ≤500 genes × n_cells (manageable RAM)
+        X_blk <- as.matrix(.fpar_X[g_idx_block, , drop = FALSE])
+        res <- list(
+          amp   = numeric(nb), mesor = numeric(nb), acro = numeric(nb),
+          pval  = numeric(nb), rho   = numeric(nb), pmac = numeric(nb),
+          R0mat = matrix(NA_real_, nrow = nb, ncol = .fpar_nz)
+        )
+        for (i in seq_along(g_idx_block)) {
+          Xg_zts <- lapply(.fpar_zts, function(z) {
+            idx <- which(.fpar_zt == z)
+            if (length(idx) == 0) return(numeric(0))
+            as.numeric(X_blk[i, idx])
+          })
+          fit <- .fpar_fit(Xg_zts, .fpar_zts, .fpar_p12, "Ftest")
+          res$amp[i]   <- fit$amp
+          res$mesor[i] <- fit$mesor
+          res$acro[i]  <- fit$acrophase
+          res$pval[i]  <- fit$p_value
+          res$rho[i]   <- fit$rho
+          res$pmac[i]  <- fit$p_value_macro
+          for (j in seq_along(.fpar_zts)) {
+            idx <- which(.fpar_zt == .fpar_zts[j])
+            if (length(idx) > 0)
+              res$R0mat[i, j] <- mean(as.numeric(X_blk[i, idx]), na.rm = TRUE)
+          }
         }
-      }
-      res
-    })
+        res
+      },
+      future.globals = list(
+        .fpar_X   = .fpar_X,
+        .fpar_zt  = .fpar_zt,
+        .fpar_zts = .fpar_zts,
+        .fpar_nz  = .fpar_nz,
+        .fpar_p12 = .fpar_p12,
+        .fpar_fit = .fpar_fit
+      ),
+      future.seed = TRUE
+    )
 
     # Flatten blocks
     amp_v  <- unlist(lapply(results_blocks, `[[`, "amp"))

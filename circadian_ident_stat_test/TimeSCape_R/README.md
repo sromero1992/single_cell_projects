@@ -1,7 +1,7 @@
-# TimeSCape v0.2 — R  (Seurat-native)
+# TimeSCape v0.2 — R  (Seurat + SingleCellExperiment)
 
 Circadian rhythm detection pipeline for single-cell RNA-seq data.
-Direct translation of the MATLAB v0.2 pipeline, accepting **Seurat objects** as input.
+Direct translation of the MATLAB v0.2 pipeline, accepting **Seurat** (v4/v5) and **SingleCellExperiment** (Bioconductor) objects as input.
 Includes a Shiny web GUI as the equivalent of the MATLAB `TimeSCape_GUI.m`.
 
 ---
@@ -10,9 +10,11 @@ Includes a Shiny web GUI as the equivalent of the MATLAB `TimeSCape_GUI.m`.
 
 ### 1 — R packages
 
+Install all CRAN packages at once. Use `dependencies = TRUE` to avoid missing sub-dependencies (known issue with `minpack.lm` and `rhandsontable` without it):
+
 ```r
 install.packages(c(
-  "Seurat",           # input object format
+  "Seurat",           # Seurat input format (v4 or v5)
   "minpack.lm",       # Levenberg-Marquardt NLS solver
   "future",           # parallel workers
   "future.apply",     # future_lapply (block parallelism)
@@ -21,10 +23,29 @@ install.packages(c(
   "shiny",            # GUI (optional, only for app.R)
   "bslib",            # GUI theme
   "rhandsontable"     # editable ZT table in GUI
-))
+), dependencies = TRUE)
 ```
 
-All packages are on CRAN — no Bioconductor needed.
+For **SingleCellExperiment** input (Bioconductor), also install:
+
+```r
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+BiocManager::install(c("SingleCellExperiment", "SummarizedExperiment"))
+```
+
+> **Tip — verify installation:** After installing, run the block below to catch any missing packages before your analysis:
+>
+> ```r
+> required <- c("minpack.lm", "future", "future.apply", "pheatmap",
+>               "ggplot2", "shiny", "bslib", "rhandsontable")
+> missing  <- required[!sapply(required, requireNamespace, quietly = TRUE)]
+> if (length(missing) > 0) {
+>   install.packages(missing, dependencies = TRUE)
+> } else {
+>   message("All packages installed.")
+> }
+> ```
 
 ### 2 — Source the functions
 
@@ -42,29 +63,30 @@ Or simply open `app.R` in RStudio and click **Run App** — it sources everythin
 ## Quick Start — Command Line
 
 ```r
-library(Seurat)
+library(Seurat)   # or library(SingleCellExperiment)
 library(future)
 
 # Optional: parallel workers (recommended for > 5 000 genes)
 plan(multisession, workers = 4)
 
-# Load your Seurat object
-seu <- readRDS("my_data.rds")
+# Load your object — Seurat or SingleCellExperiment both work
+obj <- readRDS("my_data.rds")
 
 # Preview metadata columns and ZT strings
-head(seu@meta.data)
+head(obj@meta.data)           # Seurat
+# or: head(as.data.frame(colData(obj)))   # SingleCellExperiment
 
-# Auto-parse ZT times (expects "ZT00", "ZT03", ... in the ZT column)
-tmeta <- build_tmeta_from_seurat(seu, zt_col = "ZT_str")
+# Auto-parse ZT times (expects "ZT00", "ZT06", ... in the ZT column)
+tmeta <- build_tmeta(obj, zt_col = "ZT_time_str")
 print(tmeta)   # verify ZT_times; edit manually if your naming differs
 
 # Run full pipeline
 results <- run_timescape(
-  seurat_obj   = seu,
-  celltype_col = "cell_type",   # column with cell-type labels
-  zt_col       = "ZT_str",      # column with ZT time strings
+  obj          = obj,
+  celltype_col = "CellType",      # column with cell-type labels
+  zt_col       = "ZT_time_str",   # column with ZT time strings
   tmeta        = tmeta,
-  norm_str     = "lib_size",    # recommended
+  norm_str     = "lib_size",      # recommended
   outdir       = "TimeSCape_output"
 )
 ```
@@ -95,10 +117,10 @@ Opens in your browser. Workflow mirrors the MATLAB GUI:
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `seurat_obj` | — | Seurat object (v4 or v5) |
+| `obj` | — | Seurat (v4/v5) **or** SingleCellExperiment object — auto-detected |
 | `celltype_col` | `"cell_type"` | Metadata column with cell-type labels |
-| `zt_col` | `"ZT_str"` | Metadata column with ZT strings (`"ZT00"`, `"ZT03"`, …) |
-| `tmeta` | `NULL` | data.frame from `build_tmeta_from_seurat()`. Auto-built if NULL. |
+| `zt_col` | `"ZT_str"` | Metadata column with ZT strings (`"ZT00"`, `"ZT06"`, …) |
+| `tmeta` | `NULL` | data.frame from `build_tmeta()`. Auto-built if NULL. |
 | `norm_str` | `"lib_size"` | See **Normalization** section below |
 | `period12` | `FALSE` | `TRUE` = 12-hr period; `FALSE` = 24-hr (default) |
 | `rm_low_conf` | `TRUE` | Write confident-only CSV subsets |
@@ -116,7 +138,7 @@ Opens in your browser. Workflow mirrors the MATLAB GUI:
 | Value | Behaviour |
 |-------|-----------|
 | `"lib_size"` | Per-cell library-size normalisation to 10 000 counts + `log1p`. Identical to MATLAB `pkg.norm_libsize(X, 1e4)`. **Recommended.** Safe across cancer stages and replicates because each cell's factor depends only on its own total count sum. |
-| `"seurat"` | Use the `NormalizedData` slot already computed by `NormalizeData()` or `SCTransform`. Pass if you want to use Seurat's pre-computed values. |
+| `"logcounts"` | Use a pre-computed normalised slot: Seurat `NormalizedData` (`data` slot) or SCE `logcounts` assay. Use if you already ran `NormalizeData()` / `SCTransform` (Seurat) or `scuttle::logNormCounts()` (SCE). |
 | `"none"` | Use raw counts as-is from the `counts` slot. Use when data is already normalised externally and stored in the counts slot, or when you explicitly want no transformation. |
 
 Normalisation happens **inside the cell-type loop** (or cell-type × group loop) so only one dense submatrix is in RAM at a time — memory-efficient even for large datasets.
@@ -129,10 +151,10 @@ When all cancer stages (or replicates, treatments, …) are in a single Seurat o
 
 ```r
 results <- run_timescape(
-  seurat_obj   = seu,
-  celltype_col = "cell_type",
-  zt_col       = "ZT_str",
-  group_col    = "cancer_stage",   # e.g. "early", "mid", "late"
+  obj          = obj,
+  celltype_col = "CellType",
+  zt_col       = "ZT_time_str",
+  group_col    = "tumor_stage",    # e.g. "Early", "Intermediate", "Late"
   norm_str     = "lib_size",
   outdir       = "TimeSCape_output"
 )
@@ -204,17 +226,19 @@ Rows sorted: `pvalue_adj_corr ↑ → pvalue_adj ↑ → Acrophase_24 ↑ → Ab
 
 ---
 
-## ZT Metadata — `build_tmeta_from_seurat()`
+## ZT Metadata — `build_tmeta()`
 
-Parses numeric ZT hours from a string metadata column. Supports:
-`"ZT00"`, `"ZT03"`, `"zt12"`, `"ZT_06"`, `"ZT 3"`, `"0"`, `"3"` …
+Parses numeric ZT hours from a string metadata column. Works with both Seurat and SingleCellExperiment. Supports:
+`"ZT00"`, `"ZT06"`, `"zt12"`, `"ZT_06"`, `"ZT 3"`, `"0"`, `"6"` …
 
 ```r
-tmeta <- build_tmeta_from_seurat(seu, zt_col = "ZT_str")
+tmeta <- build_tmeta(obj, zt_col = "ZT_time_str")
 # Returns data.frame with columns: zt_str, ZT_times
 # Edit ZT_times manually if auto-parsing fails for your naming convention:
 tmeta$ZT_times[tmeta$zt_str == "custom_label"] <- 6
 ```
+
+`build_tmeta_from_seurat()` is kept as a backward-compatible alias.
 
 ---
 
@@ -267,7 +291,7 @@ save_batch_plots(
 
 | Aspect | MATLAB v0.2 | R v0.2 |
 |--------|-------------|--------|
-| Input format | `SingleCellExperiment` (scGEAtoolbox) | `Seurat` object (v4 or v5) |
+| Input format | `SingleCellExperiment` (scGEAtoolbox) | `Seurat` (v4/v5) **or** `SingleCellExperiment` — auto-detected |
 | NLS solver | Trust-Region (`fit()`) | Levenberg-Marquardt (`minpack.lm::nlsLM`) |
 | Parallelism | `parfor` (implicit pool) | `future.apply::future_lapply()` + `plan()` |
 | Heatmap | `imagesc` + custom colormap | `pheatmap` |
