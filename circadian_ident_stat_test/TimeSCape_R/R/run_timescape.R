@@ -48,15 +48,46 @@
 .get_matrix <- function(obj, use_normalized = FALSE) {
   if (inherits(obj, "Seurat")) {
     slot_name <- if (use_normalized) "data" else "counts"
-    tryCatch(
+
+    # ── Seurat v4: GetAssayData(slot = ...) ─────────────────────────────────
+    mat <- tryCatch(
       Seurat::GetAssayData(obj, assay = "RNA", slot = slot_name),
-      error = function(e) tryCatch(
-        Seurat::LayerData(obj, layer = slot_name),
-        error = function(e2) stop(
-          "Cannot extract matrix from Seurat object (RNA assay missing?). ",
-          e2$message)))
+      error   = function(e) NULL,
+      warning = function(w) NULL
+    )
+    if (!is.null(mat) && prod(dim(mat)) > 0) return(mat)
+
+    # ── Seurat v5: GetAssayData(layer = ...) ────────────────────────────────
+    mat <- tryCatch(
+      Seurat::GetAssayData(obj, assay = "RNA", layer = slot_name),
+      error = function(e) NULL
+    )
+    if (!is.null(mat) && prod(dim(mat)) > 0) return(mat)
+
+    # ── Seurat v5: SeuratObject::LayerData (LayerData is in SeuratObject,
+    #    not re-exported by Seurat — must call via SeuratObject::) ───────────
+    mat <- tryCatch(
+      SeuratObject::LayerData(obj, layer = slot_name),
+      error = function(e) NULL
+    )
+    if (!is.null(mat) && prod(dim(mat)) > 0) return(mat)
+
+    # ── Seurat v5: direct bracket accessor obj[["RNA"]][[layer]] ────────────
+    mat <- tryCatch(
+      obj[["RNA"]][[slot_name]],
+      error = function(e) NULL
+    )
+    if (!is.null(mat) && prod(dim(mat)) > 0) return(mat)
+
+    stop(
+      "Cannot extract '", slot_name, "' matrix from Seurat object. ",
+      "Make sure the RNA assay is present. ",
+      "For Seurat v5 with split layers (multi-sample before integration), ",
+      "run: obj <- JoinLayers(obj)  — then retry."
+    )
+
   } else {
-    # SingleCellExperiment / SummarizedExperiment
+    # ── SingleCellExperiment / SummarizedExperiment ──────────────────────────
     if (use_normalized) {
       tryCatch(
         SummarizedExperiment::assay(obj, "logcounts"),
@@ -116,28 +147,6 @@ build_tmeta <- function(obj, zt_col) {
 #' @export
 build_tmeta_from_seurat <- function(seurat_obj, zt_col) build_tmeta(seurat_obj, zt_col)
 
-
-#' Get expression matrix from Seurat (handles v4 and v5 API)
-#'
-#' @param seurat_obj A Seurat object.
-#' @param use_normalized If TRUE, use normalized data slot; else raw counts.
-#' @return A genes × cells sparse or dense matrix.
-#'
-#' @keywords internal
-.get_seurat_matrix <- function(seurat_obj, use_normalized = FALSE) {
-  slot_name <- if (use_normalized) "data" else "counts"
-  # Seurat v5 uses Layers API; v4 uses GetAssayData
-  tryCatch(
-    Seurat::GetAssayData(seurat_obj, assay = "RNA", slot = slot_name),
-    error = function(e) {
-      tryCatch(
-        Seurat::LayerData(seurat_obj, layer = slot_name),
-        error = function(e2) {
-          stop("Cannot extract expression matrix from Seurat object. ",
-               "Make sure the RNA assay is present. Original error: ", e2$message)
-        })
-    })
-}
 
 
 #' Run Full TimeSCape Circadian Analysis Pipeline
