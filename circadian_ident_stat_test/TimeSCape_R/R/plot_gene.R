@@ -84,42 +84,56 @@ plot_gene_single <- function(
   fval <- amp_g * cos(2*pi*(tval - acro_g) / period_val) + mesor_g
 
   # ── Always count total cells for N in title ───────────────────────────────
+  # cust_cells may be the sanitised combo key (e.g. "CD8__T_cells") while the
+  # metadata still holds the original label ("CD8+ T cells").  Sanitise the
+  # metadata labels so the comparison always works regardless of which form the
+  # caller passes.
   n_cells_type <- 0
   if (!is.null(sce)) {
-    meta_ct <- as.character(sce@meta.data[[celltype_col]])
-    n_cells_type <- sum(meta_ct == cust_cells, na.rm=TRUE)
-    # Also try the sanitised name
-    if (n_cells_type == 0) n_cells_type <- sum(meta_ct == ct_safe, na.rm=TRUE)
+    meta_ct      <- as.character(.get_meta(sce)[[celltype_col]])
+    meta_ct_safe <- gsub("[^[:alnum:]_]", "_", trimws(meta_ct))
+    n_cells_type <- sum(meta_ct == cust_cells, na.rm = TRUE)          # exact match
+    if (n_cells_type == 0)
+      n_cells_type <- sum(meta_ct_safe == ct_safe, na.rm = TRUE)      # sanitised match
   }
 
   # ── Collect per-cell expression when overlay requested ────────────────────
-  nc_cum   <- 0
-  sc_data  <- NULL
+  # Memory-efficient path: extract ONE gene row from the sparse matrix instead
+  # of densifying the full genes × cells matrix.  Uses the pre-normalised slot
+  # (Seurat data / SCE logcounts) when available; falls back to raw counts.
+  nc_cum  <- 0
+  sc_data <- NULL
 
   if (print_scdata && !is.null(sce)) {
-    meta <- sce@meta.data
-    ct_mask <- (as.character(meta[[celltype_col]]) == cust_cells) |
-               (as.character(meta[[celltype_col]]) == ct_safe)
+    meta          <- .get_meta(sce)
+    meta_ct_all   <- as.character(meta[[celltype_col]])
+    meta_safe_all <- gsub("[^[:alnum:]_]", "_", trimws(meta_ct_all))
+    ct_mask       <- (meta_ct_all == cust_cells) | (meta_safe_all == ct_safe)
 
     if (sum(ct_mask) > 0) {
-      # Normalize
-      X_raw  <- as.matrix(.get_seurat_matrix(sce, use_normalized = FALSE))
-      csumsX <- colSums(X_raw); csumsX[csumsX == 0] <- 1
-      X_norm <- log1p(t(t(X_raw) / csumsX * 1e4))
-      rm(X_raw)
-
-      ig_sc  <- which(rownames(X_norm) == cust_gene)
-      if (length(ig_sc) > 0) {
-        zt_str_cells <- as.character(meta[[zt_col]])[ct_mask]
-        zt_num_cells <- tmeta$ZT_times[match(zt_str_cells, tmeta$zt_str)]
-        expr_cells   <- as.numeric(X_norm[ig_sc[1], ct_mask])
-
-        ok   <- !is.na(zt_num_cells)
-        sc_data <- data.frame(
-          ZT   = zt_num_cells[ok],
-          Expr = expr_cells[ok]
+      # Try pre-normalised slot first (already log-scaled, no extra RAM needed)
+      gene_mat <- tryCatch(
+        .get_matrix(sce, use_normalized = TRUE),
+        error = function(e) tryCatch(
+          .get_matrix(sce, use_normalized = FALSE),
+          error = function(e2) NULL
         )
-        nc_cum <- nrow(sc_data)
+      )
+
+      if (!is.null(gene_mat)) {
+        ig_sc <- which(rownames(gene_mat) == cust_gene)
+        if (length(ig_sc) > 0) {
+          # Extract just the one gene row — stays cheap even for large objects
+          expr_all     <- as.numeric(gene_mat[ig_sc[1], ])
+          zt_str_cells <- as.character(meta[[zt_col]])[ct_mask]
+          zt_num_cells <- tmeta$ZT_times[match(zt_str_cells, tmeta$zt_str)]
+          expr_cells   <- expr_all[ct_mask]
+
+          ok      <- !is.na(zt_num_cells)
+          sc_data <- data.frame(ZT = zt_num_cells[ok], Expr = expr_cells[ok])
+          nc_cum  <- nrow(sc_data)
+        }
+        rm(gene_mat); gc()
       }
     }
   }
@@ -203,6 +217,22 @@ plot_gene_single <- function(
           width=0.25, size=0.8, alpha=0.22, inherit.aes=FALSE
         )
     }
+    # Decide which legend entries to show (no inline if() inside c() — ggplot2
+    # v3.5+ requires override.aes length to match the number of displayed keys
+    # exactly; inline if() evaluates to NULL when FALSE, silently changing the
+    # vector length and causing "argument is of length zero").
+    show_sc  <- print_scdata && !is.null(sc_data) && nc_cum > 0
+    sc_vals  <- if (show_sc) c("Cosine fit"   = col_cos,
+                                "Mean per ZT"  = col_mean,
+                                "Single cells" = col_dots)
+                else          c("Cosine fit"   = col_cos,
+                                "Mean per ZT"  = col_mean)
+    sc_brks  <- if (show_sc) c("Cosine fit","Mean per ZT","Single cells")
+                else         c("Cosine fit","Mean per ZT")
+    ov_line  <- if (show_sc) c("solid","solid","blank") else c("solid","solid")
+    ov_shape <- if (show_sc) c(NA_real_, 16, 16)        else c(NA_real_, 16)
+    ov_lwd   <- if (show_sc) c(1.6, 1.3, 0)            else c(1.6, 1.3)
+
     p <- p +
       ggplot2::geom_line(data = cos_df,
                          ggplot2::aes(x=ZT, y=Expr, colour="Cosine fit"),
@@ -218,38 +248,17 @@ plot_gene_single <- function(
       ggplot2::annotate("text", x=acro_24, y=-Inf,
                         label=sprintf("ZT%.1f", acro_24),
                         vjust=-0.4, hjust=-0.1, colour=col_acro, size=3.5) +
-      ggplot2::scale_colour_manual(
-        values = c("Cosine fit"   = col_cos,
-                   "Mean per ZT"  = col_mean,
-                   "Single cells" = col_dots,
-                   "Acrophase"    = col_acro),   # needed so swatch gets correct colour
-        breaks = c("Cosine fit", "Mean per ZT",
-                   if (print_scdata && nc_cum > 0) "Single cells",
-                   "Acrophase")
-      )
-  }
-
-  # Dummy legend entry for Acrophase (dashed line swatch)
-  p <- p +
-    ggplot2::geom_blank(
-      ggplot2::aes(colour = "Acrophase"),
-      data = data.frame(ZT=NA_real_, Expr=NA_real_)
-    ) +
-    ggplot2::guides(
-      colour = ggplot2::guide_legend(
-        override.aes = list(
-          linetype = c("solid","solid",
-                       if (print_scdata && nc_cum > 0) "blank",
-                       "dashed"),
-          shape    = c(NA, 16,
-                       if (print_scdata && nc_cum > 0) 16,
-                       NA),
-          linewidth= c(1.6,1.3,
-                       if (print_scdata && nc_cum > 0) 0,
-                       0.9)
+      ggplot2::scale_colour_manual(values = sc_vals, breaks = sc_brks) +
+      ggplot2::guides(
+        colour = ggplot2::guide_legend(
+          override.aes = list(
+            linetype  = ov_line,
+            shape     = ov_shape,
+            linewidth = ov_lwd
+          )
         )
       )
-    )
+  }
 
   p
 }
