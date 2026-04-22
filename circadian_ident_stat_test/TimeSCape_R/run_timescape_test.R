@@ -652,7 +652,8 @@ if (length(grn_keys) == 0) {
 
   for (pw_key in grn_keys) {
     pw_genes    <- phase_results$phase_gs[[pw_key]]
-    pw_safe     <- gsub("[^[:alnum:]_]", "_", pw_key)
+    # Trim to 60 chars for filename only — plot title keeps the full name
+    pw_safe     <- substr(gsub("[^[:alnum:]_]", "_", pw_key), 1, 60)
     grn_outfile <- file.path(grn_dir,
       sprintf("%s_GRN_%s.png", focus_safe, pw_safe))
 

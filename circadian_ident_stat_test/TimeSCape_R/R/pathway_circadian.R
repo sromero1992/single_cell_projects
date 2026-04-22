@@ -1625,7 +1625,8 @@ save_batch_pathway_plots <- function(
 
   for (i in seq_along(top_paths)) {
     pw  <- top_paths[i]
-    pw_safe <- gsub("[^[:alnum:]_]", "_", pw)
+    # Trim to 60 chars for filename only — plot title keeps the full name
+    pw_safe <- substr(gsub("[^[:alnum:]_]", "_", pw), 1, 60)
     out_png <- file.path(outdir, sprintf("%s_%02d_%s.png", ct_safe, i, pw_safe))
 
     p <- tryCatch(
