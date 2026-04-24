@@ -406,6 +406,15 @@ for (i in 1:nrow(metadata)) {
       }
     }
 
+    # Free raw count matrices — now absorbed into the Seurat object
+    rm(counts_matrix)
+    if (!is.null(probe_matrix)) {
+      rm(probe_matrix)
+      rm(list = intersect(c("common_cells", "custom_sum_counts", "probes_found",
+                             "summed_vector", "custom_row"), ls()))
+    }
+    gc()
+
     # ---- 4. Optional: SCEVAN copy-number variation detection ---------------
     # SCEVAN is run on raw counts before any correction to ensure the most
     # accurate CNA signal. Running per-sample prevents RAM exhaustion in large
@@ -423,11 +432,13 @@ for (i in 1:nrow(metadata)) {
         )
         if (!is.null(scevan_res_df)) {
           seurat_obj <- AddMetaData(seurat_obj, metadata = scevan_res_df)
+          rm(scevan_res_df)
           message("    -> SCEVAN metadata added to Seurat object.")
         }
       }, error = function(e) {
         message(paste("    -> [WARNING] SCEVAN failed for", sample_id, "| Error:", e$message))
       })
+      gc()  # SCEVAN allocates heavily internally; reclaim memory immediately
     }
 
     # ---- Save Checkpoint 1 (SCEVAN result) ---------------------------------
@@ -435,6 +446,7 @@ for (i in 1:nrow(metadata)) {
     # later, the next run can resume from here and skip the expensive SCEVAN step.
     message("    -> Saving SCEVAN checkpoint (checkpoint 1)...")
     saveRDS(seurat_obj, file = checkpoint_file_1)
+    gc()
     message("    -> Checkpoint 1 saved.")
 
   } # end if (!scevan_checkpoint_loaded)
@@ -464,6 +476,7 @@ for (i in 1:nrow(metadata)) {
       seurat_obj[["percent.mt"]] <- PercentageFeatureSet(seurat_obj, pattern = "^MT-|^mt-")
 
       rm(decontx_results, counts_sparse)
+      gc()
       message(paste("    -> DecontX complete for", sample_id, "."))
     }, error = function(e) {
       message(paste("    -> [WARNING] DecontX failed for", sample_id, "| Error:", e$message,
@@ -586,8 +599,11 @@ for (i in 1:nrow(metadata)) {
   message(paste0("      -> Cells: ", cells_before_dblt, " -> ", ncol(seurat_obj),
                  " (removed ", cells_before_dblt - ncol(seurat_obj), " doublets)"))
 
-  # Clean up temporary objects
+  # Clean up DoubletFinder temporary objects
   rm(seu_tmp, sweep.res.list, sweep.stats, bcmvn)
+  rm(list = intersect(c("doublet_labels", "in_range", "nExp_val",
+                         "n_doublets", "doublet_fraction", "initial_pk",
+                         "final_pk", "res_col", "cells_before_dblt"), ls()))
   gc()
 
   # ---- 7. Pre-merge QC: loose per-sample filters ---------------------------
@@ -608,10 +624,6 @@ for (i in 1:nrow(metadata)) {
   message("    -> Saving full checkpoint (decontX + doublets + QC) and releasing memory...")
   saveRDS(seurat_obj, file = checkpoint_file_2)
   rm(seurat_obj)
-  if (!scevan_checkpoint_loaded) {
-    rm(counts_matrix)
-    if (exists("probe_matrix") && !is.null(probe_matrix)) { rm(probe_matrix) }
-  }
   gc()
   message(paste("  [DONE]", sample_id, "- checkpoint 2 saved, memory freed."))
 }
