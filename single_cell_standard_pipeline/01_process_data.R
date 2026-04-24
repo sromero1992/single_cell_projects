@@ -1,36 +1,53 @@
 # =============================================================================
 # scRNA-seq PIPELINE - SCRIPT 1: DATA PROCESSING ENGINE
-# Version: 8.0 (Generalized Pipeline)
+# Version: 9.0 (Generalized Pipeline)
 #
 # PURPOSE:
 #   This script is the computational backbone of the single-cell RNA-seq
 #   pipeline. It sequentially performs:
 #     1. Per-sample data loading from 10x Genomics H5 files
 #     2. Optional probe/custom feature integration (e.g., KO-target probes)
-#     3. Copy-number variation detection via SCEVAN
-#     4. Pre-merge QC (loose filters) + post-merge QC (stringent filters)
-#     5. Doublet detection via DoubletFinder with a ROLLBACK SAFEGUARD:
-#        if the detected doublet fraction exceeds DOUBLET_ROLLBACK_THRESHOLD,
-#        doublet removal is skipped for that sample to avoid over-filtering.
-#     6. Ambient RNA correction via DecontX (optional)
-#     7. Data normalization, dimensionality reduction, and batch-correction
+#     3. Copy-number variation detection via SCEVAN (optional, per-sample)
+#     4. Pre-merge QC (loose filters, per-sample)
+#     5. Ambient RNA correction via DecontX (optional, per-sample),
+#        with optional rounding of corrected counts to integers.
+#     6. Doublet detection + removal via DoubletFinder (per-sample),
+#        with a ROLLBACK SAFEGUARD: if the detected doublet fraction exceeds
+#        DOUBLET_ROLLBACK_THRESHOLD, removal is skipped for that sample.
+#     7. Post-merge QC (stringent filters applied after merging all samples)
+#     8. Data normalization, dimensionality reduction, and batch-correction
 #        via Harmony, producing parallel (PCA vs. Harmony) clusterings.
-#     8. Saving a fully processed, un-annotated Seurat object for Script 02.
+#     9. Saving a fully processed, un-annotated Seurat object for Script 02.
 #
-# CHECKPOINT SYSTEM:
-#   Each sample is processed individually and saved to a checkpoint .rds file
-#   inside SCEVAN_DIR/<SampleID>/. If a checkpoint exists on re-run, the
-#   sample is loaded directly, saving hours of computation.
+# PER-SAMPLE PROCESSING ORDER (STEP 2.1a):
+#   Load → [SCEVAN] → [DecontX] → DoubletFinder → Remove Doublets → Pre-QC
+#   → Checkpoint
+#   This order ensures that:
+#     - SCEVAN sees unmodified raw counts (best for CNA detection)
+#     - DoubletFinder operates on ambient-corrected counts
+#     - Pre-merge QC metrics reflect the corrected, singlet-only matrix
+#     - Each checkpoint contains clean, singlet-only cells
+#
+# CHECKPOINT SYSTEM (dual-checkpoint per sample):
+#   Each sample produces two checkpoint .rds files inside SCEVAN_DIR/<SampleID>/:
+#     _scevan_processed.rds       — saved right after SCEVAN (Checkpoint 1)
+#     _decontx_dblt_processed.rds — saved after DecontX + DoubletFinder + Pre-QC
+#                                   (Checkpoint 2 — the file used for merging)
+#   On re-run, Checkpoint 2 is tried first (sample fully done → skip). If only
+#   Checkpoint 1 exists, SCEVAN is skipped and the pipeline resumes from
+#   DecontX. If neither exists, the full pipeline runs from scratch.
 #
 # MEMORY MANAGEMENT:
 #   After processing each sample, large objects are explicitly removed and
 #   garbage collection is forced (gc()) before the next iteration.
+#   BPCells on-disk matrices are used to handle large datasets.
 #
 # OUTPUT:
 #   - <PROJECT_NAME>_processed_for_annotation.rds  (main output for Script 02)
 #   - Diagnostic QC violin plots (before/after filtering)
-#   - Doublet pK-selection plots per sample
-#   - Doublet UMAP visualization (before removal)
+#   - Doublet pK-selection plots per sample (in SCEVAN_DIR/<SampleID>/)
+#   - Doublet UMAP visualization per sample (in SCEVAN_DIR/<SampleID>/)
+#   - Doublet rollback summary Excel file
 #   - Harmony vs. No-Harmony UMAP comparison plots
 #
 # NEXT STEP:
@@ -39,17 +56,19 @@
 
 # --- Load Required Libraries -------------------------------------------------
 # These must be installed via 00_rlibs_installation.R before running this script.
-library(Seurat)       # Core single-cell analysis framework
+library(Seurat)         # Core single-cell analysis framework
 library(SeuratWrappers) # Batch correction via Harmony integration
-library(openxlsx)     # Reading .xlsx metadata files
-library(dplyr)        # Data manipulation
-library(ggplot2)      # Publication-quality plotting
-library(patchwork)    # Combining multiple ggplot objects
-library(celda)        # DecontX for ambient RNA correction
-library(DoubletFinder)# Doublet detection
-library(writexl)      # Writing .xlsx outputs
-library(Matrix)       # Sparse matrix support
-library(SCEVAN)       # Copy-number variation analysis
+library(openxlsx)       # Reading .xlsx metadata files
+library(dplyr)          # Data manipulation
+library(ggplot2)        # Publication-quality plotting
+library(patchwork)      # Combining multiple ggplot objects
+library(celda)          # DecontX for ambient RNA correction
+library(DoubletFinder)  # Doublet detection
+library(writexl)        # Writing .xlsx outputs
+library(Matrix)         # Sparse matrix support
+library(SCEVAN)         # Copy-number variation analysis
+library(hdf5r)          # HDF5 file support
+library(BPCells)        # On-disk matrix handling for large datasets
 
 set.seed(123) # Set global random seed for full reproducibility
 
@@ -102,7 +121,7 @@ ROOT_PATH <- "/mnt/SCDC/Optimus/selim_working_dir/2026_nr4a1_ack/r_process"  # L
 #   already a column in your Excel file, Script 02 will auto-create it by
 #   concatenating the "Genotype" and "Diet" columns with an underscore.
 #   This works for any two-column combination using the pattern "ColA_ColB".
-#   Example: "Condition_Sex" → auto-created from Condition + Sex columns.
+#   Example: "Condition_Sex" -> auto-created from Condition + Sex columns.
 #
 # EXAMPLE METADATA TABLE:
 #   SampleID     | Condition | Genotype   | Diet      | Sex | Timepoint
@@ -140,29 +159,28 @@ SCEVAN_DIR    <- file.path(OUTPUT_DIR, "scevan_per_sample_results")
 # Applied BEFORE merging samples. These are intentionally lenient to catch only
 # clearly empty droplets and dying cells. Fine-tuning happens POST-merge.
 PRE_MIN_GENES_PER_CELL <- 500   # Minimum genes detected per cell (discard empty droplets)
-PRE_MAX_MT_PERCENT     <- 30.0  # Maximum mitochondrial % (discard dying cells, loose cutoff)
+PRE_MAX_MT_PERCENT     <- 20.0  # Maximum mitochondrial % (discard dying cells, loose cutoff)
 
 # --- 1.3: Post-Merge QC Parameters (Stringent) ---
 # Applied AFTER merging. Examine the QC violin plots (01a/01b) to adjust these.
-# The post-merge step also re-applies filtering after DecontX correction.
 POST_MIN_GENES          <- 500    # Min genes per cell. Raise if low-quality cells persist.
-POST_MAX_GENES          <- 14000  # Max genes per cell. High values may indicate multiplets.
+POST_MAX_GENES          <- 15000  # Max genes per cell. High values may indicate multiplets.
 POST_MIN_UMIS           <- 1500   # Min UMI count. Raise to remove low-depth cells.
 POST_MAX_UMIS           <- 100000 # Max UMI count. Similarly look at QC violins to adjust.
-POST_MAX_MT             <- 20.0   # Max mitochondrial %. Standard range: 15-25%.
+POST_MAX_MT             <- 5.0   # Max mitochondrial %. Standard range: 5-20%.
 POST_MIN_CELLS_PER_GENE <- 15     # Genes expressed in fewer cells than this are removed.
 
 # --- 1.4: DoubletFinder Parameters ---
 # DOUBLET_RATE: Expected fraction of doublets. Use the 10x rule of thumb:
-#   ~0.8% per 1,000 cells loaded (e.g., 10,000 cells loaded → 0.08).
+#   ~0.8% per 1,000 cells loaded (e.g., 10,000 cells loaded -> 0.08).
 DOUBLET_RATE <- 0.08
 
 # pK Selection: DoubletFinder sweeps a range of pK values and picks the one
 # maximizing the BCmetric. The range below constrains the search to biologically
 # sensible values. The fallback is used if no valid pK is found in range.
 DF_PK_RANGE_MIN <- 0.005  # Minimum valid pK value
-DF_PK_RANGE_MAX <- 0.18  # Maximum valid pK value
-DF_PK_FALLBACK  <- 0.09  # Fallback pK if no valid value found in range
+DF_PK_RANGE_MAX <- 0.25   # Maximum valid pK value
+DF_PK_FALLBACK  <- 0.09   # Fallback pK if no valid value found in range
 
 # DOUBLET_ROLLBACK_THRESHOLD: Safety mechanism.
 #   If DoubletFinder classifies MORE than this fraction of cells as doublets
@@ -171,27 +189,40 @@ DF_PK_FALLBACK  <- 0.09  # Fallback pK if no valid value found in range
 #   for that sample (all cells kept), and a warning is issued.
 #   Rationale: a >14% doublet rate is biologically implausible for standard
 #   10x Genomics runs and most likely reflects a classification artifact.
-DOUBLET_ROLLBACK_THRESHOLD <- 0.14  # 14% maximum acceptable doublet fraction
+DOUBLET_ROLLBACK_THRESHOLD <- DF_PK_RANGE_MAX  # 14% maximum acceptable doublet fraction
 
 # --- 1.5: Core Dimensionality Reduction & Clustering Parameters ---
-N_VARIABLE_FEATURES <- 5000  # Number of highly variable genes for PCA.
+N_VARIABLE_FEATURES <- 2000  # Number of highly variable genes for PCA.
                               # Range: 2000-5000. Fewer HVGs can improve UMAP
                               # separation in heterogeneous datasets.
-N_PCS_TO_USE        <- 50    # Number of PCs used for graph construction and UMAP (default and recommended).
+N_PCS_TO_USE        <- 50    # Number of PCs used for graph construction and UMAP.
                               # Increase for very complex datasets.
 CLUSTER_RESOLUTION  <- 1.0   # Leiden/Louvain resolution. Higher = more clusters.
                               # Start at 1.0; tune after viewing the UMAP in Script 02.
-UMAP_N_NEIGHBORS    <- 15    # UMAP: local neighborhood size (match cluster neighbors). Higher = more global structure.
+UMAP_N_NEIGHBORS    <- 30    # UMAP: local neighborhood size. Higher = more global structure.
 UMAP_MIN_DIST       <- 0.3   # UMAP: minimum distance between embedded points.
                               # Lower = tighter clusters; higher = more spread.
 
 # --- 1.6: Workflow Toggles ---
-RUN_DECONTX <- TRUE   # Run DecontX ambient RNA correction (recommended for all runs).
-RUN_SCEVAN  <- TRUE   # Run SCEVAN copy-number variation analysis.
-                      # Enable if ANY sample in the cohort is cancer/tumor — run on ALL
-                      # samples including normals, as normals serve as the CNA reference
-                      # baseline. Set FALSE only if the entire study uses normal tissue.
-DPI_SETTING <- 300    # DPI for all saved diagnostic plots.
+RUN_DECONTX            <- TRUE  # Run DecontX ambient RNA correction (recommended for all runs).
+
+ROUND_DECONTX_COUNTS   <- FALSE # Round decontX corrected counts to nearest integer.
+                                 # DecontX produces non-integer (fractional) values by default.
+                                 # Set TRUE if downstream tools require integer count matrices.
+                                 # See decontX vignette for details.
+
+USE_BPCELLS            <- TRUE  # Use BPCells on-disk matrix handling (write_matrix_dir) during
+                                 # the post-merge QC (Step 2.3) and integration (Step 2.4) steps.
+                                 # Recommended for large cohorts (>8 samples) to prevent RAM
+                                 # exhaustion. Set FALSE for small datasets or if the BPCells
+                                 # package is not available; standard in-memory JoinLayers() is
+                                 # used as fallback. Requires hdf5r and BPCells to be installed.
+
+RUN_SCEVAN             <- TRUE  # Run SCEVAN copy-number variation analysis.
+                                 # Enable if ANY sample in the cohort is cancer/tumor — run on ALL
+                                 # samples including normals, as normals serve as the CNA reference
+                                 # baseline. Set FALSE only if the entire study uses normal tissue.
+DPI_SETTING            <- 300   # DPI for all saved diagnostic plots.
 
 # --- 1.7: Probe / KO Gene Integration Parameters ---
 # Enable this if your 10x run included a probe-based capture assay (e.g., for
@@ -229,141 +260,378 @@ if (!dir.exists(SCEVAN_DIR)) { dir.create(SCEVAN_DIR, recursive = TRUE) }
 # --- STEP 2.1a: Per-Sample Processing & Checkpoint Generation ---------------
 # =============================================================================
 # PURPOSE:
-#   Process each sample independently and save a checkpoint .rds file.
-#   SCEVAN (if enabled) runs here — one sample at a time, with full memory
-#   cleanup after each. No Seurat objects accumulate in a list during this
-#   phase to prevent out-of-memory crashes when running > 10 samples.
+#   Process each sample independently and save checkpoint .rds files.
+#   Each sample goes through the full per-sample pipeline in this order:
+#     1. Load H5 data and optionally integrate probe data
+#     2. Create Seurat object and attach metadata
+#     3. SCEVAN (if enabled) — run on raw counts before any correction
+#     4. DecontX (if enabled) — ambient RNA correction, with optional rounding
+#     5. DoubletFinder — per-sample doublet detection and removal
+#     6. Pre-merge QC (loose filters) — applied on corrected, singlet-only counts
+#     7. Save checkpoint and free memory
 #
-#   If a checkpoint already exists for a sample (e.g., re-run after partial
-#   completion), that sample is skipped entirely — saving hours of compute.
+# DUAL-CHECKPOINT SYSTEM (three-tier resume logic):
+#   Each sample produces TWO checkpoint files inside SCEVAN_DIR/<SampleID>/:
+#
+#     Checkpoint 1 (_scevan_processed.rds):
+#       Saved after SCEVAN runs. Contains raw Seurat object + SCEVAN metadata.
+#       Used as a mid-pipeline recovery point so that expensive SCEVAN
+#       computation is never repeated.
+#
+#     Checkpoint 2 (_decontx_dblt_processed.rds):
+#       Saved after DecontX + DoubletFinder + Pre-QC. This is the FINAL
+#       per-sample checkpoint and the file loaded for the merge step (2.1b).
+#       It contains clean, singlet-only, ambient-corrected cells.
+#
+#   At the start of each iteration the loop checks:
+#     (a) If Checkpoint 2 exists  → sample fully processed, SKIP entirely.
+#     (b) If only Checkpoint 1 exists → load it, SKIP SCEVAN, run DecontX
+#         + DoubletFinder + Pre-QC, then save Checkpoint 2.
+#     (c) If neither exists → run the entire pipeline from scratch.
+#
+#   This means that if a run crashes mid-way through DecontX or DoubletFinder,
+#   the next run will resume from the SCEVAN result rather than starting over.
 #
 # MEMORY STRATEGY:
 #   Each sample object is removed from RAM and garbage-collected immediately
-#   after its checkpoint is written. Only one sample occupies memory at a time
-#   during this loop, regardless of cohort size.
+#   after its checkpoint is written. Only one sample occupies memory at a time.
 # =============================================================================
-message("=== STEP 2.1a: Per-Sample Processing (SCEVAN + QC + Checkpoint) ===")
+message("=== STEP 2.1a: Per-Sample Processing (SCEVAN → DecontX → DoubletFinder → Pre-QC → Checkpoint) ===")
 metadata <- read.xlsx(METADATA_FILE)
+
+# Initialize rollback log (filled during loop, saved after)
+rollback_log <- list()
 
 for (i in 1:nrow(metadata)) {
   sample_info       <- metadata[i, ]
   sample_id         <- as.character(sample_info$SampleID)
   sample_scevan_dir <- file.path(SCEVAN_DIR, sample_id)
-  checkpoint_file   <- file.path(sample_scevan_dir, paste0(sample_id, "_scevan_processed.rds"))
+  checkpoint_file_1 <- file.path(sample_scevan_dir, paste0(sample_id, "_scevan_processed.rds"))
+  checkpoint_file_2 <- file.path(sample_scevan_dir, paste0(sample_id, "_decontx_dblt_processed.rds"))
 
-  # --- Skip if checkpoint already exists ---
-  if (file.exists(checkpoint_file)) {
-    message(paste("  [CHECKPOINT] Skipping", sample_id, "- checkpoint found."))
+  # --- Three-tier checkpoint logic -------------------------------------------
+  # (a) Full checkpoint exists: sample is completely done, skip.
+  if (file.exists(checkpoint_file_2)) {
+    message(paste("  [CHECKPOINT-2] Skipping", sample_id,
+                  "- full checkpoint (decontX + doublets + QC) found."))
     next
   }
 
-  message(paste("  [PROCESSING] Starting", sample_id, "..."))
+  # (b) SCEVAN-only checkpoint exists: load it, skip SCEVAN, run remaining steps.
+  scevan_checkpoint_loaded <- FALSE
+  if (file.exists(checkpoint_file_1)) {
+    message(paste("  [CHECKPOINT-1] Loading SCEVAN checkpoint for", sample_id,
+                  "- will run DecontX + DoubletFinder + Pre-QC only."))
+    seurat_obj <- readRDS(checkpoint_file_1)
+    scevan_checkpoint_loaded <- TRUE
+  }
+  # (c) No checkpoint: fall through to full processing below.
+
+  message(paste("  [PROCESSING] Starting", sample_id,
+                if (scevan_checkpoint_loaded) "(resuming from SCEVAN checkpoint)" else "(full run)",
+                "..."))
   if (!dir.exists(sample_scevan_dir)) { dir.create(sample_scevan_dir, recursive = TRUE) }
 
-  # -- Read RNA count matrix from 10x H5 file --
-  rna_h5_path <- file.path(H5_DIR, sample_id, "sample_filtered_feature_bc_matrix.h5")
-  if (!file.exists(rna_h5_path)) {
-    warning(paste("  [SKIP] RNA H5 file not found for:", sample_id))
-    next
-  }
-  counts_matrix <- Read10X_h5(rna_h5_path)
+  # ---- Steps 1–4: Load data, build Seurat object, run SCEVAN ---------------
+  # These steps are SKIPPED when resuming from a SCEVAN checkpoint (case b above).
+  # The flag `scevan_checkpoint_loaded` controls this — if TRUE, `seurat_obj`
+  # was already loaded from checkpoint_file_1 above and already contains SCEVAN
+  # metadata. `counts_matrix` and `probe_matrix` are left unset intentionally
+  # (they are guarded by the same flag in the cleanup block at the bottom).
+  if (!scevan_checkpoint_loaded) {
 
-  # -- Optional: Read probe data and create custom summed feature --
-  probe_matrix <- NULL
-  if (ADD_PROBE_DATA) {
-    probe_h5_path <- file.path(H5_DIR, sample_id, "sample_raw_probe_bc_matrix.h5")
-    if (file.exists(probe_h5_path)) {
-      message("    -> Reading probe data and creating custom 'Nr4a1_cust' feature...")
-      probe_matrix <- Read10X_h5(probe_h5_path)
-      # Handle nested list structure from probe H5 files
-      if (is.list(probe_matrix) && "Probe Barcode" %in% names(probe_matrix)) {
-        probe_matrix <- probe_matrix[["Probe Barcode"]]
-      }
-      # Sum counts across selected KO-target probes into one custom feature
-      common_cells      <- intersect(colnames(counts_matrix), colnames(probe_matrix))
-      custom_sum_counts <- numeric(length(common_cells))
-      names(custom_sum_counts) <- common_cells
-      probes_found <- intersect(PROBES_FOR_CUSTOM_SUM, rownames(probe_matrix))
-      if (length(probes_found) > 0) {
-        summed_vector <- Matrix::colSums(probe_matrix[probes_found, common_cells, drop = FALSE])
-        custom_sum_counts[names(summed_vector)] <- summed_vector
-      }
-      # Append custom feature row to the RNA count matrix
-      custom_row <- Matrix::Matrix(0, 1, ncol(counts_matrix), sparse = TRUE)
-      colnames(custom_row) <- colnames(counts_matrix)
-      rownames(custom_row) <- "Nr4a1_cust"
-      custom_row[1, names(custom_sum_counts)] <- custom_sum_counts
-      counts_matrix <- rbind(counts_matrix, custom_row)
-    } else {
-      warning(paste("    -> [SKIP] Probe H5 not found for", sample_id))
+    # ---- 1. Read RNA count matrix from 10x H5 file -------------------------
+    rna_h5_path <- file.path(H5_DIR, sample_id, "sample_filtered_feature_bc_matrix.h5")
+    if (!file.exists(rna_h5_path)) {
+      warning(paste("  [SKIP] RNA H5 file not found for:", sample_id))
+      next
     }
-  }
+    counts_matrix <- Read10X_h5(rna_h5_path)
 
-  # -- Create Seurat object --
-  seurat_obj <- CreateSeuratObject(counts = counts_matrix, project = sample_id, min.cells = 5)
-
-  # -- Attach all metadata columns from the Excel file --
-  for (col_name in colnames(sample_info)) {
-    seurat_obj[[col_name]] <- sample_info[[col_name]]
-  }
-  # Auto-create combined group label (Condition_Sex) if both columns are present
-  if ("Condition" %in% colnames(seurat_obj@meta.data) &&
-      "Sex" %in% colnames(seurat_obj@meta.data)) {
-    seurat_obj$group <- paste(seurat_obj$Condition, seurat_obj$Sex, sep = "_")
-  }
-
-  # -- Add individual probe counts as metadata columns --
-  if (!is.null(probe_matrix)) {
-    for (probe_id in names(PROBE_MAPPING)) {
-      if (probe_id %in% rownames(probe_matrix)) {
-        col_name_clean <- gsub("[\\s\\(\\)\n]+", "_", PROBE_MAPPING[[probe_id]])
-        col_name_clean <- gsub("_$", "", col_name_clean)
-        col_name_final <- paste0("Nr4a1_", col_name_clean, "_probe_count")
-        seurat_obj <- AddMetaData(seurat_obj,
-                                  metadata = probe_matrix[probe_id, ],
-                                  col.name = col_name_final)
+    # ---- 2. Optional: Read probe data and create custom summed feature ------
+    probe_matrix <- NULL
+    if (ADD_PROBE_DATA) {
+      probe_h5_path <- file.path(H5_DIR, sample_id, "sample_raw_probe_bc_matrix.h5")
+      if (file.exists(probe_h5_path)) {
+        message("    -> Reading probe data and creating custom 'Nr4a1_cust' feature...")
+        probe_matrix <- Read10X_h5(probe_h5_path)
+        # Handle nested list structure from probe H5 files
+        if (is.list(probe_matrix) && "Probe Barcode" %in% names(probe_matrix)) {
+          probe_matrix <- probe_matrix[["Probe Barcode"]]
+        }
+        # Sum counts across selected KO-target probes into one custom feature
+        common_cells      <- intersect(colnames(counts_matrix), colnames(probe_matrix))
+        custom_sum_counts <- numeric(length(common_cells))
+        names(custom_sum_counts) <- common_cells
+        probes_found <- intersect(PROBES_FOR_CUSTOM_SUM, rownames(probe_matrix))
+        if (length(probes_found) > 0) {
+          summed_vector <- Matrix::colSums(probe_matrix[probes_found, common_cells, drop = FALSE])
+          custom_sum_counts[names(summed_vector)] <- summed_vector
+        }
+        # Append custom feature row to the RNA count matrix
+        custom_row <- Matrix::Matrix(0, 1, ncol(counts_matrix), sparse = TRUE)
+        colnames(custom_row) <- colnames(counts_matrix)
+        rownames(custom_row) <- "Nr4a1_cust"
+        custom_row[1, names(custom_sum_counts)] <- custom_sum_counts
+        counts_matrix <- rbind(counts_matrix, custom_row)
+      } else {
+        warning(paste("    -> [SKIP] Probe H5 not found for", sample_id))
       }
     }
-  }
 
-  # -- Optional: Run SCEVAN for copy-number variation detection --
-  # NOTE: SCEVAN is intentionally run inside this first loop (not the loading
-  # loop below) because it is the most memory-intensive step. Running SCEVAN
-  # one sample at a time with immediate cleanup prevents RAM exhaustion in
-  # large cohorts (> 10 samples).
-  if (RUN_SCEVAN) {
+    # ---- 3. Create Seurat object and attach metadata -----------------------
+    seurat_obj <- CreateSeuratObject(counts = counts_matrix, project = sample_id, min.cells = 5)
+
+    # Attach all metadata columns from the Excel file
+    for (col_name in colnames(sample_info)) {
+      seurat_obj[[col_name]] <- sample_info[[col_name]]
+    }
+    # Auto-create combined group label (Condition_Sex) if both columns are present
+    if ("Condition" %in% colnames(seurat_obj@meta.data) &&
+        "Sex" %in% colnames(seurat_obj@meta.data)) {
+      seurat_obj$group <- paste(seurat_obj$Condition, seurat_obj$Sex, sep = "_")
+    }
+
+    # Add individual probe counts as metadata columns
+    if (!is.null(probe_matrix)) {
+      for (probe_id in names(PROBE_MAPPING)) {
+        if (probe_id %in% rownames(probe_matrix)) {
+          col_name_clean <- gsub("[\\s\\(\\)\n]+", "_", PROBE_MAPPING[[probe_id]])
+          col_name_clean <- gsub("_$", "", col_name_clean)
+          col_name_final <- paste0("Nr4a1_", col_name_clean, "_probe_count")
+          seurat_obj <- AddMetaData(seurat_obj,
+                                    metadata = probe_matrix[probe_id, ],
+                                    col.name = col_name_final)
+        }
+      }
+    }
+
+    # ---- 4. Optional: SCEVAN copy-number variation detection ---------------
+    # SCEVAN is run on raw counts before any correction to ensure the most
+    # accurate CNA signal. Running per-sample prevents RAM exhaustion in large
+    # cohorts.
+    if (RUN_SCEVAN) {
+      tryCatch({
+        message("    -> Running SCEVAN for CNA detection...")
+        scevan_res_df <- pipelineCNA(
+          as.matrix(GetAssayData(seurat_obj, layer = "counts")),
+          par_cores  = SCEVAN_N_CORES,
+          SUBCLONES  = SCEVAN_SUBCLONES,
+          plotTree   = SCEVAN_PLOTTREE,
+          organism   = SCEVAN_ORGANISM,
+          output_dir = sample_scevan_dir
+        )
+        if (!is.null(scevan_res_df)) {
+          seurat_obj <- AddMetaData(seurat_obj, metadata = scevan_res_df)
+          message("    -> SCEVAN metadata added to Seurat object.")
+        }
+      }, error = function(e) {
+        message(paste("    -> [WARNING] SCEVAN failed for", sample_id, "| Error:", e$message))
+      })
+    }
+
+    # ---- Save Checkpoint 1 (SCEVAN result) ---------------------------------
+    # Saved immediately after SCEVAN so that if DecontX or DoubletFinder crash
+    # later, the next run can resume from here and skip the expensive SCEVAN step.
+    message("    -> Saving SCEVAN checkpoint (checkpoint 1)...")
+    saveRDS(seurat_obj, file = checkpoint_file_1)
+    message("    -> Checkpoint 1 saved.")
+
+  } # end if (!scevan_checkpoint_loaded)
+
+  # ---- 5. Optional: DecontX ambient RNA correction -------------------------
+  # DecontX is run per-sample BEFORE doublet detection so that DoubletFinder
+  # operates on counts free of ambient RNA contamination.
+  if (RUN_DECONTX) {
     tryCatch({
-      message("    -> Running SCEVAN for CNA detection...")
-      scevan_res_df <- pipelineCNA(
-        as.matrix(GetAssayData(seurat_obj, layer = "counts")),
-        par_cores  = SCEVAN_N_CORES,
-        SUBCLONES  = SCEVAN_SUBCLONES,
-        plotTree   = SCEVAN_PLOTTREE,
-        organism   = SCEVAN_ORGANISM,
-        output_dir = sample_scevan_dir
-      )
-      if (!is.null(scevan_res_df)) {
-        seurat_obj <- AddMetaData(seurat_obj, metadata = scevan_res_df)
-        message("    -> SCEVAN metadata added to Seurat object.")
+      message(paste("    -> Running DecontX for ambient RNA correction on", sample_id, "..."))
+      counts_sparse   <- GetAssayData(object = seurat_obj, layer = "counts")
+      decontx_results <- decontX(x = counts_sparse)
+
+      # Replace raw counts with decontaminated counts.
+      # Optionally round to integer (ROUND_DECONTX_COUNTS = TRUE) — useful for
+      # tools that require integer count matrices. See decontX vignette for details.
+      if (ROUND_DECONTX_COUNTS) {
+        seurat_obj[["RNA"]]$counts <- round(decontx_results$decontXcounts)
+        message("    -> DecontX counts rounded to nearest integer.")
+      } else {
+        seurat_obj[["RNA"]]$counts <- decontx_results$decontXcounts
       }
+
+      # Recompute QC metrics on the decontaminated matrix
+      seurat_obj$nCount_RNA   <- colSums(seurat_obj[["RNA"]]$counts)
+      seurat_obj$nFeature_RNA <- colSums(seurat_obj[["RNA"]]$counts > 0)
+      seurat_obj[["percent.mt"]] <- PercentageFeatureSet(seurat_obj, pattern = "^MT-|^mt-")
+
+      rm(decontx_results, counts_sparse)
+      message(paste("    -> DecontX complete for", sample_id, "."))
     }, error = function(e) {
-      message(paste("    -> [WARNING] SCEVAN failed for", sample_id, "| Error:", e$message))
+      message(paste("    -> [WARNING] DecontX failed for", sample_id, "| Error:", e$message,
+                    "| Proceeding with uncorrected counts."))
     })
   }
 
-  # -- Pre-merge QC: compute mitochondrial percentage and apply loose filters --
+  # ---- 6. DoubletFinder: per-sample doublet detection and removal -----------
+  # DoubletFinder requires a temporary normalized + PCA-reduced object.
+  # We use a copy (seu_tmp) so the checkpoint contains only clean raw counts
+  # without transient normalized/scaled layers or reductions.
+  message(paste("    -> Running DoubletFinder for", sample_id, "..."))
+  seu_tmp <- seurat_obj
+
+  # Preliminary processing required by DoubletFinder
+  seu_tmp <- NormalizeData(seu_tmp, verbose = FALSE) %>%
+    FindVariableFeatures(verbose = FALSE) %>%
+    ScaleData(verbose = FALSE) %>%
+    RunPCA(npcs = N_PCS_TO_USE, verbose = FALSE)
+
+  # pK selection: find the pK that maximizes the BCmetric
+  sweep.res.list <- paramSweep(seu_tmp, PCs = 1:N_PCS_TO_USE, sct = FALSE)
+  sweep.stats    <- summarizeSweep(sweep.res.list, GT = FALSE)
+  bcmvn          <- find.pK(sweep.stats)
+  bcmvn$pK       <- as.numeric(as.character(bcmvn$pK))
+
+  # Identify the global BCmetric maximum
+  initial_pk <- bcmvn$pK[which.max(bcmvn$BCmetric)]
+
+  # Constrained pK selection: keep within biologically sensible range
+  if (initial_pk < DF_PK_RANGE_MIN || initial_pk > DF_PK_RANGE_MAX) {
+    in_range <- bcmvn[bcmvn$pK >= DF_PK_RANGE_MIN & bcmvn$pK <= DF_PK_RANGE_MAX, ]
+    if (nrow(in_range) > 0) {
+      final_pk <- in_range$pK[which.max(in_range$BCmetric)]
+      message(paste("      -> Global peak (", initial_pk,
+                    ") out of bounds. Using best in-range peak:", final_pk))
+    } else {
+      final_pk <- DF_PK_FALLBACK
+      message(paste("      -> No peaks in range. Using fallback:", final_pk))
+    }
+  } else {
+    final_pk <- initial_pk
+  }
+
+  # Save pK selection diagnostic plot to sample directory
+  pk_plot <- ggplot(bcmvn, aes(x = pK, y = BCmetric, group = 1)) +
+    geom_line() + geom_point() +
+    geom_vline(xintercept = final_pk, linetype = "dashed", color = "red") +
+    ggtitle(paste0("pK Finder: ", sample_id),
+            subtitle = paste0("Selected pK = ", final_pk,
+                              " | Initial optimal = ", initial_pk)) +
+    theme_minimal()
+  ggsave(file.path(sample_scevan_dir, paste0(sample_id, "_pk_plot.png")),
+         plot = pk_plot, width = 7, height = 5, dpi = DPI_SETTING)
+  rm(pk_plot)
+
+  # Run DoubletFinder
+  nExp_val <- round(ncol(seu_tmp) * DOUBLET_RATE)
+  seu_tmp  <- doubletFinder(seu_tmp, PCs = 1:N_PCS_TO_USE,
+                             pK = final_pk, nExp = nExp_val, sct = FALSE)
+  res_col  <- tail(grep("^DF.classifications", colnames(seu_tmp@meta.data), value = TRUE), 1)
+
+  # Rollback check: guard against biologically implausible doublet fractions
+  n_doublets       <- sum(seu_tmp@meta.data[[res_col]] == "Doublet")
+  doublet_fraction <- n_doublets / ncol(seu_tmp)
+
+  if (doublet_fraction > DOUBLET_ROLLBACK_THRESHOLD) {
+    warning(paste0(
+      "  [ROLLBACK] Sample '", sample_id, "': detected doublet fraction = ",
+      round(doublet_fraction * 100, 1), "% exceeds threshold of ",
+      round(DOUBLET_ROLLBACK_THRESHOLD * 100, 1), "%. ",
+      "Doublet removal SKIPPED for this sample (all cells treated as Singlets)."
+    ))
+    seurat_obj$Doublet_Status <- "Singlet"
+    rollback_log[[sample_id]] <- list(
+      fraction   = doublet_fraction,
+      n_doublets = n_doublets,
+      n_cells    = ncol(seu_tmp),
+      final_pk   = final_pk,
+      action     = "ROLLBACK_APPLIED"
+    )
+  } else {
+    # Transfer doublet labels from the temp object to the main object
+    doublet_labels <- seu_tmp@meta.data[[res_col]]
+    names(doublet_labels) <- colnames(seu_tmp)
+    seurat_obj$Doublet_Status <- doublet_labels[colnames(seurat_obj)]
+    rollback_log[[sample_id]] <- list(
+      fraction   = doublet_fraction,
+      n_doublets = n_doublets,
+      n_cells    = ncol(seu_tmp),
+      final_pk   = final_pk,
+      action     = "DOUBLETS_REMOVED"
+    )
+  }
+
+  message(paste0("      -> Doublet fraction: ",
+                 round(doublet_fraction * 100, 1), "% | pK used: ", final_pk,
+                 " | Action: ", rollback_log[[sample_id]]$action))
+
+  # Diagnostic UMAP: visualize doublets BEFORE removal (reuses PCA from DoubletFinder)
+  tryCatch({
+    seu_tmp <- RunUMAP(seu_tmp, dims = 1:N_PCS_TO_USE, verbose = FALSE,
+                       reduction.name = "umap_doublets")
+    p_dblt <- DimPlot(seu_tmp, reduction = "umap_doublets",
+                      group.by = res_col) +
+      coord_fixed() +
+      ggtitle(paste0("Doublets: ", sample_id),
+              subtitle = paste0(round(doublet_fraction * 100, 1), "% doublets | Action: ",
+                                rollback_log[[sample_id]]$action))
+    ggsave(file.path(sample_scevan_dir, paste0(sample_id, "_doublet_visualization.png")),
+           plot = p_dblt, width = 7, height = 6, dpi = DPI_SETTING, bg = "white")
+    rm(p_dblt)
+  }, error = function(e) {
+    message(paste("      -> [WARNING] Doublet UMAP failed for", sample_id, ":", e$message))
+  })
+
+  # Remove doublets from the main Seurat object
+  cells_before_dblt <- ncol(seurat_obj)
+  seurat_obj <- subset(seurat_obj, subset = Doublet_Status == "Singlet")
+  message(paste0("      -> Cells: ", cells_before_dblt, " -> ", ncol(seurat_obj),
+                 " (removed ", cells_before_dblt - ncol(seurat_obj), " doublets)"))
+
+  # Clean up temporary objects
+  rm(seu_tmp, sweep.res.list, sweep.stats, bcmvn)
+  gc()
+
+  # ---- 7. Pre-merge QC: loose per-sample filters ---------------------------
+  # Applied after DecontX and doublet removal so QC metrics reflect the
+  # corrected, singlet-only count matrix. Removes empty droplets and
+  # clearly dying cells before merging.
   seurat_obj[["percent.mt"]] <- PercentageFeatureSet(seurat_obj, pattern = "^MT-|^mt-")
   seurat_obj <- subset(seurat_obj,
                        subset = nFeature_RNA >= PRE_MIN_GENES_PER_CELL &
                                 percent.mt   <= PRE_MAX_MT_PERCENT)
+  message(paste0("      -> Pre-merge QC: ", ncol(seurat_obj), " cells retained."))
 
-  # -- Save checkpoint and immediately free all memory for this sample --
-  message("    -> Saving checkpoint and releasing memory...")
-  saveRDS(seurat_obj, file = checkpoint_file)
-  rm(counts_matrix, seurat_obj)
-  if (!is.null(probe_matrix)) { rm(probe_matrix) }
+  # ---- 8. Save Checkpoint 2 (decontX + doublets + QC) and free memory ------
+  # This is the FINAL per-sample checkpoint. It contains clean, singlet-only,
+  # ambient-corrected cells and is the file that Step 2.1b will load for merging.
+  # Saving here means a crash AFTER this point (e.g., during merge) will not
+  # require re-running DecontX or DoubletFinder on the next attempt.
+  message("    -> Saving full checkpoint (decontX + doublets + QC) and releasing memory...")
+  saveRDS(seurat_obj, file = checkpoint_file_2)
+  rm(seurat_obj)
+  if (!scevan_checkpoint_loaded) {
+    rm(counts_matrix)
+    if (exists("probe_matrix") && !is.null(probe_matrix)) { rm(probe_matrix) }
+  }
   gc()
-  message(paste("  [DONE]", sample_id, "- checkpoint saved, memory freed."))
+  message(paste("  [DONE]", sample_id, "- checkpoint 2 saved, memory freed."))
+}
+
+# --- Save DoubletFinder rollback summary (covers all processed samples) ------
+if (length(rollback_log) > 0) {
+  rollback_df <- do.call(rbind, lapply(names(rollback_log), function(s) {
+    data.frame(
+      SampleID           = s,
+      N_Cells            = rollback_log[[s]]$n_cells,
+      N_Doublets_Flagged = rollback_log[[s]]$n_doublets,
+      Doublet_Fraction   = round(rollback_log[[s]]$fraction * 100, 2),
+      Threshold_Pct      = DOUBLET_ROLLBACK_THRESHOLD * 100,
+      pK_Used            = rollback_log[[s]]$final_pk,
+      Action             = rollback_log[[s]]$action,
+      stringsAsFactors   = FALSE
+    )
+  }))
+  write_xlsx(rollback_df, file.path(OUTPUT_DIR, "doublet_finder_rollback_log.xlsx"))
+  message("  Doublet summary saved to: doublet_finder_rollback_log.xlsx")
 }
 
 # =============================================================================
@@ -371,10 +639,10 @@ for (i in 1:nrow(metadata)) {
 # =============================================================================
 # PURPOSE:
 #   Now that all samples have been processed and checkpointed individually
-#   (with SCEVAN metadata already embedded), load them sequentially into a
-#   named list for the merge step below.
+#   (SCEVAN metadata, DecontX correction, and doublet removal already applied),
+#   load them sequentially into a named list for the merge step below.
 #
-#   This is a separate loop so that the heavy SCEVAN computation (Step 2.1a)
+#   This is a separate loop so that the heavy per-sample computation (Step 2.1a)
 #   never co-exists in memory with a growing list of Seurat objects.
 # =============================================================================
 message("=== STEP 2.1b: Loading Checkpoints for Merging ===")
@@ -383,15 +651,27 @@ seurat_objects_list <- list()
 for (i in 1:nrow(metadata)) {
   sample_id         <- as.character(metadata$SampleID[i])
   sample_scevan_dir <- file.path(SCEVAN_DIR, sample_id)
-  checkpoint_file   <- file.path(sample_scevan_dir, paste0(sample_id, "_scevan_processed.rds"))
+  checkpoint_file_2 <- file.path(sample_scevan_dir, paste0(sample_id, "_decontx_dblt_processed.rds"))
+  checkpoint_file_1 <- file.path(sample_scevan_dir, paste0(sample_id, "_scevan_processed.rds"))
 
-  if (!file.exists(checkpoint_file)) {
+  if (file.exists(checkpoint_file_2)) {
+    # Normal case: full checkpoint (decontX + doublets + QC) is present.
+    message(paste("  [LOAD]", sample_id, "(checkpoint 2 — decontX + doublets + QC)"))
+    seurat_objects_list[[sample_id]] <- readRDS(checkpoint_file_2)
+  } else if (file.exists(checkpoint_file_1)) {
+    # Fallback: only the SCEVAN checkpoint exists (e.g., pipeline from a
+    # previous version, or Step 2.1a crashed before saving checkpoint 2).
+    # NOTE: this object has NOT had DecontX or DoubletFinder applied — re-run
+    # Step 2.1a first to produce the complete checkpoint 2 before merging.
+    warning(paste0(
+      "  [FALLBACK] Sample '", sample_id, "': only SCEVAN checkpoint found. ",
+      "DecontX and DoubletFinder may NOT have been applied. ",
+      "Re-run Step 2.1a to generate the full checkpoint before proceeding."
+    ))
+    seurat_objects_list[[sample_id]] <- readRDS(checkpoint_file_1)
+  } else {
     warning(paste("  [MISSING] No checkpoint found for", sample_id, "- skipping from merge."))
-    next
   }
-
-  message(paste("  [LOAD]", sample_id))
-  seurat_objects_list[[sample_id]] <- readRDS(checkpoint_file)
 }
 
 # =============================================================================
@@ -405,480 +685,251 @@ data <- merge(
   add.cell.ids = names(seurat_objects_list)
 )
 rm(seurat_objects_list); gc()
-data <- JoinLayers(data)   # Required for Seurat v5: joins split count layers into one
-gc()
 
 output_rds <- file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_merged_post_metadata_gen.rds"))
-saveRDS(data, output_rds, compress = T)
+saveRDS(data, output_rds, compress = TRUE)
 
 # =============================================================================
-# --- STEP 2.3: Post-Merge QC & Diagnostic Plots ----------------------------
+# --- STEP 2.3: Post-Merge QC & Diagnostic Plots -----------------------------
 # =============================================================================
-output_rds <- file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_merged_post_metadata_gen.rds"))
-data<- readRDS(output_rds)
+# Stringent QC filters applied after merging. The BPCells on-disk layer
+# approach is used here to prevent out-of-memory errors on large datasets.
+# =============================================================================
+output_rds_layered <- file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_merged_post_metadata_gen.rds"))
+data <- readRDS(output_rds_layered)
 
 message("\n=== STEP 2.3: Post-Merge QC and Diagnostic Plotting ===")
-# Save violin plots BEFORE filtering so the full distribution is visible
-data[["percent.mt"]] <- PercentageFeatureSet(data, pattern = "^MT-|^mt-")
-data$all_cells <- "Project_Nr4a1"
 
-# --- Fail-Safe Plotting Block ---
+# --- A) Calculate QC metrics and plot BEFORE filtering ----------------------
+data[["percent.mt"]] <- PercentageFeatureSet(data, pattern = "^MT-|^mt-")
+data$all_cells <- PROJECT_NAME
+
 p_before <- tryCatch({
   message("Attempting standard VlnPlot...")
   VlnPlot(
-    object = data,
+    object   = data,
     features = c("nFeature_RNA", "nCount_RNA", "percent.mt"),
-    group.by = "all_cells", # Ensures they are grouped together
-    ncol = 3,
-    pt.size = 0,
-    raster = FALSE
+    group.by = "all_cells",
+    ncol     = 3,
+    pt.size  = 0,
+    raster   = FALSE
   )
 }, error = function(e) {
-  message("Standard VlnPlot failed with S4SXP/Slot error. Falling back to manual ggplot...")
-  
-  # Manual backup logic
+  message("Standard VlnPlot failed. Falling back to manual ggplot...")
   plot_df <- data@meta.data[, c("all_cells", "nFeature_RNA", "nCount_RNA", "percent.mt")]
-  
   p1 <- ggplot(plot_df, aes(x = all_cells, y = nFeature_RNA, fill = all_cells)) +
     geom_violin(scale = "width", adjust = 1, trim = TRUE) +
     theme_classic() + NoLegend() + labs(title = "nFeature_RNA (Manual)", x = NULL)
-  
   p2 <- ggplot(plot_df, aes(x = all_cells, y = nCount_RNA, fill = all_cells)) +
     geom_violin(scale = "width", adjust = 1, trim = TRUE) +
     theme_classic() + NoLegend() + labs(title = "nCount_RNA (Manual)", x = NULL)
-  
   p3 <- ggplot(plot_df, aes(x = all_cells, y = percent.mt, fill = all_cells)) +
     geom_violin(scale = "width", adjust = 1, trim = TRUE) +
     theme_classic() + NoLegend() + labs(title = "percent.mt (Manual)", x = NULL)
-  
   return(p1 + p2 + p3 + plot_layout(ncol = 3))
 })
-
-# Display the result
 print(p_before)
-
 ggsave(file.path(OUTPUT_DIR, "01a_qc_violin_before_filtering.png"),
        plot = p_before, width = 10, height = 6, dpi = DPI_SETTING)
 
-# Apply stringent post-merge filters (cell-level)
+# --- B) Apply cell-level QC filters -----------------------------------------
+message("  -> Applying cell-level QC filters...")
+cells_before <- ncol(data)
 data <- subset(data,
                subset = nFeature_RNA >= POST_MIN_GENES  &
                         nFeature_RNA <= POST_MAX_GENES  &
                         nCount_RNA   >= POST_MIN_UMIS   &
                         nCount_RNA   <= POST_MAX_UMIS   &
                         percent.mt   <= POST_MAX_MT)
+message(paste("  -> Removed", cells_before - ncol(data), "low-quality cells."))
+gc()
 
-# Apply gene-level filter: remove genes expressed in too few cells
+# --- C) Layer joining: BPCells on-disk (recommended) or in-memory fallback ---
+message("  -> Joining layers into a single matrix...")
+if (USE_BPCELLS) {
+  # Write each split layer to disk via BPCells before joining.
+  # Prevents RAM exhaustion when merging many samples.
+  for (i in Layers(data)) {
+    write_matrix_dir(
+      mat = data[["RNA"]][i],
+      dir = file.path(OUTPUT_DIR, paste0("tmpdir/", PROJECT_NAME, "_merged_post_metadata_gen_", i))
+    )
+    data[["RNA"]][i] <- open_matrix_dir(
+      dir = file.path(OUTPUT_DIR, paste0("tmpdir/", PROJECT_NAME, "_merged_post_metadata_gen_", i))
+    )
+    print(i)
+  }
+  gc()
+  data <- JoinLayers(data)
+  data[["RNA"]]$counts <- as(LayerData(data, assay = "RNA", layer = "counts"), "dgCMatrix")
+} else {
+  # Fallback: standard in-memory JoinLayers (fine for small/medium datasets)
+  data <- JoinLayers(data)
+  data[["RNA"]]$counts <- as(LayerData(data, assay = "RNA", layer = "counts"), "dgCMatrix")
+}
+gc()
+message("  -> Layers successfully joined.")
+
+# --- D) Apply gene-level filter ---------------------------------------------
+message("  -> Applying gene-level filter...")
 genes_to_keep <- rownames(data)[
   Matrix::rowSums(GetAssayData(data, layer = "counts") > 0) >= POST_MIN_CELLS_PER_GENE
 ]
 data <- subset(data, features = genes_to_keep)
+gc()
 
-# --- Fail-Safe Plotting Block (After Filtering) ---
+# --- E) Plot AFTER filtering ------------------------------------------------
 p_after <- tryCatch({
   message("Attempting standard VlnPlot (After)...")
   VlnPlot(
-    object = data,
+    object   = data,
     features = c("nFeature_RNA", "nCount_RNA", "percent.mt"),
     group.by = "all_cells",
-    ncol = 3,
-    pt.size = 0,
-    raster = FALSE
+    ncol     = 3,
+    pt.size  = 0,
+    raster   = FALSE
   )
 }, error = function(e) {
   message("VlnPlot failed again. Using manual ggplot backup for 'p_after'...")
-  
-  # Ensure the metadata is fresh after your subset() call
   plot_df_after <- data@meta.data[, c("all_cells", "nFeature_RNA", "nCount_RNA", "percent.mt")]
-  
   pa1 <- ggplot(plot_df_after, aes(x = all_cells, y = nFeature_RNA, fill = all_cells)) +
     geom_violin(scale = "width", adjust = 1, trim = TRUE) +
     theme_classic() + NoLegend() + labs(title = "nFeature_RNA (Filtered)", x = NULL)
-  
   pa2 <- ggplot(plot_df_after, aes(x = all_cells, y = nCount_RNA, fill = all_cells)) +
     geom_violin(scale = "width", adjust = 1, trim = TRUE) +
     theme_classic() + NoLegend() + labs(title = "nCount_RNA (Filtered)", x = NULL)
-  
   pa3 <- ggplot(plot_df_after, aes(x = all_cells, y = percent.mt, fill = all_cells)) +
     geom_violin(scale = "width", adjust = 1, trim = TRUE) +
     theme_classic() + NoLegend() + labs(title = "percent.mt (Filtered)", x = NULL)
-  
   return(pa1 + pa2 + pa3 + plot_layout(ncol = 3))
 })
-
-# Display the result
 print(p_after)
-
 ggsave(file.path(OUTPUT_DIR, "01b_qc_violin_after_filtering.png"),
        plot = p_after, width = 10, height = 6, dpi = DPI_SETTING)
+message(paste("  Cells after all QC:", ncol(data), "| Genes retained:", nrow(data)))
 
-message(paste("  Cells after QC:", ncol(data), "| Genes retained:", nrow(data)))
-
-# =============================================================================
-# --- STEP 2.4: Doublet Detection via DoubletFinder --------------------------
-# =============================================================================
-# Strategy: DoubletFinder is run per-sample (not on the merged object) to
-# avoid confounding batch effects. The per-cell doublet labels are then
-# concatenated and applied back to the merged object.
-#
-# ROLLBACK SAFEGUARD:
-#   If a sample's detected doublet fraction exceeds DOUBLET_ROLLBACK_THRESHOLD,
-#   it is likely a classification artifact. All cells in that sample are
-#   retained (treated as singlets), and a warning is logged.
-message("\n=== STEP 2.4: Doublet Detection (DoubletFinder) ===")
-pk_plot_dir <- file.path(OUTPUT_DIR, "doublet_finder_plots")
-if (!dir.exists(pk_plot_dir)) dir.create(pk_plot_dir)
-
-data_list    <- SplitObject(data, split.by = "SampleID")
-results_list <- list()
-rollback_log <- list()  # Tracks any samples where rollback was triggered
-
-for (i in seq_along(data_list)) {
-  sample_name <- names(data_list)[i]
-  message(paste("  Processing doublets for:", sample_name))
-  seu_tmp <- data_list[[i]]
-
-  # --- Preliminary processing required by DoubletFinder ---
-  seu_tmp <- NormalizeData(seu_tmp, verbose = FALSE) %>%
-    FindVariableFeatures(verbose = FALSE) %>%
-    ScaleData(verbose = FALSE) %>%
-    RunPCA(npcs = N_PCS_TO_USE, verbose = FALSE)
-
-  # --- pK selection: find the pK that maximizes the BCmetric ---
-  sweep.res.list <- paramSweep(seu_tmp, PCs = 1:N_PCS_TO_USE, sct = FALSE)
-  sweep.stats    <- summarizeSweep(sweep.res.list, GT = FALSE)
-  bcmvn          <- find.pK(sweep.stats)
-  bcmvn$pK       <- as.numeric(as.character(bcmvn$pK))
-  
-  # 1. Identify the global maximum first
-  initial_pk <- bcmvn$pK[which.max(bcmvn$BCmetric)]
-  
-  # 2. Apply the Improved Constraint Logic
-  if (initial_pk < DF_PK_RANGE_MIN || initial_pk > DF_PK_RANGE_MAX) {
-    # Filter to find the best value within your 'Safe Zone'
-    in_range <- bcmvn[bcmvn$pK >= DF_PK_RANGE_MIN & bcmvn$pK <= DF_PK_RANGE_MAX, ]
-    
-    if (nrow(in_range) > 0) {
-      # Pick the highest peak that is biologically plausible
-      final_pk <- in_range$pK[which.max(in_range$BCmetric)]
-      message(paste("   -> Sample", sample_name, ": Global peak (", initial_pk, 
-                    ") out of bounds. Using best in-range peak:", final_pk))
-    } else {
-      final_pk <- DF_PK_FALLBACK
-      message(paste("   -> Sample", sample_name, ": No peaks in range. Using fallback:", final_pk))
-    }
-  } else {
-    final_pk <- initial_pk
-  }
-
-  # --- Save pK selection diagnostic plot ---
-  pk_plot <- ggplot(bcmvn, aes(x = pK, y = BCmetric, group = 1)) +
-    geom_line() + geom_point() +
-    geom_vline(xintercept = final_pk, linetype = "dashed", color = "red") +
-    ggtitle(paste0("pK Finder: ", sample_name),
-            subtitle = paste0("Selected pK = ", final_pk,
-                              " | Initial optimal = ", initial_pk)) +
-    theme_minimal()
-  ggsave(file.path(pk_plot_dir, paste0(sample_name, "_pk_plot.png")),
-         plot = pk_plot, width = 7, height = 5, dpi = DPI_SETTING)
-
-  # --- Run DoubletFinder ---
-  nExp_val <- round(ncol(seu_tmp) * DOUBLET_RATE)
-  seu_tmp  <- doubletFinder(seu_tmp, PCs = 1:N_PCS_TO_USE,
-                             pK = final_pk, nExp = nExp_val, sct = FALSE)
-  res_col  <- tail(grep("^DF.classifications", colnames(seu_tmp@meta.data), value = TRUE), 1)
-
-  # --- ROLLBACK CHECK ---
-  # Count the fraction of cells classified as doublets for this sample
-  n_doublets       <- sum(seu_tmp@meta.data[[res_col]] == "Doublet")
-  doublet_fraction <- n_doublets / ncol(seu_tmp)
-
-  if (doublet_fraction > DOUBLET_ROLLBACK_THRESHOLD) {
-    # Rollback: retain all cells for this sample; log the event
-    warning(paste0(
-      "  [ROLLBACK] Sample '", sample_name, "': detected doublet fraction = ",
-      round(doublet_fraction * 100, 1), "% exceeds threshold of ",
-      round(DOUBLET_ROLLBACK_THRESHOLD * 100, 1), "%. ",
-      "Doublet removal SKIPPED for this sample (all cells treated as Singlets)."
-    ))
-    rollback_result <- data.frame(
-      Doublet_Status = rep("Singlet", ncol(seu_tmp)),
-      row.names      = colnames(seu_tmp)
-    )
-    results_list[[sample_name]] <- rollback_result
-    rollback_log[[sample_name]] <- list(
-      fraction     = doublet_fraction,
-      n_doublets   = n_doublets,
-      n_cells      = ncol(seu_tmp),
-      final_pk     = final_pk,
-      action       = "ROLLBACK_APPLIED"
-    )
-  } else {
-    # Normal path: use DoubletFinder classifications
-    results_list[[sample_name]] <- seu_tmp@meta.data[, res_col, drop = FALSE]
-    rollback_log[[sample_name]] <- list(
-      fraction     = doublet_fraction,
-      n_doublets   = n_doublets,
-      n_cells      = ncol(seu_tmp),
-      final_pk     = final_pk,
-      action       = "DOUBLETS_REMOVED"
-    )
-  }
-  message(paste0("    -> Doublet fraction: ",
-                 round(doublet_fraction * 100, 1), "% | pK used: ", final_pk,
-                 " | Action: ", rollback_log[[sample_name]]$action))
-}
-
-# --- Save rollback log as a summary Excel file ---
-rollback_df <- do.call(rbind, lapply(names(rollback_log), function(s) {
-  data.frame(
-    SampleID         = s,
-    N_Cells          = rollback_log[[s]]$n_cells,
-    N_Doublets_Flagged = rollback_log[[s]]$n_doublets,
-    Doublet_Fraction = round(rollback_log[[s]]$fraction * 100, 2),
-    Threshold_Pct    = DOUBLET_ROLLBACK_THRESHOLD * 100,
-    pK_Used          = rollback_log[[s]]$final_pk,
-    Action           = rollback_log[[s]]$action,
-    stringsAsFactors = FALSE
-  )
-}))
-write_xlsx(rollback_df, file.path(OUTPUT_DIR, "doublet_finder_rollback_log.xlsx"))
-message(paste("  Doublet summary saved to: doublet_finder_rollback_log.xlsx"))
-
-# Standardize column name inside the list first
-results_list_cleaned <- lapply(results_list, function(x) {
-  colnames(x) <- "Doublet_Status"
-  return(x)
-})
-rm(data_list, seu_tmp) ; gc()
-
-# Combine
-all_res <- do.call(rbind, results_list_cleaned)
-
-# 1. Clean the rownames of all_res to remove the 'SampleName.' prefix
-# This regex removes everything up to and including the first dot
-rownames(all_res) <- gsub("^.*?\\.", "", rownames(all_res))
-
-# 2. Double-check a few names to see if they match head(colnames(data)) now
-head(rownames(all_res))
-head(colnames(data))
-
-# Use AddMetaData instead of direct bracket assignment
-#data <- AddMetaData(data, metadata = all_res)
-data$Doublet_Status <- all_res[rownames(data@meta.data), "Doublet_Status"]
-
-# --- Diagnostic UMAP of doublets BEFORE removal ---
-message("  -> Generating doublet visualization UMAP (diagnostic only)...")
-data <- NormalizeData(data, verbose = FALSE) %>%
-  FindVariableFeatures(verbose = FALSE) %>%
-  ScaleData(verbose = FALSE) %>%
-  RunPCA(npcs = N_PCS_TO_USE, verbose = FALSE, reduction.name = "pca_temp_doublets") %>%
-  RunUMAP(dims = 1:N_PCS_TO_USE, reduction = "pca_temp_doublets",
-          reduction.name = "umap_temp_doublets", verbose = FALSE)
-
-p_doublets <- DimPlot(data, reduction = "umap_temp_doublets",
-                      group.by = "Doublet_Status" #, cols = c("Singlet" = "grey80", "Doublet" = "red")
-                      ) +
-  ggtitle("Doublet Visualization (Before Removal)")
-p_doublets
-ggsave(file.path(OUTPUT_DIR, "01c_DIAGNOSTIC_doublet_visualization.png"),
-       plot = p_doublets, width = 8, height = 7, dpi = DPI_SETTING)
-
-# Remove temporary reductions to keep the object clean
-data@reductions$pca_temp_doublets  <- NULL
-data@reductions$umap_temp_doublets <- NULL
-rm(p_doublets); gc()
-
-# --- Remove doublets ---
-message(paste("  Total cells BEFORE doublet filtering:", ncol(data)))
-data <- subset(data, subset = Doublet_Status != "Doublet" | is.na(Doublet_Status))
-message(paste("  Total cells AFTER doublet filtering:", ncol(data)))
-
-output_rds <- file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_merged_qc_dblt_rm.rds"))
-saveRDS(data, output_rds, compress = T)
+# --- F) Save QC-filtered object ---------------------------------------------
+output_rds <- file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_merged_post_qc.rds"))
+saveRDS(data, output_rds)
 
 # =============================================================================
-# --- STEP 2.5: Ambient RNA Correction (DecontX) ------------------------------
-# =============================================================================
-# DecontX models ambient RNA contamination per cell and produces a
-# decontaminated count matrix. The corrected matrix replaces the raw counts,
-# and QC metrics are recalculated and re-filtered.
-output_rds <- file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_merged_qc_dblt_rm.rds"))
-data<- readRDS(output_rds)
-
-if (RUN_DECONTX) {
-  message("\n=== STEP 2.5: Ambient RNA Correction (DecontX) ===")
-  counts_sparse    <- GetAssayData(object = data, layer = "counts")
-  decontx_results  <- decontX(x = counts_sparse)
-
-  # Replace raw counts with decontaminated counts
-  data[["RNA"]]$counts <- decontx_results$decontXcounts
-  data[["RNA"]]$data   <- NULL  # Clear any stale normalized layer
-
-  # Recompute QC metrics on decontaminated matrix
-  data$nCount_RNA   <- colSums(data[["RNA"]]$counts)
-  data$nFeature_RNA <- colSums(data[["RNA"]]$counts > 0)
-  data[["percent.mt"]] <- PercentageFeatureSet(data, pattern = "^MT-|^mt-")
-
-  # Re-apply stringent QC filters after decontamination
-  data <- subset(data,
-                 subset = nFeature_RNA >= POST_MIN_GENES &
-                          nFeature_RNA <= POST_MAX_GENES &
-                          nCount_RNA   >= POST_MIN_UMIS  &
-                          nCount_RNA   <= POST_MAX_UMIS  &
-                          percent.mt   <= POST_MAX_MT)
-  message(paste("  Cells remaining after DecontX re-filtering:", ncol(data)))
-}
-rm(decontx_results, counts_sparse); gc()
-
-
-# =============================================================================
-# --- STEP 2.6: Normalization, Dimensionality Reduction & Integration (Seurat v5 Method) ---
+# --- STEP 2.4: Normalization, Dimensionality Reduction & Integration --------
 # =============================================================================
 # This modern workflow uses the IntegrateLayers function with HarmonyIntegration.
-# 1. The RNA assay is split into temporary layers, one for each sample.
-# 2. Normalization, HVG finding, Scaling, and PCA are run on each layer independently.
-# 3. An 'unintegrated' UMAP is created for diagnostics (Track A).
-# 4. IntegrateLayers with HarmonyIntegration is called to create a new, corrected 'harmony' reduction.
-# 5. A 'harmony' UMAP and clustering are created from the corrected reduction (Track B).
-message("\n=== STEP 2.6: Normalization, Dimensionality Reduction, and Integration (Seurat v5 Method) ===")
-# --- Split the object into layers by SampleID for integration ---
+# https://satijalab.org/seurat/articles/seurat5_integration
+#   1. The RNA assay is split into temporary layers, one per sample.
+#   2. Normalization, HVG finding, Scaling, and PCA run on each layer.
+#   3. An 'unintegrated' UMAP is created for diagnostics (Track A).
+#   4. IntegrateLayers with HarmonyIntegration creates a corrected 'harmony'
+#      reduction (Track B).
+#   5. Layers are re-joined for downstream analysis.
+# =============================================================================
+output_rds_layered <- file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_merged_post_qc.rds"))
+data <- readRDS(output_rds_layered)
+data[["RNA"]]$data       <- NULL
+data[["RNA"]]$scale.data <- NULL
+gc()
+
+message("\n=== STEP 2.4: Normalization, Dimensionality Reduction, and Integration (Seurat v5 Method) ===")
+
+# --- Split the object into layers by SampleID for integration ---------------
 data[["RNA"]] <- split(data[["RNA"]], f = data$SampleID)
 message("  -> RNA assay split into layers by SampleID.")
+gc()
 
-# --- Normalize, find HVGs, scale, and run PCA on each layer ---
-# These functions will automatically iterate over the new layers.
-data <- NormalizeData(data, verbose = FALSE)
-data <- FindVariableFeatures(data, nfeatures = N_VARIABLE_FEATURES, verbose = FALSE)
-data <- ScaleData(data, verbose = FALSE)
-data <- RunPCA(data, npcs = N_PCS_TO_USE, verbose = FALSE)
+# BPCells on-disk storage for split layers (skipped if USE_BPCELLS = FALSE)
+if (USE_BPCELLS) {
+  for (i in Layers(data)) {
+    write_matrix_dir(
+      mat = data[["RNA"]][i],
+      dir = file.path(OUTPUT_DIR, paste0("tmpdir/", PROJECT_NAME, "_merged_qc_", i))
+    )
+    data[["RNA"]][i] <- open_matrix_dir(
+      dir = file.path(OUTPUT_DIR, paste0("tmpdir/", PROJECT_NAME, "_merged_qc_", i))
+    )
+    print(i)
+  }
+  gc()
+}
+
+# --- Normalize, find HVGs, scale, and run PCA on each layer -----------------
+data <- NormalizeData(data, verbose = TRUE)
+data <- FindVariableFeatures(data, nfeatures = N_VARIABLE_FEATURES, verbose = TRUE)
+data <- ScaleData(data, verbose = TRUE)
+data <- RunPCA(data, npcs = N_PCS_TO_USE, verbose = TRUE)
 message("  -> Per-layer normalization, scaling, and PCA complete.")
 gc()
 
-# --- Track A: Standard PCA (unintegrated) for diagnostics ---
+# --- Track A: Unintegrated PCA (diagnostic) ---------------------------------
 message("  -> Generating unintegrated UMAP (Track A)...")
 data <- FindNeighbors(data, dims = 1:N_PCS_TO_USE, reduction = "pca",
                       graph.name = "pca_nn", verbose = FALSE, k.param = UMAP_N_NEIGHBORS)
-data <- FindClusters(data, resolution = CLUSTER_RESOLUTION,
-                     graph.name = "pca_nn", cluster.name = "clusters_none",
-                     verbose = FALSE)
+data <- FindClusters(data, resolution = CLUSTER_RESOLUTION, algorithm = "leiden",
+                     graph.name = "pca_nn", cluster.name = "clusters_none", verbose = FALSE)
 data <- RunUMAP(data, dims = 1:N_PCS_TO_USE, reduction = "pca",
                 n.neighbors = UMAP_N_NEIGHBORS, min.dist = UMAP_MIN_DIST,
                 reduction.name = "umap_none", verbose = FALSE, n.epochs = 500)
 gc()
 
-# --- Track B: Harmony integration using the official Seurat v5 wrapper ---
+# --- Track B: Harmony integration -------------------------------------------
 message("  -> Running Harmony integration via IntegrateLayers (Track B)...")
-library(SeuratWrappers)
 data <- IntegrateLayers(
-  object = data,
-  method = HarmonyIntegration,
+  object         = data,
+  method         = HarmonyIntegration,
   orig.reduction = "pca",
-  new.reduction = "harmony",
-  group.by = "SampleID", # Explicitly specify the batch variable
-  verbose = TRUE
+  new.reduction  = "harmony",
+  group.by       = "SampleID",
+  verbose        = TRUE
 )
-
-# --- Find Neighbors, Clusters, and UMAP on the new 'harmony' reduction ---
-data <- FindNeighbors(data, dims = 1:N_PCS_TO_USE, reduction = "harmony",
-                      graph.name = "harmony_nn", verbose = FALSE,  k.param = UMAP_N_NEIGHBORS)
-data <- FindClusters(data, resolution = CLUSTER_RESOLUTION,
-                     graph.name = "harmony_nn", cluster.name = "clusters_harmony",
-                     verbose = FALSE)
-data <- RunUMAP(data, dims = 1:N_PCS_TO_USE, reduction = "harmony",
-                n.neighbors = UMAP_N_NEIGHBORS, min.dist = UMAP_MIN_DIST,
-                reduction.name = "umap_harmony", verbose = FALSE, n.epochs = 500)
 gc()
 
-# --- Your original diagnostic plot code will now work perfectly ---
+data <- FindNeighbors(data, dims = 1:N_PCS_TO_USE, reduction = "harmony",
+                      graph.name = "harmony_nn", verbose = TRUE, k.param = UMAP_N_NEIGHBORS)
+data <- FindClusters(data, resolution = CLUSTER_RESOLUTION, algorithm = "leiden",
+                     graph.name = "harmony_nn", cluster.name = "clusters_harmony", verbose = TRUE)
+data <- RunUMAP(data, dims = 1:N_PCS_TO_USE, reduction = "harmony",
+                n.neighbors = UMAP_N_NEIGHBORS, min.dist = UMAP_MIN_DIST,
+                reduction.name = "umap_harmony", verbose = TRUE, n.epochs = 500)
+gc()
+
+# --- Re-join layers for downstream analysis ---------------------------------
+message("  -> Re-joining layers into a single matrix for downstream analysis...")
+data <- JoinLayers(data)
+if (USE_BPCELLS) {
+  # Convert BPCells on-disk matrices back to sparse dgCMatrix in memory
+  data[["RNA"]]$counts     <- as(LayerData(data, assay = "RNA", layer = "counts"),     "dgCMatrix")
+  gc()
+  data[["RNA"]]$data       <- as(LayerData(data, assay = "RNA", layer = "data"),       "dgCMatrix")
+  gc()
+  data[["RNA"]]$scale.data <- as(LayerData(data, assay = "RNA", layer = "scale.data"), "dgCMatrix")
+  gc()
+}
+message("  -> Layers successfully joined.")
+
+# --- Diagnostic UMAP plots --------------------------------------------------
 p1 <- DimPlot(data, reduction = "umap_none",    group.by = "SampleID") +
-  ggtitle("Unintegrated PCA")
+  ggtitle("Unintegrated PCA") + coord_fixed()
 p2 <- DimPlot(data, reduction = "umap_harmony", group.by = "SampleID") +
-  ggtitle("Harmony Integrated")
-p1+p2
+  ggtitle("Harmony Integrated") + coord_fixed()
+p1 + p2
 ggsave(file.path(OUTPUT_DIR, "02_DIAGNOSTIC_UMAP_Harmony_vs_NoHarmony.png"),
-       plot = p1 + p2, width = 16, height = 7, dpi = DPI_SETTING)
+       plot = p1 + p2, width = 16, height = 7, dpi = DPI_SETTING, bg = "white")
 
 p3 <- DimPlot(data, reduction = "umap_none",    group.by = "clusters_none",
-              label = TRUE) + ggtitle("Clusters: Unintegrated PCA") + NoLegend()
+              label = TRUE) + ggtitle("Clusters: Unintegrated PCA") + NoLegend() + coord_fixed()
 p4 <- DimPlot(data, reduction = "umap_harmony", group.by = "clusters_harmony",
-              label = TRUE) + ggtitle("Clusters: Harmony") + NoLegend()
-p3+p4
+              label = TRUE) + ggtitle("Clusters: Harmony") + NoLegend() + coord_fixed()
+p3 + p4
 ggsave(file.path(OUTPUT_DIR, "03_DIAGNOSTIC_UMAP_Cluster_Comparison.png"),
        plot = p3 + p4, width = 16, height = 7, dpi = DPI_SETTING)
 message("  Saved Harmony vs. PCA diagnostic UMAP plots.")
 
-
-
-
-
-
 # =============================================================================
-# --- STEP 2.6: Normalization, Dimensionality Reduction & Integration --------
+# --- STEP 2.5: Save Processed Object ----------------------------------------
 # =============================================================================
-# Two parallel analytical tracks are produced:
-#   (A) Standard PCA - no batch correction (useful to diagnose batch effects)
-#   (B) Harmony-corrected PCA (recommended for downstream annotation)
-# Both UMAPs and cluster assignments are saved in the Seurat object.
-message("\n=== STEP 2.6: Normalization, Dimensionality Reduction, and Integration ===")
-
-# --- Normalize, find HVGs, scale, and run PCA ---
-data <- NormalizeData(data, verbose = FALSE) %>%
-  FindVariableFeatures(nfeatures = N_VARIABLE_FEATURES, verbose = FALSE) %>%
-  ScaleData(verbose = FALSE) %>%
-  RunPCA(npcs = N_PCS_TO_USE, verbose = FALSE)
-
-# --- Track A: Standard PCA (no batch correction) ---
-data <- FindNeighbors(data, dims = 1:N_PCS_TO_USE, reduction = "pca",
-                      graph.name = "pca_nn", verbose = FALSE, k.param = UMAP_N_NEIGHBORS)
-data <- FindClusters(data, resolution = CLUSTER_RESOLUTION,
-                     graph.name = "pca_nn", cluster.name = "clusters_none",
-                     verbose = FALSE)
-data <- RunUMAP(data, dims = 1:N_PCS_TO_USE, reduction = "pca",
-                n.neighbors = UMAP_N_NEIGHBORS, min.dist = UMAP_MIN_DIST,
-                reduction.name = "umap_none", verbose = FALSE, n.epochs = 500)
-gc()
-
-# --- Track B: Harmony integration (batch correction by SampleID) ---
-data <- RunHarmony(data, group.by.vars = "SampleID",
-                   reduction = "pca", reduction.save = "harmony",
-                   verbose = TRUE, max_iter = 50)
-data <- FindNeighbors(data, dims = 1:N_PCS_TO_USE, reduction = "harmony",
-                      graph.name = "harmony_nn", verbose = FALSE,  k.param = UMAP_N_NEIGHBORS)
-data <- FindClusters(data, resolution = CLUSTER_RESOLUTION,
-                     graph.name = "harmony_nn", cluster.name = "clusters_harmony",
-                     verbose = FALSE)
-data <- RunUMAP(data, dims = 1:N_PCS_TO_USE, reduction = "harmony",
-                n.neighbors = UMAP_N_NEIGHBORS, min.dist = UMAP_MIN_DIST,
-                reduction.name = "umap_harmony", verbose = FALSE, n.epochs = 500)
-
-gc()
-
-# --- Diagnostic plots: compare Harmony vs. no Harmony ---
-p1 <- DimPlot(data, reduction = "umap_none",    group.by = "SampleID") +
-  ggtitle("Standard PCA (No Harmony)")
-p2 <- DimPlot(data, reduction = "umap_harmony", group.by = "SampleID") +
-  ggtitle("Harmony Batch-Corrected")
-p1+p2
-ggsave(file.path(OUTPUT_DIR, "02_DIAGNOSTIC_UMAP_Harmony_vs_NoHarmony.png"),
-       plot = p1 + p2, width = 16, height = 7, dpi = DPI_SETTING)
-
-p3 <- DimPlot(data, reduction = "umap_none",    group.by = "clusters_none",
-              label = TRUE) + ggtitle("Clusters: Standard PCA") + NoLegend()
-p4 <- DimPlot(data, reduction = "umap_harmony", group.by = "clusters_harmony",
-              label = TRUE) + ggtitle("Clusters: Harmony") + NoLegend()
-p3+p4
-ggsave(file.path(OUTPUT_DIR, "03_DIAGNOSTIC_UMAP_Cluster_Comparison.png"),
-       plot = p3 + p4, width = 16, height = 7, dpi = DPI_SETTING)
-
-message("  Saved Harmony vs. PCA diagnostic UMAP plots.")
-
-# =============================================================================
-# --- STEP 2.7: Save Processed Object ----------------------------------------
-# =============================================================================
-message("\n=== STEP 2.7: Saving Processed Object for Annotation ===")
+message("\n=== STEP 2.5: Saving Processed Object for Annotation ===")
 output_rds <- file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_processed_for_annotation.rds"))
-saveRDS(data, output_rds, compress=T)
+saveRDS(data, output_rds, compress = TRUE)
 message(paste0(
   "\n",
   "=== PROCESSING COMPLETE ===\n",
@@ -888,6 +939,6 @@ message(paste0(
   "\nNext step: Open and run '02_annotate_data.R' to annotate the data.\n"
 ))
 
-# Load if needed
-output_rds <- file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_processed_for_annotation.rds"))
-data <- readRDS(output_rds)
+# Load if needed:
+# output_rds <- file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_processed_for_annotation.rds"))
+# data <- readRDS(output_rds)
