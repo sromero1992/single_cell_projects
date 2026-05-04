@@ -8,12 +8,14 @@
 #     1. Per-sample data loading from 10x Genomics H5 files
 #     2. Optional probe/custom feature integration (e.g., KO-target probes)
 #     3. Copy-number variation detection via SCEVAN (optional, per-sample)
-#     4. Pre-merge QC (loose filters, per-sample)
-#     5. Ambient RNA correction via DecontX (optional, per-sample),
+#            *** SCEVAN runs on RAW counts — no filtering before this step ***
+#     4. Ambient RNA correction via DecontX (optional, per-sample),
 #        with optional rounding of corrected counts to integers.
-#     6. Doublet detection + removal via DoubletFinder (per-sample),
+#     5. Doublet detection + removal via DoubletFinder (per-sample),
 #        with a ROLLBACK SAFEGUARD: if the detected doublet fraction exceeds
 #        DOUBLET_ROLLBACK_THRESHOLD, removal is skipped for that sample.
+#     6. Pre-merge QC (loose filters, per-sample) — applied LAST so that QC
+#        metrics reflect the corrected, singlet-only matrix.
 #     7. Post-merge QC (stringent filters applied after merging all samples)
 #     8. Data normalization, dimensionality reduction, and batch-correction
 #        via Harmony, producing parallel (PCA vs. Harmony) clusterings.
@@ -464,10 +466,15 @@ for (i in 1:nrow(metadata)) {
       # Optionally round to integer (ROUND_DECONTX_COUNTS = TRUE) — useful for
       # tools that require integer count matrices. See decontX vignette for details.
       if (ROUND_DECONTX_COUNTS) {
-        seurat_obj[["RNA"]]$counts <- round(decontx_results$decontXcounts)
-        message("    -> DecontX counts rounded to nearest integer.")
+        # round() on a sparse matrix leaves explicit 0 entries for values that
+        # rounded down to 0 (e.g. 0.3 → 0). drop0() removes those structural
+        # zeros so the matrix stays truly sparse.
+        seurat_obj[["RNA"]]$counts <- Matrix::drop0(round(decontx_results$decontXcounts))
+        message("    -> DecontX counts rounded to nearest integer and structural zeros dropped.")
       } else {
-        seurat_obj[["RNA"]]$counts <- decontx_results$decontXcounts
+        # drop0() also applied here: decontX can emit near-zero fractional values
+        # that are structurally non-zero, wasting memory.
+        seurat_obj[["RNA"]]$counts <- Matrix::drop0(decontx_results$decontXcounts)
       }
 
       # Recompute QC metrics on the decontaminated matrix

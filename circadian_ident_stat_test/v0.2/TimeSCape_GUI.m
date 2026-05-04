@@ -447,15 +447,45 @@ function TimeSCape_GUI
                            true, period12, [], {}, false, norm_str, n_workers);
             n_all_total  = height(T1);
             n_conf_total = sum((T1.pvalue < 0.05) & (T1.pvalue_corr < 0.05));
-            set(hRunStatus,'String', ...
-                sprintf('✓  All %d types done — %d genes, %d confident', ...
-                        n_types, n_all_total, n_conf_total), ...
-                'ForegroundColor',[0.1 0.5 0.1]);
         catch ME
             set(hRunStatus,'String','✗  Error – see Command Window', ...
                 'ForegroundColor',[0.7 0 0]);
             errordlg(['Run-All error: ' ME.message], 'Error');
+            return;
         end
+
+        % ── Auto-generate confident heatmaps for every cell type ─────────────
+        % Non-confident heatmaps are left for manual generation via button ④.
+        if period12; pl = '_period_12_'; else; pl = '_period_24_'; end
+        set(hRunStatus, 'String', ...
+            sprintf('⏳  Generating heatmaps for %d cell types…', n_types), ...
+            'ForegroundColor', [0.4 0.2 0]);
+        drawnow;
+
+        n_heat = 0;
+        for ii = 1 : n_types
+            ct      = char(all_types(ii));
+            ct_safe = safe_name(ct);
+            ct_dir  = fullfile(pwd, ct_safe);
+            chk_f   = fullfile(ct_dir, [ct_safe pl 'circadian_analysis_all.csv']);
+            if exist(chk_f, 'file')
+                try
+                    % strict=true (confident only), circ=false, no custom label,
+                    % axHandle=[] (save to file only, don't render in GUI axes)
+                    generateHeatmap_circ_simple(ct_safe, true, '', false, ...
+                                                period12, ct_dir, []);
+                    n_heat = n_heat + 1;
+                catch
+                    % Too few confident genes for this cell type -- skip silently
+                end
+            end
+        end
+
+        set(hRunStatus,'String', ...
+            sprintf('✓  All %d types done — %d genes, %d confident | %d heatmaps saved', ...
+                    n_types, n_all_total, n_conf_total, n_heat), ...
+            'ForegroundColor',[0.1 0.5 0.1]);
+
         % Point outdir to the last cell type directory (alphabetically last)
         outdir_name    = safe_name(all_types(end));
         guiData.outdir = fullfile(pwd, outdir_name);
@@ -471,7 +501,13 @@ function TimeSCape_GUI
         customName  = strtrim(hCustomName.String);
         if period12; pl = '_period_12_'; else; pl = '_period_24_'; end
 
-        fname_chk = fullfile(guiData.outdir, [safe_name(celltype) pl 'circadian_analysis_all.csv']);
+        % Always derive outdir from the currently selected cell type --
+        % guiData.outdir may point to the last cell type from Run All,
+        % which causes "file not found" when a different type is selected.
+        ct_safe   = safe_name(celltype);
+        ct_outdir = fullfile(pwd, ct_safe);
+
+        fname_chk = fullfile(ct_outdir, [ct_safe pl 'circadian_analysis_all.csv']);
         if ~exist(fname_chk, 'file')
             warndlg(sprintf(['Analysis file not found:\n%s\n\n' ...
                              'Please run the analysis first (Step ③).'], fname_chk), ...
@@ -479,9 +515,10 @@ function TimeSCape_GUI
             return;
         end
         try
-            generateHeatmap_circ_simple(celltype, strict, customName, circ, period12, ...
-                                        guiData.outdir, hPlotAxes);
-            msgbox(sprintf('Heatmap saved →  %s', guiData.outdir), 'Done');
+            % Pass sanitised name -- files on disk are named with safe_name()
+            generateHeatmap_circ_simple(ct_safe, strict, customName, circ, period12, ...
+                                        ct_outdir, hPlotAxes);
+            msgbox(sprintf('Heatmap saved →  %s', ct_outdir), 'Done');
         catch ME
             errordlg(['Heatmap error: ', ME.message], 'Error');
         end
