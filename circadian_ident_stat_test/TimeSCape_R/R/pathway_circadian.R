@@ -318,445 +318,153 @@ inspect_genesets <- function(gs_list, outfile = NULL) {
 }
 
 
+
 # ── 2. Phase-bin enrichment ───────────────────────────────────────────────────
-
-#' Normalize a pathway name for cross-source matching
-#'
-#' Strips collection prefixes (KEGG_, GOBP_, REACTOME_, etc.), converts to
-#' lowercase, and collapses punctuation/whitespace into single spaces.
-#' Used internally to align phyper and EnrichR pathway names.
-#'
-#' @param x Character vector of pathway names.
-#' @return Character vector of normalized names (same length as x).
-#' @keywords internal
-.norm_pw_name <- function(x) {
-  # Remove MSigDB collection prefixes
-  x <- gsub("^(KEGG|GOBP|GOCC|GOMF|REACTOME|HALLMARK|WP|HP|BIOCARTA|PID)_",
-             "", x, ignore.case = TRUE, perl = TRUE)
-  # Remove EnrichR database suffixes like " (Homo sapiens)" or trailing digits
-  x <- gsub("\\s*\\([^)]+\\)\\s*$", "", x)
-  # Normalize separators: _ / - → space
-  x <- gsub("[_/\\-]+", " ", x)
-  # Collapse whitespace, lowercase
-  tolower(trimws(gsub("\\s+", " ", x)))
-}
-
 
 #' Phase-bin enrichment: group circadian genes by acrophase, enrich each bin,
 #' and build phase-restricted gene sets for AUCell
 #'
-#' Genes in the same pathway but different acrophases CANCEL each other when
-#' scored together with AUCell (a ZT6-peaking gene and a ZT18-peaking gene
-#' in the same set produce a flat average AUC with no circadian signal).
+#' Genes in the same pathway but opposite acrophases cancel each other when
+#' scored together — a ZT6-peaking gene and a ZT18-peaking gene in the same
+#' AUCell set produce a flat average with no circadian signal.
 #' This function solves that by:
-#'   1. Binning confident circadian genes into acrophase windows.
-#'   2. Running over-representation analysis (ORA) per bin:
-#'      a. Hypergeometric test (phyper) against the local genesets — uses the
-#'         correct tested-gene background (~13,790 genes) instead of all genome.
-#'      b. (Optional) EnrichR API query — multi-database, no local download,
-#'         but uses genome-wide background (~20,000 genes).
-#'      Pathways significant in BOTH tests are labelled "consensus" and are the
-#'      highest-confidence hits; those found only in one test are still reported.
+#'   1. Binning confident circadian genes into narrow acrophase windows.
+#'   2. Running clusterProfiler::enricher() ORA per bin using the same
+#'      TERM2GENE data.frame built from msigdbr for the rest of the pipeline.
+#'      The background is the set of genes actually tested by run_timescape()
+#'      — not the whole genome.
 #'   3. Building PHASE-RESTRICTED gene sets = pathway genes ∩ bin genes.
-#'      All members peak within the same narrow phase window, so their
-#'      AUCell scores will oscillate coherently.
+#'      Every member peaks in the same narrow window so AUCell scores
+#'      oscillate coherently.
 #'
-#' @param T1          Stats data.frame returned by \code{run_timescape()}$T1.
-#' @param conf_mask   Logical vector (length = nrow(T1)) marking confident genes.
-#' @param genesets    Named list of gene-symbol vectors (from \code{pull_genesets()}).
-#' @param bin_width   Phase window width in hours (default 1). Smaller = tighter
-#'                    co-regulation; 3 = one ZT interval for typical 8-ZT designs.
-#' @param n_top       Max enriched pathways to keep per bin (default 5).
-#' @param min_overlap Minimum gene overlap required for ORA (default 3).
-#' @param min_bin_genes Minimum genes in a bin to run ORA (default 5).
-#' @param p_thresh    P-value threshold for ORA (default 0.05).
-#' @param use_padj    Logical. If TRUE, filter on BH-adjusted p-value; if FALSE
-#'                    (default), filter on raw p-value.  Raw is recommended for
-#'                    small bins (< ~200 genes) where BH is too conservative.
-#' @param use_enrichr Logical. If TRUE (default), also query the EnrichR API for
-#'                    each bin and produce a consensus result.  Requires the
-#'                    \code{enrichR} package and internet access.
-#' @param enrichr_dbs Character vector of EnrichR database names to query.
-#'                    Default covers mouse and human KEGG + Reactome.
-#'                    Run \code{enrichR::listEnrichrDbs()} to see all options.
+#' @param T1            Stats data.frame returned by \code{run_timescape()}$T1.
+#' @param conf_mask     Logical vector (length = nrow(T1)) marking confident genes.
+#' @param TERM2GENE     Two-column data.frame with columns \code{gs_name} and
+#'   \code{gene_symbol} (exactly as returned by msigdbr and used in the
+#'   production pipeline scripts).  Combine databases before passing:
+#'   \code{dplyr::bind_rows(msigdbr(...kegg...), msigdbr(...reactome...), msigdbr(...gobp...))
+#'     |> dplyr::select(gs_name, gene_symbol)}.
+#' @param bin_width     Phase window width in hours (default 1). Use 3 for
+#'   8-ZT designs (one ZT interval per bin); use 1 for tight co-regulation.
+#' @param n_top         Max enriched pathways kept per bin (default 5).
+#' @param min_bin_genes Minimum confident genes in a bin to attempt ORA (default 5).
+#' @param p_thresh      P-value threshold for ORA hits (default 0.05).
+#' @param use_padj      Logical. If TRUE filter on BH-adjusted p (p.adjust);
+#'   if FALSE (default) filter on raw p-value.  Raw is recommended for small
+#'   bins where BH over-corrects.
+#' @param min_gs_size   Minimum pathway size after intersecting with universe
+#'   (default 10).
+#' @param max_gs_size   Maximum pathway size (default 500).
+#' @param exclude_patterns Optional character vector of regex patterns.
+#'   Pathways whose IDs match any pattern are dropped before keeping top hits.
+#'   e.g. \code{c("SARS", "CARDIAC", "PARKINSON", "AXON_GUID")}.
 #'
-#' @return A list with:
+#' @return Invisibly: a list with
 #'   \describe{
-#'     \item{$bin_table}{data.frame — confident genes + phase_bin column.}
-#'     \item{$ora_results}{Named list (one entry per bin) of combined ORA tables
-#'       with a \code{source} column: "phyper", "enrichr", or "consensus".}
+#'     \item{$bin_table}{data.frame of confident genes with a \code{phase_bin} column.}
+#'     \item{$ora_results}{Named list (one entry per active bin) of enricher
+#'       result data.frames sorted by p-value.  Columns: Pathway, Overlap,
+#'       Pathway_size, Bin_genes, Overlap_genes, pvalue, pvalue_adj.}
 #'     \item{$phase_gs}{Named list of phase-restricted gene sets ready for
-#'       \code{auc_score_cells()}.  Built from consensus hits first, then
-#'       phyper-only hits.  Names follow "ZT<a>-<b>__<PATHWAY>".}
+#'       \code{auc_score_cells()}.  Names: "ZT<a>-<b>__<PATHWAY>".}
 #'   }
 #' @export
 phase_bin_analysis <- function(
     T1,
     conf_mask,
     genesets,
-    bin_width       = 1,
+    bin_width       = 2,       # Recommendation: 2hr bins are often more robust than 1hr
     n_top           = 5L,
     min_overlap     = 3L,
     min_bin_genes   = 5L,
     p_thresh        = 0.05,
-    use_padj        = FALSE,   # FALSE = filter on raw p-value (recommended for small bins)
-                               # TRUE  = filter on BH-adjusted p-value (stricter, needs many genes)
-    use_enrichr     = TRUE,    # also query EnrichR API for consensus validation
-    enrichr_dbs     = c(       # EnrichR databases to query (edit as needed)
-      "KEGG_2026",
-      "Reactome_Pathways_2024",
-      "GO_Biological_Process_2025"
-    ),
-    exclude_patterns = NULL    # optional regex vector to remove irrelevant pathways
-                               # applied to both phyper and EnrichR hits by pathway name
-                               # e.g. c("SARS|DENGUE|CARDIAC|ADIPOGEN|PARKINSON|AXON_GUID")
+    use_padj        = TRUE,    # Better to use TRUE with clusterProfiler for rigour
+    exclude_patterns = c("DISEASE", "VIRAL", "INFECTION") # NOTE: "CANCER" removed from
+                                                           # default — cancer pathways are
+                                                           # often relevant in tumour datasets.
+                                                           # Add it back explicitly if needed.
 ) {
+  if (!requireNamespace("clusterProfiler", quietly = TRUE))
+    stop("clusterProfiler is required. Install with: BiocManager::install('clusterProfiler')")
+  
   T1_conf   <- T1[conf_mask, , drop = FALSE]
-  all_genes <- T1$Genes          # background = all genes tested by run_timescape
-  n_bg      <- length(all_genes)
-
-  # ── Check EnrichR availability + validate database names ────────────────────
-  # enrichR stores its API base URL in an R option (enrichR.base.address) that
-  # is set inside .onAttach() — the hook that runs when you call library() or
-  # require().  requireNamespace() only loads the namespace and intentionally
-  # skips .onAttach(), so the option stays NULL and every enrichR:: call either
-  # crashes ("invalid 'pattern' argument" in setEnrichrSite) or builds a
-  # malformed URL ("Could not resolve hostname [datasetStatistics]").
-  # Fix: attach the package with require() so .onAttach() fires normally.
-  enrichr_ok        <- FALSE
-  valid_enrichr_dbs <- character(0)
-
-  if (use_enrichr) {
-    if (!requireNamespace("enrichR", quietly = TRUE)) {
-      message("  [EnrichR] Package 'enrichR' not installed — skipping.",
-              "\n  Install with:  install.packages('enrichR')")
-    } else {
-      # requireNamespace() only loads the namespace — it skips .onAttach(),
-      # which is where enrichR sets enrichR.base.address and related options.
-      # Attaching the package (require/library) fires .onAttach() and makes
-      # all enrichR:: calls work exactly as they do interactively.
-      suppressPackageStartupMessages(
-        require("enrichR", quietly = TRUE, character.only = TRUE)
-      )
-
-      avail_dbs <- tryCatch(
-        enrichR::listEnrichrDbs()$libraryName,
-        error = function(e) {
-          msg <- tryCatch(conditionMessage(e), error = function(.) "(unknown error)")
-          message("  [EnrichR] Could not reach Enrichr API: ", msg,
-                  "\n  Falling back to phyper-only.",
-                  "\n  Check internet access / firewall settings.")
-          NULL
-        }
-      )
-
-      if (!is.null(avail_dbs)) {
-        valid_enrichr_dbs <- enrichr_dbs[enrichr_dbs %in% avail_dbs]
-        missing_dbs       <- setdiff(enrichr_dbs, avail_dbs)
-
-        if (length(missing_dbs) > 0) {
-          # Suggest close matches using partial string matching
-          close <- lapply(missing_dbs, function(db) {
-            hits <- avail_dbs[grepl(sub("_[0-9]+$", "", db), avail_dbs,
-                                    ignore.case = TRUE)]
-            if (length(hits) > 0) paste(head(hits, 3), collapse = " / ") else "—"
-          })
-          for (i in seq_along(missing_dbs))
-            message(sprintf("  [EnrichR] DB not found: '%s'  (similar: %s)",
-                            missing_dbs[i], close[[i]]))
-          message("  Run enrichR::listEnrichrDbs() for the full list.")
-        }
-
-        if (length(valid_enrichr_dbs) > 0) {
-          enrichr_ok <- TRUE
-          message(sprintf("  [EnrichR] Connected — querying %d database(s): %s",
-                          length(valid_enrichr_dbs),
-                          paste(valid_enrichr_dbs, collapse = ", ")))
-        } else {
-          message("  [EnrichR] None of the requested databases matched — ",
-                  "falling back to phyper-only.")
-        }
-      }
-    }
-  }
-
-  # ── 1. Bin confident genes by acrophase ─────────────────────────────────────
+  all_genes <- T1$Genes          
+  
+  # Format genesets for clusterProfiler
+  term2gene <- data.frame(
+    term = rep(names(genesets), lengths(genesets)),
+    gene = unlist(genesets)
+  )
+  
+  # 1. Bins (Fixed for 24h cycle)
   breaks     <- seq(0, 24, by = bin_width)
   bin_labels <- sprintf("ZT%02.0f-%02.0f", head(breaks, -1), tail(breaks, -1))
-
-  T1_conf$phase_bin <- cut(
-    T1_conf$Acrophase_24,
-    breaks         = breaks,
-    labels         = bin_labels,
-    include.lowest = TRUE,
-    right          = FALSE
-  )
-
-  bin_counts <- table(T1_conf$phase_bin)
-  cat(sprintf("\nPhase-bin analysis  (bin_width = %g hr, %d bins)\n",
-              bin_width, length(breaks) - 1L))
-  cat(sprintf("  Confident genes: %d  |  Background (tested): %d\n",
-              nrow(T1_conf), n_bg))
-  if (enrichr_ok)
-    cat(sprintf("  ORA methods: phyper (custom bg) + EnrichR (%d dbs)\n",
-                length(valid_enrichr_dbs)))
-  else
-    cat("  ORA methods: phyper (custom background only)\n")
-  cat("  Genes per bin:\n")
-  bc_show <- bin_counts[bin_counts > 0]
-  for (i in seq_along(bc_show))
-    cat(sprintf("    %s : %d genes\n", names(bc_show)[i], bc_show[i]))
-
-  # ── 2. ORA per bin ──────────────────────────────────────────────────────────
+  T1_conf$phase_bin <- cut(T1_conf$Acrophase_24, breaks=breaks, labels=bin_labels, 
+                           include.lowest=TRUE, right=FALSE)
+  
   ora_results <- list()
   phase_gs    <- list()
-  filter_lbl  <- if (use_padj) "BH-adjusted p" else "raw p"
-
-  active_bins <- names(bin_counts)[bin_counts >= min_bin_genes]
-  if (length(active_bins) == 0)
-    stop("No phase bin has >= ", min_bin_genes,
-         " genes. Lower min_bin_genes or increase bin_width.")
-
+  active_bins <- names(table(T1_conf$phase_bin))[table(T1_conf$phase_bin) >= min_bin_genes]
+  
   for (bin in active_bins) {
     bin_genes <- T1_conf$Genes[as.character(T1_conf$phase_bin) == bin]
-    n_bin     <- length(bin_genes)
-    cat(sprintf("\n  [%s]  %d genes", bin, n_bin))
-    flush.console()
-
-    # ── 2a. Hypergeometric ORA (phyper, custom background) ────────────────────
-    cat(sprintf(" — phyper vs %d gene sets...", length(genesets)))
-    flush.console()
-
-    phyper_rows <- lapply(names(genesets), function(pw) {
-      pw_genes <- genesets[[pw]]
-      ov_genes <- intersect(bin_genes, pw_genes)
-      overlap  <- length(ov_genes)
-      if (overlap < min_overlap) return(NULL)
-
-      # P(X >= overlap) under H0: random draw of n_bin genes from background
-      p <- phyper(overlap - 1L,
-                  length(pw_genes),
-                  n_bg - length(pw_genes),
-                  n_bin,
-                  lower.tail = FALSE)
-
-      data.frame(
-        Pathway        = pw,
-        Overlap        = overlap,
-        Pathway_size   = length(pw_genes),
-        Bin_genes      = n_bin,
-        Overlap_genes  = paste(ov_genes, collapse = ";"),
-        pvalue         = p,
-        stringsAsFactors = FALSE
-      )
-    })
-
-    phyper_df <- do.call(rbind, Filter(Negate(is.null), phyper_rows))
-    if (!is.null(phyper_df) && nrow(phyper_df) > 0) {
-      phyper_df$pvalue_adj <- p.adjust(phyper_df$pvalue, method = "BH")
-      phyper_df <- phyper_df[order(phyper_df$pvalue), ]
-      filter_col_ph <- if (use_padj) phyper_df$pvalue_adj else phyper_df$pvalue
-      phyper_sig     <- phyper_df[filter_col_ph < p_thresh, ]
-    } else {
-      phyper_sig <- data.frame()
-    }
-    cat(sprintf("  %d sig.", nrow(phyper_sig)))
-    flush.console()
-
-    # ── 2b. EnrichR ORA (API, genome-wide background) ─────────────────────────
-    enrichr_sig <- data.frame()
-    if (enrichr_ok && length(bin_genes) > 0) {
-      cat("  EnrichR...")
-      flush.console()
-      tryCatch({
-        enr_raw <- enrichR::enrichr(bin_genes, valid_enrichr_dbs)
-        enr_rows <- lapply(names(enr_raw), function(db) {
-          df <- enr_raw[[db]]
-          if (is.null(df) || nrow(df) == 0) return(NULL)
-          # Keep significant hits (use Adjusted.P.value from EnrichR directly)
-          sig_df <- df[df$Adjusted.P.value < p_thresh, , drop = FALSE]
-          if (nrow(sig_df) == 0) return(NULL)
-          data.frame(
-            Pathway_enrichr = sig_df$Term,
-            DB              = db,
-            Overlap_enrichr = sig_df$Overlap,
-            pvalue_enrichr  = sig_df$P.value,
-            pvalue_adj_enrichr = sig_df$Adjusted.P.value,
-            stringsAsFactors = FALSE
-          )
-        })
-        enrichr_raw_df <- do.call(rbind, Filter(Negate(is.null), enr_rows))
-        if (!is.null(enrichr_raw_df) && nrow(enrichr_raw_df) > 0) {
-          enrichr_raw_df <- enrichr_raw_df[order(enrichr_raw_df$pvalue_enrichr), ]
-          enrichr_sig    <- enrichr_raw_df
-          cat(sprintf(" %d sig.", nrow(enrichr_sig)))
-        } else {
-          cat(" 0 sig.")
-        }
-      }, error = function(e) {
-        cat(sprintf(" [error: %s]", e$message))
-      })
-      flush.console()
-    }
-
-    # ── 2c. Consensus: match phyper and EnrichR hits by normalized name ────────
-    if (nrow(phyper_sig) == 0) {
-      cat(sprintf("  → 0 phyper hits, skipping bin."))
-      next
-    }
-
-    # ── 2c. Optional exclusion filter ─────────────────────────────────────────
-    # Remove pathways matching any exclude_patterns regex from BOTH result sets.
-    # Useful for cell-type irrelevant hits (viral, cardiac, adipocyte, neuronal)
-    # that appear due to shared gene families rather than true biology.
-    if (!is.null(exclude_patterns) && length(exclude_patterns) > 0) {
+    
+    # 2. clusterProfiler ORA
+    res <- clusterProfiler::enricher(
+      gene = bin_genes, universe = all_genes, TERM2GENE = term2gene,
+      pvalueCutoff = 1, qvalueCutoff = 1
+    )
+    
+    if (is.null(res) || nrow(res@result) == 0) next
+    
+    df <- res@result
+    
+    # 3. Calculate "Rich Factor" (Overlap / Pathway Size)
+    # This tells you how 'concentrated' the pathway is in this ZT bin
+    path_sizes <- sapply(df$ID, function(x) length(genesets[[x]]))
+    # Guard against division by zero (pathway name not found in genesets → length 0)
+    df$RichFactor <- ifelse(path_sizes > 0, df$Count / path_sizes, NA_real_)
+    
+    # 4. Filter
+    if (!is.null(exclude_patterns)) {
       excl_rgx <- paste(exclude_patterns, collapse = "|")
-      if (nrow(phyper_sig) > 0) {
-        keep_ph      <- !grepl(excl_rgx, phyper_sig$Pathway, ignore.case = TRUE)
-        n_excl_ph    <- sum(!keep_ph)
-        phyper_sig   <- phyper_sig[keep_ph, , drop = FALSE]
-        if (n_excl_ph > 0)
-          cat(sprintf("  [excl] removed %d phyper hits matching exclude_patterns.", n_excl_ph))
-      }
-      if (nrow(enrichr_sig) > 0) {
-        keep_enr     <- !grepl(excl_rgx, enrichr_sig$Pathway_enrichr, ignore.case = TRUE)
-        n_excl_enr   <- sum(!keep_enr)
-        enrichr_sig  <- enrichr_sig[keep_enr, , drop = FALSE]
-        if (n_excl_enr > 0)
-          cat(sprintf("  [excl] removed %d EnrichR hits matching exclude_patterns.", n_excl_enr))
-      }
+      df <- df[!grepl(excl_rgx, df$ID, ignore.case = TRUE), ]
     }
-
-    if (nrow(phyper_sig) == 0) {
-      cat(sprintf("  → 0 phyper hits after exclusion filter, skipping bin."))
-      next
-    }
-
-    # Add normalized name columns for matching
-    phyper_sig$norm_name <- .norm_pw_name(phyper_sig$Pathway)
-
-    if (!enrichr_ok) {
-      # EnrichR was not run (use_enrichr = FALSE or connection failed) —
-      # label everything phyper_only, no consensus possible.
-      phyper_sig$source <- "phyper_only"
-      enr_only_df       <- data.frame()
-
-    } else if (nrow(enrichr_sig) > 0) {
-      enrichr_sig$norm_name <- .norm_pw_name(enrichr_sig$Pathway_enrichr)
-
-      # Tag each phyper hit as "consensus" or "phyper_only".
-      # NOTE: consensus requires both tests to hit the SAME pathway name after
-      # normalization.  Zero consensus is normal when phyper uses one database
-      # (e.g. KEGG from msigdbr, mouse symbols) and EnrichR hits a different
-      # database (e.g. Reactome or GO:BP) — those names will never match.
-      # To maximise consensus, either:
-      #   a) Pull all three databases into genesets (pull_genesets Reactome + GO:BP)
-      #      so phyper tests the same universe as EnrichR, OR
-      #   b) Query EnrichR with only the same collection as genesets (e.g. KEGG only).
-      phyper_sig$source <- ifelse(
-        phyper_sig$norm_name %in% enrichr_sig$norm_name,
-        "consensus", "phyper_only"
+    
+    filter_col <- if (use_padj) df$p.adjust else df$pvalue
+    sig_df     <- df[filter_col < p_thresh & df$Count >= min_overlap, ]
+    
+    if (nrow(sig_df) > 0) {
+      sig_df <- sig_df[order(sig_df$pvalue), ]
+      top_df <- head(sig_df, n_top)
+      
+      # Clean up table for output
+      top_df <- data.frame(
+        Bin           = bin,
+        Pathway       = top_df$ID,
+        pvalue        = top_df$pvalue,
+        p_adj         = top_df$p.adjust,
+        Overlap       = top_df$Count,
+        RichFactor    = round(top_df$RichFactor, 3),
+        Genes         = gsub("/", ";", top_df$geneID)
       )
-
-      # EnrichR-only hits (significant in EnrichR, not tested or not sig in phyper)
-      enr_only_names <- enrichr_sig$norm_name[
-        !enrichr_sig$norm_name %in% phyper_sig$norm_name
-      ]
-      enr_only_df <- enrichr_sig[enrichr_sig$norm_name %in% enr_only_names, , drop = FALSE]
-
-      n_consensus   <- sum(phyper_sig$source == "consensus")
-      n_phyper_only <- sum(phyper_sig$source == "phyper_only")
-      n_enr_only    <- nrow(enr_only_df)
-
-      cat(sprintf(
-        "\n    Consensus: %d | phyper-only: %d | EnrichR-only: %d",
-        n_consensus, n_phyper_only, n_enr_only))
-
-    } else {
-      # EnrichR ran but returned 0 significant hits for this bin
-      phyper_sig$source <- "phyper_only"
-      enr_only_df       <- data.frame()
-      cat("  EnrichR: 0 sig.")
-    }
-
-    # ── 2d. Build the combined ORA table for this bin ──────────────────────────
-    # Consensus and phyper-only both carry gene-level information (overlap genes)
-    # because phyper is computed against the local genesets.
-    # EnrichR-only rows are appended without gene lists (EnrichR doesn't return them).
-    combined_rows <- phyper_sig[, c("Pathway","Overlap","Pathway_size","Bin_genes",
-                                     "Overlap_genes","pvalue","pvalue_adj","source"),
-                                 drop = FALSE]
-
-    if (nrow(enr_only_df) > 0) {
-      enr_append <- data.frame(
-        Pathway       = enr_only_df$Pathway_enrichr,
-        Overlap       = NA_integer_,
-        Pathway_size  = NA_integer_,
-        Bin_genes     = n_bin,
-        Overlap_genes = NA_character_,
-        pvalue        = enr_only_df$pvalue_enrichr,
-        pvalue_adj    = enr_only_df$pvalue_adj_enrichr,
-        source        = "enrichr_only",
-        stringsAsFactors = FALSE
-      )
-      combined_rows <- rbind(combined_rows, enr_append)
-    }
-
-    # Sort: consensus first, then by raw p-value
-    source_order <- match(combined_rows$source,
-                          c("consensus","phyper_only","enrichr_only"))
-    combined_rows <- combined_rows[order(source_order, combined_rows$pvalue), ]
-
-    # Keep n_top rows, prioritising consensus
-    top_df        <- head(combined_rows, n_top)
-    ora_results[[bin]] <- top_df
-
-    n_conf_hit <- sum(top_df$source == "consensus", na.rm = TRUE)
-    cat(sprintf("  → Keeping top %d (%d consensus).\n",
-                nrow(top_df), n_conf_hit))
-
-    # ── 2e. Build phase-restricted gene sets (Option B: intersect only) ────────
-    # Only genes that co-peak in THIS bin AND belong to the pathway are kept.
-    # This guarantees all AUCell set members are co-phased → no cancellation.
-    for (i in seq_len(nrow(top_df))) {
-      pw <- top_df$Pathway[i]
-      # phyper rows carry gene lists; enrichr-only rows do not
-      if (!is.na(top_df$Overlap_genes[i]) && nchar(top_df$Overlap_genes[i]) > 0) {
-        ov_g <- strsplit(top_df$Overlap_genes[i], ";")[[1]]
-      } else if (!is.null(genesets[[pw]])) {
-        # Fallback: intersect local geneset with bin genes (e.g. enrichr-only hit
-        # whose pathway happens to be present under a different name in genesets)
-        ov_g <- intersect(genesets[[pw]], bin_genes)
-      } else {
-        next  # EnrichR-only with no local gene list — can't build a phase set
+      
+      ora_results[[bin]] <- top_df
+      
+      # Build Phase Sets
+      for (i in seq_len(nrow(top_df))) {
+        ov_g <- strsplit(top_df$Genes[i], ";")[[1]]
+        if (length(ov_g) >= 2) {
+          gs_name <- paste0(bin, "__", top_df$Pathway[i])
+          phase_gs[[gs_name]] <- ov_g
+        }
       }
-      if (length(ov_g) < 2L) next
-      gs_name             <- paste0(bin, "__", pw)
-      phase_gs[[gs_name]] <- ov_g
     }
   }
-
-  cat(sprintf("\n\nSummary:\n"))
-  cat(sprintf("  Bins with ≥1 enriched pathway : %d\n", length(ora_results)))
-  cat(sprintf("  Phase-restricted gene sets     : %d\n", length(phase_gs)))
-  if (length(phase_gs) > 0) {
-    sz <- lengths(phase_gs)
-    cat(sprintf("  Gene set sizes  min=%d  median=%g  max=%d\n",
-                min(sz), median(sz), max(sz)))
-    if (enrichr_ok) {
-      n_cons_sets <- sum(sapply(names(ora_results), function(b) {
-        sum(ora_results[[b]]$source == "consensus", na.rm = TRUE)
-      }))
-      cat(sprintf("  Consensus hits (phyper ∩ EnrichR): %d\n", n_cons_sets))
-    }
-  }
-
-  invisible(list(
-    bin_table   = T1_conf,
-    ora_results = ora_results,
-    phase_gs    = phase_gs
-  ))
+  
+  return(list(bin_table = T1_conf, ora_results = ora_results, phase_gs = phase_gs))
 }
+
 
 
 # ── 3. AUCell scoring ──────────────────────────────────────────────────────────
@@ -1129,7 +837,124 @@ write_pathway_results <- function(results, outpath, celltype = "") {
 }
 
 
-# ── 6. GRN time-series plot ──────────────────────────────────────────────────
+# ── 6. Hub-gene selection for GRN ────────────────────────────────────────────
+
+#' Select hub genes from a circadian gene pool using global co-expression degree
+#'
+#' Computes a gene × gene Pearson correlation matrix from standardised expression
+#' of ALL cells in the target cell type (pooled across all ZT time points).  The
+#' topology is stable because the gene pool consists of confirmed circadian
+#' oscillators — their pooled correlation is dominated by phase relationships and
+#' shared regulatory programmes.  Per-ZT dynamics are visualised separately by
+#' \code{plot_grn_timeseries()} using the selected hub genes as input.
+#'
+#' @param obj          Seurat (or SCE) object.
+#' @param gene_pool    Character vector: confident circadian genes + any clock
+#'                     genes to include even if not called circadian.
+#' @param target_ct    Cell type string matching \code{celltype_col}.
+#' @param celltype_col Metadata column name for cell type.
+#' @param use_norm     Use normalised expression slot (default TRUE).
+#' @param cor_thresh   Minimum |r| for an edge to count toward degree
+#'                     (default 0.30).
+#' @param p_thresh     Maximum p-value for an edge to count (default 0.05).
+#' @param hub_pct      Top fraction of genes by degree to call "hubs"
+#'                     (default 0.10 = top 10 \%).
+#' @param min_hub      Minimum number of hubs to return; threshold is relaxed
+#'                     automatically if too few pass \code{hub_pct}
+#'                     (default 5L).
+#'
+#' @return A named list:
+#'   \describe{
+#'     \item{$genes}{Character vector of genes actually used (present in data).}
+#'     \item{$cor_mat}{Symmetric gene × gene Pearson correlation matrix.}
+#'     \item{$adj_mat}{Logical adjacency matrix (TRUE = significant edge).}
+#'     \item{$degree}{Named integer vector: edge count per gene.}
+#'     \item{$hub_genes}{Character vector of hub gene names.}
+#'     \item{$n_cells}{Number of cells used for the correlation.}
+#'   }
+#' @export
+select_hub_genes <- function(
+    obj,
+    gene_pool,
+    target_ct,
+    celltype_col,
+    use_norm     = TRUE,
+    cor_thresh   = 0.30,
+    p_thresh     = 0.05,
+    hub_pct      = 0.10,
+    min_hub      = 5L
+) {
+  # ── 1. Extract expression for this cell type ─────────────────────────────────
+  meta     <- obj@meta.data
+  ct_mask  <- as.character(meta[[celltype_col]]) == target_ct
+  if (sum(ct_mask) < 10L)
+    stop(sprintf("select_hub_genes: only %d cells for '%s'", sum(ct_mask), target_ct))
+
+  expr_full <- .get_matrix(obj, use_normalized = use_norm)
+  g_avail   <- intersect(gene_pool, rownames(expr_full))
+  if (length(g_avail) < 5L)
+    stop(sprintf("select_hub_genes: only %d genes available in pool", length(g_avail)))
+
+  # Dense sub-matrix: genes × cells (for this cell type only, all ZT pooled)
+  expr_ct <- as.matrix(expr_full[g_avail, ct_mask, drop = FALSE])
+  rm(expr_full); gc(verbose = FALSE)
+
+  # ── 2. Standardise each gene (z-score across cells) ──────────────────────────
+  # t(scale(t(X))): scale() operates on columns, so we transpose, scale, transpose
+  expr_z <- t(scale(t(expr_ct)))
+  expr_z[!is.finite(expr_z)] <- 0   # constant genes → zero variance → 0
+
+  # Drop genes with zero variance after scaling (identical expression in all cells)
+  nonconst <- apply(expr_z, 1, function(x) any(x != 0))
+  expr_z   <- expr_z[nonconst, , drop = FALSE]
+  g_avail  <- rownames(expr_z)
+
+  n_cells  <- ncol(expr_z)
+  n_genes  <- nrow(expr_z)
+
+  message(sprintf("select_hub_genes: %d genes × %d cells for '%s'",
+                  n_genes, n_cells, target_ct))
+
+  # ── 3. N×N Pearson correlation matrix ────────────────────────────────────────
+  cor_mat        <- cor(t(expr_z), method = "pearson")
+  diag(cor_mat)  <- 0    # self-correlation not an edge
+
+  # ── 4. Significance: t-test approximation for Pearson r ──────────────────────
+  # t = r * sqrt((n-2) / (1-r^2));  df = n-2
+  t_stat <- cor_mat * sqrt((n_cells - 2L) / pmax(1 - cor_mat^2, 1e-10))
+  p_mat  <- 2 * pt(-abs(t_stat), df = n_cells - 2L)
+
+  # ── 5. Adjacency matrix ───────────────────────────────────────────────────────
+  adj_mat        <- (abs(cor_mat) > cor_thresh) & (p_mat < p_thresh)
+  diag(adj_mat)  <- FALSE
+
+  # ── 6. Degree per gene (number of significant edges) ─────────────────────────
+  degree <- rowSums(adj_mat)
+
+  # ── 7. Hub threshold: top hub_pct; relax if fewer than min_hub ───────────────
+  deg_thresh <- quantile(degree, 1 - hub_pct)
+  hub_genes  <- names(degree)[degree >= deg_thresh]
+
+  if (length(hub_genes) < min_hub) {
+    sorted_d   <- sort(degree, decreasing = TRUE)
+    deg_thresh <- sorted_d[min(min_hub, length(sorted_d))]
+    hub_genes  <- names(degree)[degree >= deg_thresh]
+  }
+
+  message(sprintf("  hub_pct=%.0f%%  threshold_degree=%d  hubs=%d / %d genes",
+                  hub_pct * 100, deg_thresh, length(hub_genes), n_genes))
+
+  list(
+    genes     = g_avail,
+    cor_mat   = cor_mat,
+    adj_mat   = adj_mat,
+    degree    = degree,
+    hub_genes = hub_genes,
+    n_cells   = n_cells
+  )
+}
+
+# ── 7. GRN time-series plot ──────────────────────────────────────────────────
 
 #' Plot GRN across ZT time points as a multi-panel figure
 #'

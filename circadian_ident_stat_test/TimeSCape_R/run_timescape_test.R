@@ -24,7 +24,7 @@ set.seed(123)
 
 # -- 1. PATHS ------------------------------------------------------------------
 
-base_dir <- "Z:\\selim_working_dir\\2025_sato_anestacia_circadian_rhythm\\r_pre_process\\TimeSCape_R_tes"
+base_dir <- "Z:\\selim_working_dir\\2025_sato_anestacia_circadian_rhythm_organized\\r_pre_process\\TimeSCape_R_tes"
 src_path  <- "C:\\Users\\selim\\Documentos\\vscode_working_dir\\single_cell_projects\\circadian_ident_stat_test\\TimeSCape_R\\R"
 out_dir   <- file.path(base_dir, "TimeSCape_output")
 
@@ -112,7 +112,7 @@ print(head(T1[conf_mask, c("Genes","Abs_Amp","Acrophase_24","pvalue","pvalue_cor
 # -- 6. GENE PLOTS + HEATMAP --------------------------------------------------
 # 6a. Interactive grid of top 6 confident genes
 top_n_show <- 6L
-sc_style   <- "dots"    # "dots" = jitter  |  "violin" = violin density
+sc_style   <- "violin"    # "dots" = jitter  |  "violin" = violin density
 
 if (length(conf_genes) > 0) {
   genes_to_show <- head(conf_genes, top_n_show)
@@ -162,6 +162,39 @@ generate_heatmap(
   outdir   = ct_dir
 )
 
+# 6c. Clock gene acrophase polar plot (single cell type)
+# Uses T1 already in memory — no re-running needed.
+#
+# ── Customisation options ────────────────────────────────────────────────────
+# gene_list (default NULL = built-in core clock genes):
+#   Pass a character vector to plot any genes instead of the clock set, e.g.:
+#     gene_list = c("Per2", "Nr1d1", "Dbp", "Tsc22d3", "Cxcr4")
+#
+# cell_group_rules (default NULL = built-in immune/tumour/structural bins):
+#   Pass a named list to define your own cell-type groupings, e.g.:
+#     cell_group_rules = list(
+#       "T cells"   = c("CD8+ T cells", "CD4+ T cells", "T-Reg cells"),
+#       "Myeloid"   = c("M1 macrophages", "M2 macrophages", "Monocytes"),
+#       "Stromal"   = c("Endothelial", "Fibroblasts"),
+#       "Malignant" = c("Tumor cells")
+#     )
+#   Cell types not matched by any rule are placed in "Other" automatically.
+# ─────────────────────────────────────────────────────────────────────────────
+cat("\nGenerating clock gene acrophase polar plot...\n")
+tryCatch(
+  plot_clock_acrophase(
+    results_list = stats::setNames(list(T1), focus_ct),
+    stage        = "test",
+    outfile      = file.path(ct_dir,
+                     paste0(focus_safe, "_clock_acrophase_test.png")),
+    dpi          = 300,
+    strict       = TRUE
+    # gene_list        = NULL   # NULL = core clock genes; or c("Per2", "Nr1d1", ...)
+    # cell_group_rules = NULL   # NULL = built-in bins;    or list("T cells" = c(...), ...)
+  ),
+  error = function(e) message("  Clock acrophase plot skipped: ", e$message)
+)
+
 # 6d. ── CUSTOM SINGLE-GENE EXPLORER ─────────────────────────────────────────
 # Run this block any time after Section 5 to inspect a specific gene.
 # Tweak the three sections below (gene, display, appearance) then run the block.
@@ -174,7 +207,7 @@ generate_heatmap(
 
 # ── GENE & DATA ───────────────────────────────────────────────────────────────
 explore_gene   <- "Per2"   # gene symbol to plot
-explore_violin <- FALSE    # FALSE = jitter dots  |  TRUE = violin density
+explore_violin <- TRUE    # FALSE = jitter dots  |  TRUE = violin density
 explore_sc     <- TRUE     # TRUE  = overlay single-cell data
 explore_save   <- TRUE     # TRUE  = save PNG to ct_dir
 
@@ -270,32 +303,18 @@ if (!explore_gene %in% T1$Genes) {
   }
 }
 
-# -- 7. PULL GENE SETS (KEGG + Reactome + GO:BP) ------------------------------
-# We pull THREE collections so that phyper and EnrichR test the SAME pathway
-# universe — this is what allows consensus hits.
-#
-# phyper uses these local msigdbr sets (mouse gene symbols, custom background).
-# EnrichR queries the matching databases on the server (human annotation).
-# Consensus = significant in both → highest confidence hits.
-#
-#   KEGG     CP:KEGG_LEGACY  ~186  curated metabolic / signalling pathways
-#   Reactome CP:REACTOME     ~1839 fine-grained pathway hierarchy (capped at 300 genes)
-#   GO:BP    GO:BP           ~7538 biological process terms  (dedup removes redundancy)
-#
-# After size + dedup filters expect ~2000–4000 total sets.
-# Total phyper runtime is still fast (pure R, no network).
-#
-# Required:  install.packages(c("msigdbr", "openxlsx"))
-#            BiocManager::install("AUCell")
-
-cat("\n-- Step 7: Pull gene sets (KEGG + Reactome + GO:BP) --\n")
+# =============================================================================
+# -- Step 7: Pull gene sets (KEGG + Reactome + GO:BP) --
+# =============================================================================
+# Using the local pull_genesets function (msigdbr wrapper)
+cat("\n-- Step 7: Pulling MSigDB gene sets --\n")
 
 gs_kegg <- pull_genesets(
   collection  = "C2",
   subcategory = "CP:KEGG_LEGACY",
   species     = "Mus musculus",
   min_size    = 10L,
-  max_size    = 500L,        # KEGG is non-redundant; keep full size range
+  max_size    = 500L,
   deduplicate = FALSE
 )
 cat(sprintf("  KEGG     : %d gene sets\n", length(gs_kegg)))
@@ -304,18 +323,12 @@ gs_reactome <- pull_genesets(
   collection  = "C2",
   subcategory = "CP:REACTOME",
   species     = "Mus musculus",
-  min_size    = 30L,         # 30 removes virus/disease-specific sets (ribosomal noise)
-                             # while keeping genuine immune, metabolic, and RNA pathways
-  max_size    = 500L,        # immune pathways are legitimately large
-  deduplicate = FALSE        # Reactome hierarchy is meaningful; keep sub-pathways
+  min_size    = 30L,
+  max_size    = 500L,
+  deduplicate = FALSE
 )
 cat(sprintf("  Reactome : %d gene sets\n", length(gs_reactome)))
 
-# GO:BP is very large (~7500 terms).  For CD8+ T cells most terms are irrelevant
-# (liver, neuronal, etc.), so we filter more aggressively:
-#   min_size = 20  — removes the most specific low-power terms (< 20 genes)
-#   max_size = 200 — removes terms so broad they match almost everything
-#   deduplicate    — drops POSITIVE/NEGATIVE_REGULATION_OF_X when X exists
 gs_gobp <- pull_genesets(
   collection  = "C5",
   subcategory = "GO:BP",
@@ -326,122 +339,94 @@ gs_gobp <- pull_genesets(
 )
 cat(sprintf("  GO:BP    : %d gene sets (after dedup)\n", length(gs_gobp)))
 
+# Combine all lists into one background set for clusterProfiler
 genesets <- c(gs_kegg, gs_reactome, gs_gobp)
 cat(sprintf("  Combined : %d gene sets total\n\n", length(genesets)))
 
-# -- 8. PHASE-BIN ENRICHMENT --------------------------------------------------
-# KEY IDEA: instead of scoring whole pathways, we:
-#   1. Bin confident circadian genes into narrow acrophase windows
-#   2. Run ORA per bin — which pathways are enriched in genes peaking at THIS phase?
-#      TWO methods run in parallel, now testing the SAME databases:
-#        a. phyper (hypergeometric): local msigdbr sets, custom tested-gene background
-#        b. EnrichR API: same collections (KEGG + Reactome + GO:BP), human annotation
-#      Consensus = significant in both → highest confidence.
-#      phyper_only / enrichr_only = found in one method only.
-#   3. Build PHASE-RESTRICTED gene sets = pathway genes INTERSECT bin genes
-#      -> every member co-peaks in the same window -> no cancellation in AUCell
-#
-# bin_width = 3 hr  -> one ZT interval per bin (8 bins for 8-ZT designs)
-# bin_width = 1 hr  -> tighter co-regulation windows (more bins, fewer genes each)
+
+# =============================================================================
+# -- Step 8: Phase-bin enrichment (Local clusterProfiler) --
+# =============================================================================
+# KEY IDEA: Instead of scoring whole pathways, we:
+#   1. Bin confident circadian genes into narrow acrophase windows (e.g., ZT2-4).
+#   2. Run ORA per bin using clusterProfiler to find time-specific biology.
+#   3. Build PHASE-RESTRICTED gene sets: pathway genes INTERSECT bin genes.
+#      This ensures all genes in the set co-peak, avoiding AUCell cancellation.
 
 cat(sprintf("\n-- Step 8: Phase-bin enrichment for '%s' --\n", focus_ct))
+
 phase_results <- phase_bin_analysis(
-  T1            = T1,
-  conf_mask     = conf_mask,
-  genesets      = genesets,
-  bin_width     = 3,      # hours; 3 = one ZT interval, 1 = tightest co-regulation
-  n_top         = 5L,     # top enriched pathways to keep per bin (consensus ranked first)
-  min_overlap   = 3L,     # min gene overlap for phyper ORA
-  min_bin_genes = 3L,     # min genes in a bin to attempt ORA
-  p_thresh      = 0.05,   # p-value threshold (applied to both phyper and EnrichR)
-  use_padj      = FALSE,  # FALSE = raw p (recommended: bins too small for BH correction)
-                          # TRUE  = BH-adjusted (only reliable with many conf. genes)
-  use_enrichr   = F,   # TRUE  = query EnrichR API for consensus validation
-                          # FALSE = phyper only (use when offline)
-  enrichr_dbs   = c(      # must match the collections pulled above
-    "KEGG_2026",
-    "Reactome_Pathways_2024",
-    "GO_Biological_Process_2025"
-  )
-  # exclude_patterns = NULL  (default — keep all ORA hits)
-  # Irrelevant pathways (viral, cardiac, neuronal) are filtered naturally by
-  # the cosinor in section 10: a pathway only survives if its phase-restricted
-  # AUCell score actually oscillates rhythmically in these cells.
+  T1               = T1,
+  conf_mask        = conf_mask,
+  genesets         = genesets,
+  bin_width        = 3,      # Recommended 2hr bins for robust ORA
+  n_top            = 20L,     # Top enriched pathways to keep per bin
+  min_overlap      = 3L,     # Minimum genes in overlap to count
+  min_bin_genes    = 3L,     # Minimum genes in a bin to attempt ORA
+  p_thresh         = 0.05,
+  use_padj         = FALSE,   # Using BH-correction (standard for clusterProfiler)
+  exclude_patterns = c( "VIRAL", "INFECTION") 
 )
 
-# Print enrichment summary (source column: consensus / phyper_only / enrichr_only)
-cat("\nEnriched pathways per phase bin:\n")
-for (bin in names(phase_results$ora_results)) {
-  df  <- phase_results$ora_results[[bin]]
-  for (i in seq_len(nrow(df))) {
-    cat(sprintf("  %s [%s]  %s\n", bin, df$source[i], df$Pathway[i]))
+# Print enrichment summary to console
+cat("\nTop Enriched pathways per phase bin (via clusterProfiler):\n")
+if (length(phase_results$ora_results) == 0) {
+  cat("  [!] No bins reached significance. Try increasing bin_width or lowering min_overlap.\n")
+} else {
+  for (bin in names(phase_results$ora_results)) {
+    df <- phase_results$ora_results[[bin]]
+    for (i in seq_len(nrow(df))) {
+      cat(sprintf("  %s | p=%.3g | Rich=%.2f | %s\n", 
+                  bin, df$pvalue[i], df$RichFactor[i], df$Pathway[i]))
+    }
   }
 }
 
-# Save ORA results to Excel (one sheet per bin + a Summary sheet)
-# source column: "consensus" = sig in both phyper AND EnrichR  (highest confidence)
-#                "phyper_only" = sig in phyper only (correct custom background)
-#                "enrichr_only" = sig in EnrichR only (genome-wide background)
-ora_xlsx <- file.path(out_dir, paste0(focus_safe, "_phase_bin_ORA.xlsx"))
+# ── Save ORA results to Excel ────────────────────────────────────────────────
+ora_xlsx <- file.path(ct_dir, paste0(focus_safe, "_phase_bin_enrich_ORA.xlsx"))
+
 if (requireNamespace("openxlsx", quietly = TRUE)) {
   wb <- openxlsx::createWorkbook()
-
-  # Color styles: consensus = green, phyper_only = yellow, enrichr_only = blue
-  style_consensus  <- openxlsx::createStyle(fgFill = "#C6EFCE")
-  style_phyper     <- openxlsx::createStyle(fgFill = "#FFEB9C")
-  style_enrichr    <- openxlsx::createStyle(fgFill = "#BDD7EE")
-  hdr_style        <- openxlsx::createStyle(
+  
+  # Styling
+  hdr_style <- openxlsx::createStyle(
     fontColour = "#FFFFFF", fgFill = "#2F4F8F",
     halign = "center", textDecoration = "bold")
-
-  # Summary sheet
-  all_rows <- do.call(rbind, lapply(names(phase_results$ora_results), function(b) {
-    df <- phase_results$ora_results[[b]]
-    cbind(Bin = b, df)
-  }))
-  openxlsx::addWorksheet(wb, "Summary")
-  openxlsx::writeData(wb, "Summary", all_rows, rowNames = FALSE)
-  openxlsx::setColWidths(wb, "Summary", cols = seq_len(ncol(all_rows)), widths = "auto")
-  openxlsx::addStyle(wb, "Summary", hdr_style, rows = 1L,
-                     cols = seq_len(ncol(all_rows)), gridExpand = TRUE)
-  # Color summary rows by source
-  for (ri in seq_len(nrow(all_rows))) {
-    sty <- switch(all_rows$source[ri],
-                  "consensus"    = style_consensus,
-                  "phyper_only"  = style_phyper,
-                  "enrichr_only" = style_enrichr,
-                  NULL)
-    if (!is.null(sty))
-      openxlsx::addStyle(wb, "Summary", sty, rows = ri + 1L,
-                         cols = seq_len(ncol(all_rows)),
-                         gridExpand = TRUE, stack = TRUE)
-  }
-
-  # Per-bin sheets
-  for (bin in names(phase_results$ora_results)) {
-    sname <- gsub("[^[:alnum:]_]", "_", bin)
-    df    <- phase_results$ora_results[[bin]]
-    openxlsx::addWorksheet(wb, sname)
-    openxlsx::writeData(wb, sname, df, rowNames = FALSE)
-    openxlsx::setColWidths(wb, sname, cols = seq_len(ncol(df)), widths = "auto")
-    openxlsx::addStyle(wb, sname, hdr_style, rows = 1L,
-                       cols = seq_len(ncol(df)), gridExpand = TRUE)
-    for (ri in seq_len(nrow(df))) {
-      sty <- switch(df$source[ri],
-                    "consensus"    = style_consensus,
-                    "phyper_only"  = style_phyper,
-                    "enrichr_only" = style_enrichr,
-                    NULL)
-      if (!is.null(sty))
-        openxlsx::addStyle(wb, sname, sty, rows = ri + 1L,
-                           cols = seq_len(ncol(df)),
-                           gridExpand = TRUE, stack = TRUE)
+  sig_style <- openxlsx::createStyle(fgFill = "#E8F0FE") # Light blue for hits
+  
+  # 1. Summary Sheet (All Bins combined)
+  if (length(phase_results$ora_results) > 0) {
+    all_rows <- do.call(rbind, phase_results$ora_results)
+    
+    openxlsx::addWorksheet(wb, "Summary")
+    openxlsx::writeData(wb, "Summary", all_rows, rowNames = FALSE)
+    openxlsx::setColWidths(wb, "Summary", cols = seq_len(ncol(all_rows)), widths = "auto")
+    openxlsx::addStyle(wb, "Summary", hdr_style, rows = 1, cols = seq_len(ncol(all_rows)))
+    
+    # 2. Per-Bin Individual Sheets
+    for (bin in names(phase_results$ora_results)) {
+      # Clean sheet name (Excel doesn't like ZT00-02 as a name sometimes)
+      sname <- gsub("[^[:alnum:]_]", "_", bin)
+      df    <- phase_results$ora_results[[bin]]
+      
+      openxlsx::addWorksheet(wb, sname)
+      openxlsx::writeData(wb, sname, df, rowNames = FALSE)
+      openxlsx::setColWidths(wb, sname, cols = seq_len(ncol(df)), widths = "auto")
+      openxlsx::addStyle(wb, sname, hdr_style, rows = 1, cols = seq_len(ncol(df)))
+      
+      # Highlight rows with high RichFactor
+      high_rich <- which(df$RichFactor > 0.5)
+      if (length(high_rich) > 0) {
+        openxlsx::addStyle(wb, sname, sig_style, rows = high_rich + 1, 
+                           cols = seq_len(ncol(df)), gridExpand = TRUE)
+      }
     }
+    
+    openxlsx::saveWorkbook(wb, ora_xlsx, overwrite = TRUE)
+    cat(sprintf("\n  [Success] ORA results saved -> %s\n", ora_xlsx))
+  } else {
+    cat("\n  [Skip] No Excel created (zero enriched bins).\n")
   }
-
-  openxlsx::saveWorkbook(wb, ora_xlsx, overwrite = TRUE)
-  cat(sprintf("  ORA results saved -> %s\n", ora_xlsx))
-  cat("  Color key: GREEN=consensus  YELLOW=phyper-only  BLUE=EnrichR-only\n")
 }
 
 # -- 9. AUCELL SCORING ON PHASE-RESTRICTED GENE SETS --------------------------
@@ -449,7 +434,7 @@ if (requireNamespace("openxlsx", quietly = TRUE)) {
 # All members oscillate in the same window -> AUCell score oscillates cleanly.
 # min_gs_size = 3 allows small sets from tight 1-hr bins.
 
-auc_cache_phase <- file.path(out_dir,
+auc_cache_phase <- file.path(ct_dir,
   "auc_matrix_phase_KEGG_Reactome_GOBP.rds")
 
 if (file.exists(auc_cache_phase)) {
@@ -470,6 +455,66 @@ if (file.exists(auc_cache_phase)) {
   saveRDS(auc_phase, auc_cache_phase)
   cat(sprintf("  Cached -> %s\n", auc_cache_phase))
 }
+
+# -- 9b. METHOD B: AUCell on FULL pathway gene sets (no phase restriction) -----
+# Method A (above) uses phase-restricted sets: pathway genes that co-peak in one
+# ZT bin.  Method B scores the *entire* pathway gene set and asks whether the
+# resulting activity score itself oscillates circadianly.
+#
+# Difference in interpretation:
+#   Method A -> which WINDOW of the pathway oscillates, and does it oscillate?
+#   Method B -> does the WHOLE pathway activity oscillate? (cancellation risk if
+#               genes in the set peak at opposite phases, but useful as a check)
+#
+# `genesets` is already built in Section 7 from pull_genesets().
+
+auc_cache_full <- file.path(ct_dir,
+  "auc_matrix_full_KEGG_Reactome_GOBP.rds")
+
+if (file.exists(auc_cache_full)) {
+  cat("\nLoading cached full-pathway AUC matrix (Method B)...\n")
+  auc_full <- readRDS(auc_cache_full)
+  cat(sprintf("  %d pathways x %d cells\n", nrow(auc_full), ncol(auc_full)))
+} else {
+  cat("\nScoring cells with AUCell on full pathway gene sets (Method B)...\n")
+  auc_full <- auc_score_cells(
+    obj          = data,
+    genesets     = genesets,      # full sets from Section 7
+    use_norm     = TRUE,
+    auc_max_rank = 0.05,
+    n_cores      = 1L,
+    min_gs_size  = 10L            # larger minimum — full sets should be bigger
+  )
+  saveRDS(auc_full, auc_cache_full)
+  cat(sprintf("  Cached -> %s\n", auc_cache_full))
+}
+
+# Circadian cosinor on full pathway scores
+cat(sprintf("\nRunning cosinor on full pathway scores (Method B) for '%s'...\n",
+            focus_ct))
+path_full <- pathway_cosinor(
+  auc_mat      = auc_full,
+  meta         = data@meta.data,
+  celltype_col = celltype_col,
+  zt_col       = zt_col,
+  tmeta        = tmeta,
+  target_ct    = focus_ct,
+  period12     = period12,
+  custom_zt    = custom_zt
+)
+
+conf_full <- path_full$stats[
+  path_full$stats$pvalue < 0.05 & path_full$stats$pvalue_corr < 0.05, ]
+cat(sprintf("  Confident full-pathway sets: %d / %d\n",
+            nrow(conf_full), nrow(path_full$stats)))
+cat("\nTop 10 (Method B):\n")
+print(head(conf_full[, c("Pathway","Abs_Amp","Acrophase_24","pvalue","pvalue_corr")], 10))
+
+# Write Excel
+xlsx_full <- file.path(ct_dir,
+  paste0(focus_safe, "_full_pathway_circadian.xlsx"))
+write_pathway_results(path_full, xlsx_full, celltype = focus_ct)
+cat(sprintf("  Results saved -> %s\n", xlsx_full))
 
 # -- 10. CIRCADIAN COSINOR ON PHASE-RESTRICTED SCORES -------------------------
 # Each row of auc_phase is "ZTa-b__PATHWAY" — the cosinor should recover the
@@ -496,15 +541,13 @@ cat("\nTop 10:\n")
 print(head(conf_phase[, c("Pathway","Abs_Amp","Acrophase_24","pvalue","pvalue_corr")], 10))
 
 # Write Excel (All + Confident sheets)
-xlsx_phase <- file.path(out_dir,
+xlsx_phase <- file.path(ct_dir,
   paste0(focus_safe, "_phase_pathway_circadian.xlsx"))
 write_pathway_results(path_phase, xlsx_phase, celltype = focus_ct)
 cat(sprintf("  Results saved -> %s\n", xlsx_phase))
 
 # 10a. Plot top 6 confident phase-pathway sets
 top_n_paths   <- 6L
-path_plot_dir <- file.path(out_dir, paste0(focus_safe, "_phase_pathway_plots"))
-if (!dir.exists(path_plot_dir)) dir.create(path_plot_dir, recursive = TRUE)
 
 if (nrow(conf_phase) > 0) {
   top_pw   <- head(conf_phase$Pathway, top_n_paths)
@@ -533,7 +576,7 @@ if (nrow(conf_phase) > 0) {
     grid_pw <- gridExtra::arrangeGrob(grobs = pw_plots, ncol = n_col)
     print(gridExtra::grid.arrange(grid_pw))
     ggplot2::ggsave(
-      filename = file.path(path_plot_dir,
+      filename = file.path(ct_dir,
                            paste0(focus_safe, "_top_phase_pathways_grid.png")),
       plot     = grid_pw,
       width    = 6*n_col, height = 5*n_row, dpi = 150, bg = "white"
@@ -554,137 +597,163 @@ save_batch_pathway_plots(
   n_top        = 20L,
   period12     = period12,
   use_violin   = TRUE,
-  outdir       = path_plot_dir
+  outdir       = ct_dir
 )
 
 # -- 11. GRN TIME SERIES ------------------------------------------------------
-# Gene selection:
-#   circ_genes    = top 1-3 confident genes globally by (Abs_Amp + Mesor)
-#                   -> strongest oscillators with highest baseline expression
-#                 + any core clock genes present in the confident list
-#                   -> always anchor the network with clock machinery if detected
-#   pathway_genes = all genes from confident phase-restricted sets (all bins)
-#                   -> full pathway biology across the 24-hr cycle
-#
-# Nodes:
-#   orange-red = top circadian / clock gene
-#   blue       = phase-restricted pathway gene
-#   purple     = both
-#
-# Required: install.packages(c("igraph","ggraph","cowplot"))
+# Approach:
+#   1. Build gene pool: confident circadian genes + core clock genes in data
+#   2. Compute N×N Pearson correlation on z-scored expression (ALL cells pooled)
+#      -> pooling is correct: genes are confirmed oscillators, their global
+#         correlation captures phase relationships + shared regulators
+#   3. Find hub genes = top hub_pct% by degree (number of significant edges)
+#   4a. Approach-A GRN: hub genes ∩ ORA-enriched oscillating pathway genes
+#   4b. Approach-B GRN: hub genes ∩ any oscillating pathway genes (conf_full)
+#   -> 5-10 focused nodes per network, time-varying edges via plot_grn_timeseries
 
-# -- Core clock gene list (mouse symbols) ------------------------------------
-clock_genes_ref <- c(
-  "Arntl", "Bmal1", "Clock", "Npas2",        # positive arm (BMAL1/CLOCK)
-  "Per1",  "Per2",  "Per3",                    # period genes
-  "Cry1",  "Cry2",                             # cryptochrome genes
-  "Nr1d1", "Nr1d2",                            # REV-ERB alpha/beta
-  "Rora",  "Rorb",  "Rorc",                   # ROR alpha/beta/gamma
-  "Dbp",   "Tef",   "Hlf",   "Nfil3",        # PAR/D-box TFs
-  "Ciart", "Bhlhe40", "Bhlhe41",              # DEC1/DEC2
-  "Timeless", "Csnk1d", "Csnk1e"             # CK1 delta/epsilon
+# ── Parameters ────────────────────────────────────────────────────────────────
+grn_cor_thresh     <- 0.30   # |r| threshold for an edge to count toward degree
+grn_p_thresh       <- 0.05   # p-value threshold for edges
+grn_hub_pct        <- 0.10   # top X% of genes by degree = hub genes
+grn_min_hub        <- 5L     # minimum hubs regardless of percentile
+grn_min_nodes      <- 3L     # minimum hub nodes in a pathway to build a GRN
+grn_node_size      <- 4
+grn_label_size     <- 4.5
+grn_edge_width_max <- 3.0
+grn_zt_title_size  <- 18
+grn_zt_hjust       <- 0.5
+
+# ── 1. Gene pool ──────────────────────────────────────────────────────────────
+grn_pool <- unique(c(
+  conf_genes,                                              # circadian identified
+  clock_genes_ref[clock_genes_ref %in% rownames(data)]    # clock genes in data
+))
+cat(sprintf("\n  [GRN] Gene pool: %d circadian + clock genes\n", length(grn_pool)))
+
+# ── 2-3. Hub selection via global co-expression degree ────────────────────────
+cat("  [GRN] Computing co-expression hub genes (pooled across all ZT)...\n")
+hub_result <- tryCatch(
+  select_hub_genes(
+    obj          = data,
+    gene_pool    = grn_pool,
+    target_ct    = focus_ct,
+    celltype_col = celltype_col,
+    use_norm     = TRUE,
+    cor_thresh   = grn_cor_thresh,
+    p_thresh     = grn_p_thresh,
+    hub_pct      = grn_hub_pct,
+    min_hub      = grn_min_hub
+  ),
+  error = function(e) { message("  [GRN] Hub selection failed: ", e$message); NULL }
 )
 
-# -- Top N per phase bin by (Abs_Amp + Mesor) ---------------------------------
-# Each active bin contributes its 1-3 strongest genes so every ZT window
-# has a representative in the network.
-top_per_bin   <- 3L      # 1-3 recommended
-T1_conf_all   <- T1[conf_mask, , drop = FALSE]
-T1_conf_grn   <- phase_results$bin_table   # same rows + phase_bin column
+if (!is.null(hub_result)) {
+  hub_genes  <- hub_result$hub_genes
+  hub_circ   <- hub_genes[hub_genes %in% conf_genes]
+  hub_clock  <- hub_genes[hub_genes %in% clock_genes_ref]
+  hub_unique <- setdiff(hub_genes, c(conf_genes, clock_genes_ref))
 
-bin_rep_genes <- character(0)
-for (bin in names(phase_results$ora_results)) {
-  bin_mask  <- as.character(T1_conf_grn$phase_bin) == bin
-  bin_genes <- T1_conf_grn$Genes[bin_mask]
-  bin_stats <- T1_conf_all[T1_conf_all$Genes %in% bin_genes, , drop = FALSE]
-  if (nrow(bin_stats) == 0) next
-  score  <- bin_stats$Abs_Amp + bin_stats$Mesor
-  top_g  <- bin_stats$Genes[order(-score)]
-  top_g  <- head(top_g, top_per_bin)
-  bin_rep_genes <- c(bin_rep_genes, top_g)
-  cat(sprintf("  [%s] top genes: %s\n", bin, paste(top_g, collapse = ", ")))
-}
-top_circ <- unique(bin_rep_genes)
-cat(sprintf("\n  Phase-bin representative genes: %d\n", length(top_circ)))
+  cat(sprintf("  [GRN] Hub genes: %d total\n", length(hub_genes)))
+  if (length(hub_circ)   > 0) cat(sprintf("    Circadian hubs : %s\n", paste(hub_circ,   collapse = ", ")))
+  if (length(hub_clock)  > 0) cat(sprintf("    Clock hubs     : %s\n", paste(hub_clock,  collapse = ", ")))
+  if (length(hub_unique) > 0) cat(sprintf("    Other hubs     : %s\n", paste(hub_unique, collapse = ", ")))
 
-# -- Clock genes present in the confident circadian set -----------------------
-clock_in_data <- conf_genes[conf_genes %in% clock_genes_ref]
-if (length(clock_in_data) > 0)
-  cat(sprintf("  Clock genes detected: %s\n",
-              paste(clock_in_data, collapse = ", ")))
-
-# Combined circ_genes: top oscillators + any clock genes
-circ_genes_grn <- unique(c(top_circ, clock_in_data))
-cat(sprintf("  Total circ_genes for GRN: %d\n", length(circ_genes_grn)))
-
-# -- One GRN per confident phase-restricted pathway ---------------------------
-# Each GRN contains:
-#   circ_genes    = top-3-per-bin representatives + clock genes (already built)
-#   pathway_genes = genes of THIS specific phase-restricted set
-# One network per pathway keeps the signal clean and comparable.
-
-# ── GRN APPEARANCE ────────────────────────────────────────────────────────────
-grn_node_size      <- 4       # node dot size
-grn_label_size     <- 4.5    # gene label font size (ggplot pts)
-grn_edge_width_max <- 3.0    # max edge line width (scaled by |r|)
-grn_zt_title_size  <- 18     # ZT panel title size (pts)
-grn_zt_hjust       <- 0.5    # 0 = left | 0.5 = centred | 1 = right
-grn_cor_thresh     <- 0.2    # min |r| to draw an edge
-grn_p_thresh       <- 0.05   # max p-value to draw an edge
-# ─────────────────────────────────────────────────────────────────────────────
-
-if (nrow(conf_phase) > 0) {
-  conf_gs_names <- conf_phase$Pathway
-  grn_keys <- names(phase_results$phase_gs)[
-    sapply(names(phase_results$phase_gs), function(k)
-      any(sapply(conf_gs_names, function(p) grepl(p, k, fixed = TRUE))))
-  ]
-} else {
-  grn_keys <- names(phase_results$phase_gs)
-}
-
-if (length(grn_keys) == 0) {
-  cat("  No confident phase-restricted sets for GRN.\n")
-} else {
-  cat(sprintf("\nBuilding GRN time series -- %d pathway(s)...\n", length(grn_keys)))
-  grn_dir <- file.path(ct_dir, paste0(focus_safe, "_GRN"))
-  if (!dir.exists(grn_dir)) dir.create(grn_dir, recursive = TRUE)
-
-  for (pw_key in grn_keys) {
-    pw_genes    <- phase_results$phase_gs[[pw_key]]
-    # Trim to 60 chars for filename only — plot title keeps the full name
-    pw_safe     <- substr(gsub("[^[:alnum:]_]", "_", pw_key), 1, 60)
-    grn_outfile <- file.path(grn_dir,
-      sprintf("%s_GRN_%s.png", focus_safe, pw_safe))
-
-    cat(sprintf("  [%s]  %d pathway genes\n", pw_key, length(pw_genes)))
-
-    grn_plot <- tryCatch(
-      plot_grn_timeseries(
-        obj            = data,
-        circ_genes     = circ_genes_grn,
-        pathway_genes  = pw_genes,
-        meta           = data@meta.data,
-        celltype_col   = celltype_col,
-        zt_col         = zt_col,
-        tmeta          = tmeta,
-        target_ct      = focus_ct,
-        cor_thresh     = grn_cor_thresh,
-        p_thresh       = grn_p_thresh,
-        use_norm       = TRUE,
-        outfile        = grn_outfile,
-        ncol           = NULL,
-        node_size      = grn_node_size,
-        label_size     = grn_label_size,
-        edge_width_max = grn_edge_width_max,
-        zt_title_size  = grn_zt_title_size,
-        zt_title_hjust = grn_zt_hjust
-      ),
-      error = function(e) {
-        message("  Skip GRN for ", pw_key, ": ", e$message)
-        NULL
-      }
-    )
+  # Helper: run one GRN per pathway list
+  .run_grn_batch <- function(osc_df, gs_list, grn_dir, label) {
+    if (nrow(osc_df) == 0) {
+      cat(sprintf("  [GRN %s] No oscillating pathways — skipped.\n", label)); return(invisible(NULL))
+    }
+    if (!dir.exists(grn_dir)) dir.create(grn_dir, recursive = TRUE)
+    pws     <- osc_df$Pathway[order(osc_df$pvalue_corr)]
+    n_built <- 0L
+    for (pw in pws) {
+      pw_genes  <- gs_list[[pw]]
+      grn_nodes <- intersect(hub_genes, pw_genes)
+      if (length(grn_nodes) < grn_min_nodes) next
+      pw_safe     <- substr(gsub("[^[:alnum:]_]", "_", pw), 1, 60)
+      grn_outfile <- file.path(grn_dir,
+        sprintf("%s_GRN_%s_%s.png", focus_safe, label, pw_safe))
+      cat(sprintf("  [GRN %s] %s  (%d hub nodes)\n", label, pw, length(grn_nodes)))
+      tryCatch(
+        plot_grn_timeseries(
+          obj            = data,
+          circ_genes     = grn_nodes,
+          pathway_genes  = character(0),
+          meta           = data@meta.data,
+          celltype_col   = celltype_col,
+          zt_col         = zt_col,
+          tmeta          = tmeta,
+          target_ct      = focus_ct,
+          cor_thresh     = grn_cor_thresh,
+          p_thresh       = grn_p_thresh,
+          use_norm       = TRUE,
+          outfile        = grn_outfile,
+          ncol           = NULL,
+          node_size      = grn_node_size,
+          label_size     = grn_label_size,
+          edge_width_max = grn_edge_width_max,
+          zt_title_size  = grn_zt_title_size,
+          zt_title_hjust = grn_zt_hjust
+        ),
+        error = function(e) message("    Skip GRN: ", e$message)
+      )
+      n_built <- n_built + 1L
+    }
+    cat(sprintf("  [GRN %s] %d GRN(s) saved -> %s\n", label, n_built, grn_dir))
   }
-  cat(sprintf("  GRN plots saved -> %s\n", grn_dir))
+
+  grn_base <- file.path(ct_dir, "04_GRN")
+
+  # ── 4a. Approach-A GRN: hub genes ∩ ORA-enriched oscillating pathways ────────
+  # Build genesets from the enriched pathway list (Section 7 genesets)
+  cat("\n  [GRN] Approach A (phase-restricted pathways)...\n")
+  # conf_phase comes from Section 10 (phase-restricted cosinor)
+  .run_grn_batch(
+    osc_df  = if (exists("conf_phase")) conf_phase else data.frame(),
+    gs_list = phase_results$phase_gs,
+    grn_dir = file.path(grn_base, "approach_A"),
+    label   = "A"
+  )
+
+  # ── 4b. Approach-B GRN: hub genes ∩ full-pathway oscillating pathways ─────────
+  cat("\n  [GRN] Approach B (full-pathway oscillating)...\n")
+  # Build named list from genesets (same as Section 7)
+  .run_grn_batch(
+    osc_df  = if (exists("conf_full")) conf_full else data.frame(),
+    gs_list = genesets,
+    grn_dir = file.path(grn_base, "approach_B"),
+    label   = "B"
+  )
 }
+
+
+# =============================================================================
+# POST-PROCESSING — Custom acrophase polar plots (run any time after Section 5)
+# =============================================================================
+# load_stage_results() reads all circadian_analysis_all.csv files from disk so
+# you can re-draw the polar plot without re-running the analysis.
+# Useful here for exploring gene sets with more than one cell type loaded.
+#
+# ── Step 1: load all cell types from the output directory ─────────────────────
+# clock_results_post <- load_stage_results(out_dir, period12 = period12)
+#
+# ── Step 2: inspect which confident genes appear across cell types ─────────────
+# all_genes <- sort(unique(unlist(lapply(clock_results_post,
+#   function(df) df$Genes[df$pvalue < 0.05 & df$pvalue_corr < 0.05]))))
+# head(all_genes, 30)
+#
+# ── Step 3: plot with custom gene list and cell-type grouping ─────────────────
+# plot_clock_acrophase(
+#   results_list     = clock_results_post,
+#   stage            = "test",
+#   outfile          = file.path(out_dir, "clock_acrophase_custom.png"),
+#   gene_list        = c("Per2", "Nr1d1", "Cry1", "Dbp", "Arntl"),
+#   cell_group_rules = list(
+#     "T cells"  = c("CD8+ T cells", "CD4+ T cells", "T-Reg cells"),
+#     "Myeloid"  = c("M1 macrophages", "M2 macrophages", "Monocytes", "DCs"),
+#     "Stromal"  = c("Endothelial", "Fibroblasts"),
+#     "Tumor"    = c("Tumor cells")
+#   ),
+#   strict = TRUE,
+#   dpi    = 300
+# )

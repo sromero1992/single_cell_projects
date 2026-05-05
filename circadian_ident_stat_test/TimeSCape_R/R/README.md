@@ -1,7 +1,7 @@
 # TimeSCape R — Function Reference
 
-This folder contains the four source files that make up the R pipeline.
-See `../README.md` for installation, setup, and full usage examples.
+Source files in this folder. See `../README.md` for installation,
+setup, and full usage examples.
 
 ---
 
@@ -9,10 +9,11 @@ See `../README.md` for installation, setup, and full usage examples.
 
 | File | Purpose |
 |------|---------|
-| `estimate_phaseR.R` | Core cosinor fitting for a single gene at one time |
-| `run_timescape.R` | Main pipeline — loops over cell types (and groups) |
+| `estimate_phaseR.R` | Core cosinor fitting for a single gene |
+| `run_timescape.R` | Gene-level pipeline — loops over cell types |
 | `generate_heatmap.R` | Reads CSVs and renders the z-score heatmap |
-| `plot_gene.R` | Single-gene plot + batch PNG export |
+| `plot_gene.R` | Single-gene plot (returns ggplot object) |
+| `pathway_circadian.R` | AUCell scoring + pathway cosinor + plots |
 
 ---
 
@@ -20,51 +21,42 @@ See `../README.md` for installation, setup, and full usage examples.
 
 ### `estimate_phaseR(Xg_zts, actual_times, period12, test_type)`
 
-Fits `A·cos(2π(t − φ)/T) + M` to single-cell expression data at multiple ZT
-time points and tests significance.
-
-**Arguments**
+Fits `A·cos(2π(t − φ)/T) + M` to single-cell expression data at multiple
+ZT time points and tests significance.
 
 | Argument | Type | Description |
 |----------|------|-------------|
-| `Xg_zts` | list of numeric vectors | One element per ZT time point, each holding all cell expression values at that time. Empty elements are skipped automatically. |
-| `actual_times` | numeric vector | True ZT hours matching each slot of `Xg_zts`. Works with missing time points — no imputation. |
-| `period12` | logical | `TRUE` = 12-hr period; `FALSE` = 24-hr. |
-| `test_type` | `"Ftest"` or `"LRT"` | Significance test. Use `"Ftest"` (matches MATLAB). |
+| `Xg_zts` | list of numeric vectors | One element per ZT; empty elements skipped |
+| `actual_times` | numeric vector | True ZT hours matching each slot |
+| `period12` | logical | `TRUE` = 12-hr; `FALSE` = 24-hr |
+| `test_type` | `"Ftest"` / `"LRT"` | Use `"Ftest"` (matches MATLAB) |
 
-**Returns** a named list:
+Returns a named list: `acrophase`, `amp`, `period`, `mesor`, `p_value`,
+`rho`, `p_value_macro`. Returns all `NA` on fit failure.
 
-| Name | Description |
-|------|-------------|
-| `acrophase` | Estimated peak time (hrs, within [0, period]) |
-| `amp` | Cosine amplitude (signed) |
-| `period` | Period used (12 or 24) |
-| `mesor` | Midline (mean expression level) |
-| `p_value` | F-test p-value |
-| `rho` | Pearson r between per-ZT means and fitted curve |
-| `p_value_macro` | p-value for that Pearson correlation |
+### `diagnose_phaseR(obj, celltype_col, zt_col, tmeta, target_ct, norm_str, n)`
 
-Returns all `NA` on fit failure (< 4 time points, or NLS non-convergence).
+Runs `estimate_phaseR` on `n` random genes and prints the raw output.
+Use to debug "0 genes tested" or all-NA results.
 
 ---
 
 ## `run_timescape.R`
 
-### `build_tmeta_from_seurat(seurat_obj, zt_col)`
+### `build_tmeta(obj, zt_col)` / `build_tmeta_from_seurat(obj, zt_col)`
 
-Parses unique ZT strings from a Seurat metadata column into numeric hours.
-Supports `"ZT00"`, `"ZT03"`, `"zt12"`, `"ZT_06"`, `"ZT 3"`, plain `"0"` …
-
+Parses unique ZT strings from a metadata column into numeric hours.
 Returns a `data.frame` with columns `zt_str` and `ZT_times`, sorted by hour.
-Inspect and edit `ZT_times` manually if auto-parsing fails.
+`build_tmeta_from_seurat` is a backward-compatible alias.
 
----
+### `run_timescape(obj, celltype_col, zt_col, tmeta, ...)`
 
-### `run_timescape(seurat_obj, ...)`
-
-Main analysis pipeline. Loops over cell types (and optionally a second group
-column), fits the cosinor model to every gene, applies BH correction, and
-writes 6 CSVs + optional heatmap per combination.
+Main gene-level pipeline. For each (cell type × group) combination:
+- Extracts and optionally re-normalises the expression submatrix
+- Fits cosinor model to every gene in parallel
+- Applies BH correction separately to F-test and correlation p-values
+- Writes six CSVs + optional heatmap to `outdir/{combo_name}/`
+- Returns a named list: `$T1` (stats) and `$T2` (per-ZT means)
 
 **Key arguments**
 
@@ -73,36 +65,14 @@ writes 6 CSVs + optional heatmap per combination.
 | `celltype_col` | `"cell_type"` | Metadata column for cell-type labels |
 | `zt_col` | `"ZT_str"` | Metadata column for ZT strings |
 | `tmeta` | `NULL` | Built automatically if NULL |
-| `norm_str` | `"lib_size"` | `"lib_size"` · `"seurat"` · `"none"` |
+| `norm_str` | `"lib_size"` | `"lib_size"` · `"logcounts"` · `"none"` |
 | `period12` | `FALSE` | 12-hr or 24-hr period |
-| `group_col` | `NULL` | Optional 2nd split variable (cancer stage, replicate …) |
-| `custom_group` | `NULL` | Restrict to specific group values |
+| `rm_low_conf` | `TRUE` | Write confident-only CSV subsets |
+| `plot_heat` | `FALSE` | Save heatmap PNG after each cell type |
+| `custom_celltype` | `NULL` | Restrict to specific cell types |
+| `group_col` | `NULL` | Optional 2nd split variable |
+| `n_workers` | `1L` | Parallel workers |
 | `outdir` | `getwd()` | Root output folder |
-
-**Normalization note** — `"lib_size"` normalises per-cell inside the loop so
-peak RAM equals one dense (cell_type × group) submatrix, not the full object.
-This is bit-for-bit identical to normalising the full matrix first because
-library-size is a per-cell operation.
-
-**Output directory structure**
-
-```
-outdir/
-  CellType/                          # no group_col
-  CellType_GroupValue/               # with group_col
-    CellType_period_24_circadian_analysis_all.csv
-    CellType_period_24_circadian_analysis_confident.csv
-    CellType_period_24_circadian_ZTs_mean.csv
-    CellType_period_24_circadian_ZTs_mean_normalized.csv
-    CellType_period_24_circadian_ZTs_mean_confident.csv
-    CellType_period_24_circadian_ZTs_mean_normalized_confident.csv
-    CellType_period_24_heatmap_strict.png
-  all_cell_types_period_24_summary_results.csv
-```
-
-**Returns** a named list keyed by `combo_name` (e.g. `"Hepatocytes"` or
-`"Hepatocytes_early"`), each element holding `$T1` (stats table) and `$T2`
-(per-ZT means).
 
 ---
 
@@ -110,9 +80,10 @@ outdir/
 
 ### `generate_heatmap(celltype, strict, custom_name, circ, period12, outdir, return_obj)`
 
-Reads the `*_circadian_analysis_all.csv` and `*_circadian_ZTs_mean.csv` files
-written by `run_timescape()`, filters genes, row-normalises (z-score), and
-renders a blue→white→red heatmap via `pheatmap`.
+Reads `*_circadian_analysis_all.csv` and `*_circadian_ZTs_mean.csv`,
+filters genes, row-normalises (z-score), and renders a blue→white→red
+heatmap via `pheatmap`. Genes sorted by acrophase then amplitude.
+Negative-amplitude rows are flipped before sorting.
 
 | Argument | Default | Notes |
 |----------|---------|-------|
@@ -122,10 +93,7 @@ renders a blue→white→red heatmap via `pheatmap`.
 | `circ` | `FALSE` | Restrict to classical circadian gene prefixes |
 | `period12` | `FALSE` | Read 12-hr or 24-hr files |
 | `outdir` | `getwd()` | Cell-type combo subdirectory (where CSVs live) |
-| `return_obj` | `FALSE` | If `TRUE`, return the pheatmap object for Shiny rendering |
-
-Genes are sorted by acrophase then amplitude. Negative-amplitude rows are
-flipped (amplitude → positive, acrophase shifted +12 h) before sorting.
+| `return_obj` | `FALSE` | If `TRUE`, return pheatmap object for Shiny rendering |
 
 ---
 
@@ -135,34 +103,71 @@ flipped (amplitude → positive, acrophase shifted +12 h) before sorting.
 
 Reads pre-computed CSVs and returns a `ggplot2` object showing:
 - Blue cosine fit line
-- Orange per-ZT mean ± markers
-- Dark-red dashed acrophase line (labelled on axis)
-- Optional single-cell overlay — violin or jitter scatter
+- Orange per-ZT mean markers
+- Dashed acrophase line (labelled on x-axis)
+- Optional single-cell overlay (violin or jitter)
 
-Does **not** re-run the analysis. Run `run_timescape()` first.
+Does **not** re-run the analysis. Requires `run_timescape()` to have been
+run first (reads CSVs from `outdir`).
 
 | Argument | Default | Notes |
 |----------|---------|-------|
 | `cust_cells` | — | Combo name matching directory/file prefix |
-| `cust_gene` | — | Gene name string |
+| `cust_gene` | — | Gene symbol string |
 | `print_scdata` | `FALSE` | Overlay individual cell expression |
 | `sce` | `NULL` | Seurat object — required when `print_scdata = TRUE` |
 | `use_violin` | `FALSE` | `TRUE` = violin; `FALSE` = jitter dots |
 | `outdir` | `getwd()` | Cell-type combo subdirectory |
 
-Returns a `ggplot2` object — add layers or pass to `ggsave()` freely.
+Returns a `ggplot2` object — add layers or pass directly to `ggsave()`.
 
 ---
 
-### `save_batch_plots(tmeta, cust_cells, plot_type, period12, outdir)`
+## `pathway_circadian.R`
 
-Loops over a filtered gene list and saves one PNG per gene.
+### `pull_genesets(collection, subcategory, species, min_size, max_size, deduplicate)`
 
-| `plot_type` | Gene set |
-|-------------|----------|
-| `1` | Confident (F-test AND corr p < 0.05) |
-| `2` | Non-confident |
-| `3` | Classical circadian gene prefixes |
+Downloads gene sets from MSigDB via `msigdbr` and returns a named list
+(pathway → character vector of gene symbols), filtered by size.
 
-PNGs are written to `outdir/{fbase}plots_confident/` (or `_non_confident/`,
-`_classic_circadian/`).
+### `auc_score_cells(obj, genesets, use_norm, auc_max_rank, n_cores, min_gs_size)`
+
+Scores all cells for all gene sets using `AUCell`. Ranks genes per cell
+once, then evaluates each gene set as a fast lookup. Returns a
+**pathways × cells** numeric matrix. Results are deterministic and
+cell-type-independent (per-cell ranking).
+
+| Argument | Default | Notes |
+|----------|---------|-------|
+| `obj` | — | Seurat object |
+| `genesets` | — | Named list from `pull_genesets()` or `msigdbr` |
+| `use_norm` | `TRUE` | Use `data` slot (normalised); `FALSE` = `counts` |
+| `auc_max_rank` | `0.05` | Top fraction of ranked genes used for AUC |
+| `n_cores` | `1L` | AUCell parallel cores |
+| `min_gs_size` | `5L` | Skip gene sets with fewer measured genes |
+
+### `pathway_cosinor(auc_mat, meta, celltype_col, zt_col, tmeta, target_ct, period12)`
+
+Fits the cosinor model to each row of `auc_mat` (pathway scores across
+cells of `target_ct`), averaging scores per ZT time point.
+Returns a list with `$stats` (one row per pathway, same columns as
+gene-level stats table) and `$score_mat` (ZT-averaged scores).
+
+> **Important**: `auc_mat` must have been scored on the **subsetted**
+> cells only (same cell type as `target_ct`). `meta` must match those
+> same cells. Passing the full-object metadata causes a subscript error.
+
+### `write_pathway_results(path_results, xlsx_path, celltype)`
+
+Writes two sheets to an Excel file: `All_Pathways` and
+`Confident_Pathways` (p < 0.05 and pvalue_corr < 0.05).
+
+### `plot_pathway_single(auc_mat, path_results, meta, celltype_col, zt_col, tmeta, target_ct, target_pathway, period12, use_violin)`
+
+Returns a `ggplot2` cosine-fit plot for one pathway (same style as
+`plot_gene_single`). Pass to `ggsave()` or include in a grid.
+
+### `save_batch_pathway_plots(auc_mat, path_results, meta, ..., n_top, outdir)`
+
+Saves one PNG per confident pathway (sorted by adjusted p-value).
+Filenames are trimmed to 60 characters to avoid Windows MAX_PATH issues.
