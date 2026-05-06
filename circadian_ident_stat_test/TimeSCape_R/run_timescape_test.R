@@ -100,6 +100,25 @@ key    <- names(results)[1]
 T1     <- results[[key]]$T1
 ct_dir <- file.path(out_dir, key)
 
+# ── Output subfolders (mirrors pipeline structure) ─────────────────────────────
+dir_gene <- file.path(ct_dir, "01_gene_circadian")   # gene plots, heatmap, ORA
+dir_pwA  <- file.path(ct_dir, "02_pathway_A")         # phase-bin ORA + AUCell A
+dir_pwB  <- file.path(ct_dir, "03_pathway_B")         # full-pathway AUCell B
+for (d in c(ct_dir, dir_gene, dir_pwA, dir_pwB))
+  if (!dir.exists(d)) dir.create(d, recursive = TRUE)
+
+# ── Core clock gene reference (used by GRN hub selection) ─────────────────────
+clock_genes_ref <- c(
+  "Arntl", "Bmal1", "Clock", "Npas2",        # positive arm
+  "Per1",  "Per2",  "Per3",                    # period genes
+  "Cry1",  "Cry2",                             # cryptochrome genes
+  "Nr1d1", "Nr1d2",                            # REV-ERB alpha/beta
+  "Rora",  "Rorb",  "Rorc",                   # ROR alpha/beta/gamma
+  "Dbp",   "Tef",   "Hlf",   "Nfil3",        # PAR/D-box TFs
+  "Ciart", "Bhlhe40", "Bhlhe41",              # DEC1/DEC2
+  "Timeless", "Csnk1d", "Csnk1e"             # CK1 delta/epsilon
+)
+
 conf_mask  <- T1$pvalue < 0.05 & T1$pvalue_corr < 0.05
 conf_genes <- T1$Genes[conf_mask]
 focus_safe <- gsub("[^[:alnum:]_]", "_", trimws(focus_ct))
@@ -142,7 +161,7 @@ if (length(conf_genes) > 0) {
     grid_p <- gridExtra::arrangeGrob(grobs = gene_plots, ncol = n_col)
     print(gridExtra::grid.arrange(grid_p))
     ggplot2::ggsave(
-      filename = file.path(ct_dir, paste0(key, "_top", top_n_show, "_genes.png")),
+      filename = file.path(dir_gene, paste0(key, "_top", top_n_show, "_genes.png")),
       plot     = grid_p,
       width    = 6*n_col, height = 5*n_row, dpi = 150, bg = "white"
     )
@@ -185,7 +204,7 @@ tryCatch(
   plot_clock_acrophase(
     results_list = stats::setNames(list(T1), focus_ct),
     stage        = "test",
-    outfile      = file.path(ct_dir,
+    outfile      = file.path(dir_gene,
                      paste0(focus_safe, "_clock_acrophase_test.png")),
     dpi          = 300,
     strict       = TRUE
@@ -238,7 +257,7 @@ if (!explore_gene %in% T1$Genes) {
     ifelse(explore_gene %in% conf_genes, "** CONFIDENT **", "(not significant)")
   ))
 
-  # NOTE: outdir = ct_dir is required — the function reads its input CSVs from
+  # NOTE: outdir = dir_gene is required — the function reads its input CSVs from
   # this folder. Passing NULL would break file.path() → "argument is of length zero".
   explore_plot <- tryCatch(
     plot_gene_single(
@@ -291,7 +310,7 @@ if (!explore_gene %in% T1$Genes) {
     suppressWarnings(print(explore_plot))
 
     if (explore_save) {
-      out_file <- file.path(ct_dir,
+      out_file <- file.path(dir_gene,
         sprintf("%s_%s_explorer.png", focus_safe, explore_gene))
       ggplot2::ggsave(out_file, explore_plot,
                       width = fig_width, height = fig_height,
@@ -383,7 +402,7 @@ if (length(phase_results$ora_results) == 0) {
 }
 
 # ── Save ORA results to Excel ────────────────────────────────────────────────
-ora_xlsx <- file.path(ct_dir, paste0(focus_safe, "_phase_bin_enrich_ORA.xlsx"))
+ora_xlsx <- file.path(dir_pwA, paste0(focus_safe, "_phase_bin_enrich_ORA.xlsx"))
 
 if (requireNamespace("openxlsx", quietly = TRUE)) {
   wb <- openxlsx::createWorkbook()
@@ -434,7 +453,7 @@ if (requireNamespace("openxlsx", quietly = TRUE)) {
 # All members oscillate in the same window -> AUCell score oscillates cleanly.
 # min_gs_size = 3 allows small sets from tight 1-hr bins.
 
-auc_cache_phase <- file.path(ct_dir,
+auc_cache_phase <- file.path(dir_pwA,
   "auc_matrix_phase_KEGG_Reactome_GOBP.rds")
 
 if (file.exists(auc_cache_phase)) {
@@ -468,7 +487,7 @@ if (file.exists(auc_cache_phase)) {
 #
 # `genesets` is already built in Section 7 from pull_genesets().
 
-auc_cache_full <- file.path(ct_dir,
+auc_cache_full <- file.path(dir_pwB,
   "auc_matrix_full_KEGG_Reactome_GOBP.rds")
 
 if (file.exists(auc_cache_full)) {
@@ -511,7 +530,7 @@ cat("\nTop 10 (Method B):\n")
 print(head(conf_full[, c("Pathway","Abs_Amp","Acrophase_24","pvalue","pvalue_corr")], 10))
 
 # Write Excel
-xlsx_full <- file.path(ct_dir,
+xlsx_full <- file.path(dir_pwB,
   paste0(focus_safe, "_full_pathway_circadian.xlsx"))
 write_pathway_results(path_full, xlsx_full, celltype = focus_ct)
 cat(sprintf("  Results saved -> %s\n", xlsx_full))
@@ -541,7 +560,7 @@ cat("\nTop 10:\n")
 print(head(conf_phase[, c("Pathway","Abs_Amp","Acrophase_24","pvalue","pvalue_corr")], 10))
 
 # Write Excel (All + Confident sheets)
-xlsx_phase <- file.path(ct_dir,
+xlsx_phase <- file.path(dir_pwA,
   paste0(focus_safe, "_phase_pathway_circadian.xlsx"))
 write_pathway_results(path_phase, xlsx_phase, celltype = focus_ct)
 cat(sprintf("  Results saved -> %s\n", xlsx_phase))
@@ -576,7 +595,7 @@ if (nrow(conf_phase) > 0) {
     grid_pw <- gridExtra::arrangeGrob(grobs = pw_plots, ncol = n_col)
     print(gridExtra::grid.arrange(grid_pw))
     ggplot2::ggsave(
-      filename = file.path(ct_dir,
+      filename = file.path(dir_pwA,
                            paste0(focus_safe, "_top_phase_pathways_grid.png")),
       plot     = grid_pw,
       width    = 6*n_col, height = 5*n_row, dpi = 150, bg = "white"
