@@ -1,0 +1,23 @@
+# QUBO differential co-expression — selected subnetwork
+# N selected genes: 20
+#
+Slc2a10
+Mecom
+Prdm16
+Eid2
+Spred3
+Sirt1
+Snx25
+Sap30
+Dand5
+Il17rd
+Ints9
+Bcl9l
+Sin3a
+Sap30l
+Mtmr4
+Smurf2
+Adam17
+Brms1l
+Sap130
+Ldlrad4

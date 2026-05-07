@@ -1,0 +1,23 @@
+# QUBO differential co-expression — selected subnetwork
+# N selected genes: 20
+#
+Vangl2
+Nr4a2
+Plcb1
+Wnt2b
+Invs
+Fzd9
+Tcf7l1
+Wnt5b
+Prkcg
+Nkd1
+Rora
+Tle6
+Camk2b
+Wnt5a
+Ppp3cc
+Ctnnd2
+Fzd6
+Prickle1
+Nr4a1
+Proc
