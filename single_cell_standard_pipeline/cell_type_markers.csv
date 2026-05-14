@@ -22,7 +22,9 @@ sub,Abs. colonocytes,Colonocytes,Alpi|Ces2c|Slc26a2|Ceacam1|Aqp8,3,Absorptive co
 sub,TA cells,Colonocytes,Mki67|Top2a|Birc5|Pcna|Stmn1,3,Transit-amplifying cells; actively cycling progenitors
 sub,Stem cells,Colonocytes,Lgr5|Lrig1|Ascl2|Slc12a2|Smoc2|Kcnq1|Gpx2|Ephb2|Bmpr1a|Hopx|Sox9,3,Intestinal stem cells at crypt base (CBC and reserve)
 sub,T cells (immune subset),T cells,Cd3e|Cd3d|Cd3g,2,Pan-T cells within the T cell cluster (to separate from NK and mast)
-sub,ILCs,T cells,Gata3,2,Innate lymphoid cells (group 2 ILCs); often co-cluster with T cells
+sub,ILC1,T cells,Tbx21|Il12rb2|Ifng,2,"ILC1; Tbx21+ innate lymphoid cells, IFNg-producing, Prf1-negative"
+sub,ILC2,T cells,Gata3|Il1rl1|Klrg1|Areg,2,"ILC2; Gata3-high innate lymphoid cells, type 2 cytokine producers"
+sub,ILC3,T cells,Rorc|Il22|Ncr1,2,"ILC3; Rorc+ innate lymphoid cells, IL-22-producing, NCR+ and NCR- subsets"
 sub,NK cells,T cells,Ncr1|Klrb1b,2,Natural killer cells; innate cytotoxic lymphocytes
 sub,Mast cells,T cells,Ms4a2|Cpa3,2,Mast cells; often appear in T cell broad clusters
 sub,CD4+ T cells,T cells,Cd4|Cd3e|Cd3d,2,Helper T cells; CD4-expressing conventional T cells
