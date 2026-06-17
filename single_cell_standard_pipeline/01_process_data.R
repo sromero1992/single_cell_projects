@@ -1,6 +1,6 @@
 # =============================================================================
 # scRNA-seq PIPELINE - SCRIPT 1: DATA PROCESSING ENGINE
-# Version: 9.0 (Generalized Pipeline)
+# Version: 10.0 (scDblFinder replaces DoubletFinder)
 #
 # PURPOSE:
 #   This script is the computational backbone of the single-cell RNA-seq
@@ -8,32 +8,43 @@
 #     1. Per-sample data loading from 10x Genomics H5 files
 #     2. Optional probe/custom feature integration (e.g., KO-target probes)
 #     3. Copy-number variation detection via SCEVAN (optional, per-sample)
-#            *** SCEVAN runs on RAW counts — no filtering before this step ***
-#     4. Ambient RNA correction via DecontX (optional, per-sample),
+#     4. Pre-merge QC (loose filters, per-sample)
+#     5. Ambient RNA correction via DecontX (optional, per-sample),
 #        with optional rounding of corrected counts to integers.
-#     5. Doublet detection + removal via DoubletFinder (per-sample),
+#     6. Doublet detection + removal via scDblFinder (per-sample),
 #        with a ROLLBACK SAFEGUARD: if the detected doublet fraction exceeds
 #        DOUBLET_ROLLBACK_THRESHOLD, removal is skipped for that sample.
-#     6. Pre-merge QC (loose filters, per-sample) — applied LAST so that QC
-#        metrics reflect the corrected, singlet-only matrix.
 #     7. Post-merge QC (stringent filters applied after merging all samples)
 #     8. Data normalization, dimensionality reduction, and batch-correction
 #        via Harmony, producing parallel (PCA vs. Harmony) clusterings.
 #     9. Saving a fully processed, un-annotated Seurat object for Script 02.
 #
 # PER-SAMPLE PROCESSING ORDER (STEP 2.1a):
-#   Load → [SCEVAN] → [DecontX] → DoubletFinder → Remove Doublets → Pre-QC
+#   Load → [SCEVAN] → [DecontX] → scDblFinder → Remove Doublets → Pre-QC
 #   → Checkpoint
 #   This order ensures that:
 #     - SCEVAN sees unmodified raw counts (best for CNA detection)
-#     - DoubletFinder operates on ambient-corrected counts
+#     - scDblFinder operates on ambient-corrected counts
 #     - Pre-merge QC metrics reflect the corrected, singlet-only matrix
 #     - Each checkpoint contains clean, singlet-only cells
+#
+# WHY scDblFinder INSTEAD OF DoubletFinder:
+#   scDblFinder (Germain et al. 2021, F1000Research) was independently
+#   benchmarked and found to outperform DoubletFinder in detection accuracy
+#   and speed. Key advantages:
+#     - No pK parameter tuning required (fully automatic)
+#     - Faster (gradient boosted trees on kNN features, not full PCA sweep)
+#     - Explicit recommendation: object should NOT have undergone stringent
+#       filtering before running (only empty-drop removal), which aligns with
+#       our light pre-QC strategy
+#     - Outputs a continuous doublet score AND a binary call
+#     - Iterative training removes known doublets from the training set,
+#       reducing classifier bias
 #
 # CHECKPOINT SYSTEM (dual-checkpoint per sample):
 #   Each sample produces two checkpoint .rds files inside SCEVAN_DIR/<SampleID>/:
 #     _scevan_processed.rds       — saved right after SCEVAN (Checkpoint 1)
-#     _decontx_dblt_processed.rds — saved after DecontX + DoubletFinder + Pre-QC
+#     _decontx_dblt_processed.rds — saved after DecontX + scDblFinder + Pre-QC
 #                                   (Checkpoint 2 — the file used for merging)
 #   On re-run, Checkpoint 2 is tried first (sample fully done → skip). If only
 #   Checkpoint 1 exists, SCEVAN is skipped and the pipeline resumes from
@@ -47,7 +58,7 @@
 # OUTPUT:
 #   - <PROJECT_NAME>_processed_for_annotation.rds  (main output for Script 02)
 #   - Diagnostic QC violin plots (before/after filtering)
-#   - Doublet pK-selection plots per sample (in SCEVAN_DIR/<SampleID>/)
+#   - Doublet score distribution plots per sample (in SCEVAN_DIR/<SampleID>/)
 #   - Doublet UMAP visualization per sample (in SCEVAN_DIR/<SampleID>/)
 #   - Doublet rollback summary Excel file
 #   - Harmony vs. No-Harmony UMAP comparison plots
@@ -65,12 +76,13 @@ library(dplyr)          # Data manipulation
 library(ggplot2)        # Publication-quality plotting
 library(patchwork)      # Combining multiple ggplot objects
 library(celda)          # DecontX for ambient RNA correction
-library(DoubletFinder)  # Doublet detection
+library(scDblFinder)    # Doublet detection (replaces DoubletFinder)
 library(writexl)        # Writing .xlsx outputs
 library(Matrix)         # Sparse matrix support
 library(SCEVAN)         # Copy-number variation analysis
 library(hdf5r)          # HDF5 file support
 library(BPCells)        # On-disk matrix handling for large datasets
+
 
 set.seed(123) # Set global random seed for full reproducibility
 
@@ -80,12 +92,13 @@ set.seed(123) # Set global random seed for full reproducibility
 
 # --- 1.1: Project Identity & Paths ---
 # PROJECT_NAME: A short alphanumeric tag for this study. Used to name output files.
-PROJECT_NAME <- "Nr4a1_Study17_Project"
+PROJECT_NAME <- "Nr4a1_s17_ack"
 
 # ROOT_PATH: The top-level working directory for this project.
 # All other paths below are derived from this one.
 #ROOT_PATH <- "Z:/selim_working_dir/2026_nr4a1_ack/r_process"   # Windows (RStudio local)
-ROOT_PATH <- "/mnt/SCDC/Optimus/selim_working_dir/2026_nr4a1_ack/r_process"  # Linux/HPC
+#ROOT_PATH <- "/mnt/SCDC/Optimus/selim_working_dir/2026_nr4a1_ack/r_process"  # Linux/HPC
+ROOT_PATH <- "/home/ssromerogon/2026_nr4a1_ack/r_process"
 
 # METADATA_FILE: Excel (.xlsx) file describing your samples.
 #
@@ -172,26 +185,31 @@ POST_MAX_UMIS           <- 100000 # Max UMI count. Similarly look at QC violins 
 POST_MAX_MT             <- 5.0   # Max mitochondrial %. Standard range: 5-20%.
 POST_MIN_CELLS_PER_GENE <- 15     # Genes expressed in fewer cells than this are removed.
 
-# --- 1.4: DoubletFinder Parameters ---
-# DOUBLET_RATE: Expected fraction of doublets. Use the 10x rule of thumb:
-#   ~0.8% per 1,000 cells loaded (e.g., 10,000 cells loaded -> 0.08).
-DOUBLET_RATE <- 0.08
+# --- 1.4: scDblFinder Parameters ---
+# scDblFinder (Germain et al. 2021) requires no manual pK tuning.
+# It automatically optimizes all parameters internally.
+#
+# DOUBLET_RATE: Expected fraction of doublets in each sample.
+#   Use the 10x rule of thumb: ~0.8% per 1,000 cells loaded.
+#   Example: 10,000 cells loaded → 0.08 (8%).
+#   Set to NULL to let scDblFinder estimate the rate automatically
+#   from the data (recommended when cell loading density is unknown).
+DOUBLET_RATE <- 0.16
 
-# pK Selection: DoubletFinder sweeps a range of pK values and picks the one
-# maximizing the BCmetric. The range below constrains the search to biologically
-# sensible values. The fallback is used if no valid pK is found in range.
-DF_PK_RANGE_MIN <- 0.005  # Minimum valid pK value
-DF_PK_RANGE_MAX <- 0.25   # Maximum valid pK value
-DF_PK_FALLBACK  <- 0.09   # Fallback pK if no valid value found in range
+# SCDBLFINDER_SCORE_THRESHOLD: Minimum doublet score to call a cell a doublet.
+#   scDblFinder outputs scores in [0,1] where 1 = most likely doublet.
+#   The default threshold is 0.5 (cells with score > 0.5 are called doublets).
+#   Lower to be more aggressive (catch more doublets, more false positives).
+#   Raise to be more conservative (fewer false positives, may miss real doublets).
+SCDBLFINDER_SCORE_THRESHOLD <- 0.5
 
 # DOUBLET_ROLLBACK_THRESHOLD: Safety mechanism.
-#   If DoubletFinder classifies MORE than this fraction of cells as doublets
-#   for a given sample, the result is suspicious (often a sign of bad pK
-#   selection or unusual data). In that case, doublet removal is ROLLED BACK
-#   for that sample (all cells kept), and a warning is issued.
-#   Rationale: a >14% doublet rate is biologically implausible for standard
-#   10x Genomics runs and most likely reflects a classification artifact.
-DOUBLET_ROLLBACK_THRESHOLD <- DF_PK_RANGE_MAX  # 14% maximum acceptable doublet fraction
+#   If scDblFinder classifies MORE than this fraction of cells as doublets
+#   for a given sample, the result is suspicious. In that case, doublet
+#   removal is ROLLED BACK for that sample (all cells kept) and a warning
+#   is issued. A >25% doublet rate is biologically implausible for standard
+#   10x runs and most likely reflects a classification artifact.
+DOUBLET_ROLLBACK_THRESHOLD <- 0.25
 
 # --- 1.5: Core Dimensionality Reduction & Clustering Parameters ---
 N_VARIABLE_FEATURES <- 2000  # Number of highly variable genes for PCA.
@@ -208,12 +226,12 @@ UMAP_MIN_DIST       <- 0.3   # UMAP: minimum distance between embedded points.
 # --- 1.6: Workflow Toggles ---
 RUN_DECONTX            <- TRUE  # Run DecontX ambient RNA correction (recommended for all runs).
 
-ROUND_DECONTX_COUNTS   <- FALSE # Round decontX corrected counts to nearest integer.
+ROUND_DECONTX_COUNTS   <- TRUE # Round decontX corrected counts to nearest integer.
                                  # DecontX produces non-integer (fractional) values by default.
                                  # Set TRUE if downstream tools require integer count matrices.
                                  # See decontX vignette for details.
 
-USE_BPCELLS            <- TRUE  # Use BPCells on-disk matrix handling (write_matrix_dir) during
+USE_BPCELLS            <- FALSE  # Use BPCells on-disk matrix handling (write_matrix_dir) during
                                  # the post-merge QC (Step 2.3) and integration (Step 2.4) steps.
                                  # Recommended for large cohorts (>8 samples) to prevent RAM
                                  # exhaustion. Set FALSE for small datasets or if the BPCells
@@ -268,7 +286,7 @@ if (!dir.exists(SCEVAN_DIR)) { dir.create(SCEVAN_DIR, recursive = TRUE) }
 #     2. Create Seurat object and attach metadata
 #     3. SCEVAN (if enabled) — run on raw counts before any correction
 #     4. DecontX (if enabled) — ambient RNA correction, with optional rounding
-#     5. DoubletFinder — per-sample doublet detection and removal
+#     5. scDblFinder — per-sample doublet detection and removal
 #     6. Pre-merge QC (loose filters) — applied on corrected, singlet-only counts
 #     7. Save checkpoint and free memory
 #
@@ -281,24 +299,24 @@ if (!dir.exists(SCEVAN_DIR)) { dir.create(SCEVAN_DIR, recursive = TRUE) }
 #       computation is never repeated.
 #
 #     Checkpoint 2 (_decontx_dblt_processed.rds):
-#       Saved after DecontX + DoubletFinder + Pre-QC. This is the FINAL
+#       Saved after DecontX + scDblFinder + Pre-QC. This is the FINAL
 #       per-sample checkpoint and the file loaded for the merge step (2.1b).
 #       It contains clean, singlet-only, ambient-corrected cells.
 #
 #   At the start of each iteration the loop checks:
 #     (a) If Checkpoint 2 exists  → sample fully processed, SKIP entirely.
 #     (b) If only Checkpoint 1 exists → load it, SKIP SCEVAN, run DecontX
-#         + DoubletFinder + Pre-QC, then save Checkpoint 2.
+#         + scDblFinder + Pre-QC, then save Checkpoint 2.
 #     (c) If neither exists → run the entire pipeline from scratch.
 #
-#   This means that if a run crashes mid-way through DecontX or DoubletFinder,
+#   This means that if a run crashes mid-way through DecontX or scDblFinder,
 #   the next run will resume from the SCEVAN result rather than starting over.
 #
 # MEMORY STRATEGY:
 #   Each sample object is removed from RAM and garbage-collected immediately
 #   after its checkpoint is written. Only one sample occupies memory at a time.
 # =============================================================================
-message("=== STEP 2.1a: Per-Sample Processing (SCEVAN → DecontX → DoubletFinder → Pre-QC → Checkpoint) ===")
+message("=== STEP 2.1a: Per-Sample Processing (SCEVAN → DecontX → scDblFinder → Pre-QC → Checkpoint) ===")
 metadata <- read.xlsx(METADATA_FILE)
 
 # Initialize rollback log (filled during loop, saved after)
@@ -323,7 +341,7 @@ for (i in 1:nrow(metadata)) {
   scevan_checkpoint_loaded <- FALSE
   if (file.exists(checkpoint_file_1)) {
     message(paste("  [CHECKPOINT-1] Loading SCEVAN checkpoint for", sample_id,
-                  "- will run DecontX + DoubletFinder + Pre-QC only."))
+                  "- will run DecontX + scDblFinder + Pre-QC only."))
     seurat_obj <- readRDS(checkpoint_file_1)
     scevan_checkpoint_loaded <- TRUE
   }
@@ -444,7 +462,7 @@ for (i in 1:nrow(metadata)) {
     }
 
     # ---- Save Checkpoint 1 (SCEVAN result) ---------------------------------
-    # Saved immediately after SCEVAN so that if DecontX or DoubletFinder crash
+    # Saved immediately after SCEVAN so that if DecontX or scDblFinder crash
     # later, the next run can resume from here and skip the expensive SCEVAN step.
     message("    -> Saving SCEVAN checkpoint (checkpoint 1)...")
     saveRDS(seurat_obj, file = checkpoint_file_1)
@@ -453,8 +471,19 @@ for (i in 1:nrow(metadata)) {
 
   } # end if (!scevan_checkpoint_loaded)
 
-  # ---- 5. Optional: DecontX ambient RNA correction -------------------------
-  # DecontX is run per-sample BEFORE doublet detection so that DoubletFinder
+  # ---- 5. Pre-merge QC: loose per-sample filters ---------------------------
+  # Applied BEFORE DecontX and doublet detection so that empty droplets and
+  # clearly dying cells are removed first, consistent with the recommendation
+  # in Germain et al. (scDblFinder): the object should not contain empty drops
+  # but should not otherwise have undergone very stringent filtering.
+  seurat_obj[["percent.mt"]] <- PercentageFeatureSet(seurat_obj, pattern = "^MT-|^mt-")
+  seurat_obj <- subset(seurat_obj,
+                       subset = nFeature_RNA >= PRE_MIN_GENES_PER_CELL &
+                                percent.mt   <= PRE_MAX_MT_PERCENT)
+  message(paste0("      -> Pre-merge QC: ", ncol(seurat_obj), " cells retained."))
+
+  # ---- 6. Optional: DecontX ambient RNA correction -------------------------
+  # DecontX is run per-sample BEFORE doublet detection so that scDblFinder
   # operates on counts free of ambient RNA contamination.
   if (RUN_DECONTX) {
     tryCatch({
@@ -491,151 +520,174 @@ for (i in 1:nrow(metadata)) {
     })
   }
 
-  # ---- 6. DoubletFinder: per-sample doublet detection and removal -----------
-  # DoubletFinder requires a temporary normalized + PCA-reduced object.
-  # We use a copy (seu_tmp) so the checkpoint contains only clean raw counts
-  # without transient normalized/scaled layers or reductions.
-  message(paste("    -> Running DoubletFinder for", sample_id, "..."))
-  seu_tmp <- seurat_obj
-
-  # Preliminary processing required by DoubletFinder
-  seu_tmp <- NormalizeData(seu_tmp, verbose = FALSE) %>%
-    FindVariableFeatures(verbose = FALSE) %>%
-    ScaleData(verbose = FALSE) %>%
-    RunPCA(npcs = N_PCS_TO_USE, verbose = FALSE)
-
-  # pK selection: find the pK that maximizes the BCmetric
-  sweep.res.list <- paramSweep(seu_tmp, PCs = 1:N_PCS_TO_USE, sct = FALSE)
-  sweep.stats    <- summarizeSweep(sweep.res.list, GT = FALSE)
-  bcmvn          <- find.pK(sweep.stats)
-  bcmvn$pK       <- as.numeric(as.character(bcmvn$pK))
-
-  # Identify the global BCmetric maximum
-  initial_pk <- bcmvn$pK[which.max(bcmvn$BCmetric)]
-
-  # Constrained pK selection: keep within biologically sensible range
-  if (initial_pk < DF_PK_RANGE_MIN || initial_pk > DF_PK_RANGE_MAX) {
-    in_range <- bcmvn[bcmvn$pK >= DF_PK_RANGE_MIN & bcmvn$pK <= DF_PK_RANGE_MAX, ]
-    if (nrow(in_range) > 0) {
-      final_pk <- in_range$pK[which.max(in_range$BCmetric)]
-      message(paste("      -> Global peak (", initial_pk,
-                    ") out of bounds. Using best in-range peak:", final_pk))
-    } else {
-      final_pk <- DF_PK_FALLBACK
-      message(paste("      -> No peaks in range. Using fallback:", final_pk))
-    }
-  } else {
-    final_pk <- initial_pk
-  }
-
-  # Save pK selection diagnostic plot to sample directory
-  pk_plot <- ggplot(bcmvn, aes(x = pK, y = BCmetric, group = 1)) +
-    geom_line() + geom_point() +
-    geom_vline(xintercept = final_pk, linetype = "dashed", color = "red") +
-    ggtitle(paste0("pK Finder: ", sample_id),
-            subtitle = paste0("Selected pK = ", final_pk,
-                              " | Initial optimal = ", initial_pk)) +
-    theme_minimal()
-  ggsave(file.path(sample_scevan_dir, paste0(sample_id, "_pk_plot.png")),
-         plot = pk_plot, width = 7, height = 5, dpi = DPI_SETTING)
-  rm(pk_plot)
-
-  # Run DoubletFinder
-  nExp_val <- round(ncol(seu_tmp) * DOUBLET_RATE)
-  seu_tmp  <- doubletFinder(seu_tmp, PCs = 1:N_PCS_TO_USE,
-                             pK = final_pk, nExp = nExp_val, sct = FALSE)
-  res_col  <- tail(grep("^DF.classifications", colnames(seu_tmp@meta.data), value = TRUE), 1)
-
-  # Rollback check: guard against biologically implausible doublet fractions
-  n_doublets       <- sum(seu_tmp@meta.data[[res_col]] == "Doublet")
-  doublet_fraction <- n_doublets / ncol(seu_tmp)
-
-  if (doublet_fraction > DOUBLET_ROLLBACK_THRESHOLD) {
-    warning(paste0(
-      "  [ROLLBACK] Sample '", sample_id, "': detected doublet fraction = ",
-      round(doublet_fraction * 100, 1), "% exceeds threshold of ",
-      round(DOUBLET_ROLLBACK_THRESHOLD * 100, 1), "%. ",
-      "Doublet removal SKIPPED for this sample (all cells treated as Singlets)."
-    ))
-    seurat_obj$Doublet_Status <- "Singlet"
-    rollback_log[[sample_id]] <- list(
-      fraction   = doublet_fraction,
-      n_doublets = n_doublets,
-      n_cells    = ncol(seu_tmp),
-      final_pk   = final_pk,
-      action     = "ROLLBACK_APPLIED"
-    )
-  } else {
-    # Transfer doublet labels from the temp object to the main object
-    doublet_labels <- seu_tmp@meta.data[[res_col]]
-    names(doublet_labels) <- colnames(seu_tmp)
-    seurat_obj$Doublet_Status <- doublet_labels[colnames(seurat_obj)]
-    rollback_log[[sample_id]] <- list(
-      fraction   = doublet_fraction,
-      n_doublets = n_doublets,
-      n_cells    = ncol(seu_tmp),
-      final_pk   = final_pk,
-      action     = "DOUBLETS_REMOVED"
-    )
-  }
-
-  message(paste0("      -> Doublet fraction: ",
-                 round(doublet_fraction * 100, 1), "% | pK used: ", final_pk,
-                 " | Action: ", rollback_log[[sample_id]]$action))
-
-  # Diagnostic UMAP: visualize doublets BEFORE removal (reuses PCA from DoubletFinder)
+  # ---- 7. scDblFinder: per-sample doublet detection and removal -------------
+  # scDblFinder (Germain et al. 2021, F1000Research doi:10.12688/f1000research.73600.2)
+  # operates directly on the raw SingleCellExperiment/Seurat counts — no manual
+  # pK tuning required. It generates between-cluster artificial doublets,
+  # builds a kNN graph, and trains an iterative gradient-boosted classifier.
+  #
+  # Key parameters used:
+  #   dbr       = DOUBLET_RATE         — expected doublet fraction (or NULL for auto)
+  #   clusters  = SCDBLFINDER_CLUSTERS — number of internal clusters (NULL = auto)
+  #   nIter     = SCDBLFINDER_ITER     — classifier training iterations (default 3)
+  #   score     = "xgb"                — gradient boosted trees (best accuracy)
+  #   artificialDoublets = NULL        — auto-calculated from cell count
+  #
+  # Per the paper: "the object should not contain empty drops, but should not
+  # otherwise have undergone very stringent filtering (which would bias the
+  # estimate of the doublet rate)." — consistent with our light pre-QC strategy.
+  message(paste("    -> Running scDblFinder for", sample_id, "..."))
   tryCatch({
-    seu_tmp <- RunUMAP(seu_tmp, dims = 1:N_PCS_TO_USE, verbose = FALSE,
-                       reduction.name = "umap_doublets")
-    p_dblt <- DimPlot(seu_tmp, reduction = "umap_doublets",
-                      group.by = res_col) +
-      coord_fixed() +
-      ggtitle(paste0("Doublets: ", sample_id),
-              subtitle = paste0(round(doublet_fraction * 100, 1), "% doublets | Action: ",
-                                rollback_log[[sample_id]]$action))
-    ggsave(file.path(sample_scevan_dir, paste0(sample_id, "_doublet_visualization.png")),
-           plot = p_dblt, width = 7, height = 6, dpi = DPI_SETTING, bg = "white")
-    rm(p_dblt)
+    # Convert to SingleCellExperiment for scDblFinder
+    sce_tmp <- as.SingleCellExperiment(seurat_obj)
+
+    # Run scDblFinder
+    # - dbr: expected doublet rate (NULL = auto-estimate from cell number)
+    # - clusters: NULL = auto-cluster internally (recommended)
+    # - nIter: 3 iterations gives best accuracy per benchmarking paper
+    # - score: "xgb" (gradient boosted trees on kNN features) outperforms
+    #          direct expression classification (prevents overfitting)
+    # - BPPARAM: SerialParam() ensures reproducibility (no parallel randomness)
+    sce_tmp <- scDblFinder(
+      sce_tmp,
+      dbr       = DOUBLET_RATE,
+      BPPARAM   = BiocParallel::SerialParam(RNGseed = 123),
+      verbose   = FALSE
+    )
+
+    # Extract doublet calls and scores into main Seurat object metadata
+    # scDblFinder adds two columns to colData:
+    #   scDblFinder.class — "singlet" or "doublet"
+    #   scDblFinder.score — continuous probability [0,1]; higher = more likely doublet
+    seurat_obj$scDblFinder_score  <- sce_tmp$scDblFinder.score
+    seurat_obj$scDblFinder_class  <- sce_tmp$scDblFinder.class
+
+    # Apply score threshold (allows fine-tuning beyond the default 0.5 binary call)
+    seurat_obj$Doublet_Status <- ifelse(
+      seurat_obj$scDblFinder_score >= SCDBLFINDER_SCORE_THRESHOLD,
+      "Doublet", "Singlet"
+    )
+
+    n_doublets       <- sum(seurat_obj$Doublet_Status == "Doublet")
+    doublet_fraction <- n_doublets / ncol(seurat_obj)
+
+    # Diagnostic score distribution plot (replaces pK plot from DoubletFinder)
+    tryCatch({
+      score_df <- data.frame(
+        score = seurat_obj$scDblFinder_score,
+        call  = seurat_obj$Doublet_Status
+      )
+      p_score <- ggplot(score_df, aes(x = score, fill = call)) +
+        geom_histogram(bins = 60, color = "black", linewidth = 0.2) +
+        geom_vline(xintercept = SCDBLFINDER_SCORE_THRESHOLD,
+                   linetype = "dashed", color = "red", linewidth = 0.8) +
+        scale_fill_manual(values = c("Singlet" = "#4393C3", "Doublet" = "#D6604D")) +
+        labs(
+          title    = paste0("scDblFinder Score Distribution: ", sample_id),
+          subtitle = paste0(round(doublet_fraction * 100, 1),
+                            "% doublets | threshold = ", SCDBLFINDER_SCORE_THRESHOLD),
+          x = "Doublet Score", y = "Cell Count", fill = "Call"
+        ) +
+        theme_minimal()
+      ggsave(
+        file.path(sample_scevan_dir, paste0(sample_id, "_scDblFinder_score_distribution.png")),
+        plot = p_score, width = 7, height = 5, dpi = DPI_SETTING
+      )
+      rm(p_score, score_df)
+    }, error = function(e) {
+      message(paste("      -> [WARNING] Score plot failed:", e$message))
+    })
+
+    # Rollback check: guard against biologically implausible doublet fractions
+    if (doublet_fraction > DOUBLET_ROLLBACK_THRESHOLD) {
+      warning(paste0(
+        "  [ROLLBACK] Sample '", sample_id, "': detected doublet fraction = ",
+        round(doublet_fraction * 100, 1), "% exceeds threshold of ",
+        round(DOUBLET_ROLLBACK_THRESHOLD * 100, 1), "%. ",
+        "Doublet removal SKIPPED for this sample (all cells treated as Singlets)."
+      ))
+      seurat_obj$Doublet_Status <- "Singlet"
+      rollback_log[[sample_id]] <- list(
+        fraction   = doublet_fraction,
+        n_doublets = n_doublets,
+        n_cells    = ncol(seurat_obj),
+        action     = "ROLLBACK_APPLIED"
+      )
+    } else {
+      rollback_log[[sample_id]] <- list(
+        fraction   = doublet_fraction,
+        n_doublets = n_doublets,
+        n_cells    = ncol(seurat_obj),
+        action     = "DOUBLETS_REMOVED"
+      )
+    }
+
+    message(paste0("      -> Doublet fraction: ",
+                   round(doublet_fraction * 100, 1), "% | Action: ",
+                   rollback_log[[sample_id]]$action))
+
+    # Diagnostic UMAP: visualize doublet scores before removal
+    tryCatch({
+      seu_tmp_umap <- seurat_obj
+      seu_tmp_umap <- NormalizeData(seu_tmp_umap, verbose = FALSE) %>%
+        FindVariableFeatures(verbose = FALSE) %>%
+        ScaleData(verbose = FALSE) %>%
+        RunPCA(npcs = min(30, ncol(seu_tmp_umap) - 1), verbose = FALSE) %>%
+        RunUMAP(dims = 1:min(30, ncol(seu_tmp_umap) - 1), verbose = FALSE,
+                reduction.name = "umap_doublets")
+      p_dblt <- FeaturePlot(seu_tmp_umap, features = "scDblFinder_score",
+                             reduction = "umap_doublets") +
+        coord_fixed() +
+        ggtitle(paste0("scDblFinder Score: ", sample_id),
+                subtitle = paste0(round(doublet_fraction * 100, 1),
+                                  "% doublets | Action: ",
+                                  rollback_log[[sample_id]]$action))
+      ggsave(
+        file.path(sample_scevan_dir, paste0(sample_id, "_doublet_visualization.png")),
+        plot = p_dblt, width = 7, height = 6, dpi = DPI_SETTING, bg = "white"
+      )
+      rm(p_dblt, seu_tmp_umap)
+    }, error = function(e) {
+      message(paste("      -> [WARNING] Doublet UMAP failed for", sample_id, ":", e$message))
+    })
+
+    # Remove doublets from main Seurat object
+    cells_before_dblt <- ncol(seurat_obj)
+    seurat_obj <- subset(seurat_obj, subset = Doublet_Status == "Singlet")
+    message(paste0("      -> Cells: ", cells_before_dblt, " -> ", ncol(seurat_obj),
+                   " (removed ", cells_before_dblt - ncol(seurat_obj), " doublets)"))
+
+    rm(sce_tmp, n_doublets, doublet_fraction, cells_before_dblt)
+    gc()
+
   }, error = function(e) {
-    message(paste("      -> [WARNING] Doublet UMAP failed for", sample_id, ":", e$message))
+    message(paste("    -> [WARNING] scDblFinder failed for", sample_id,
+                  "| Error:", e$message,
+                  "| Proceeding with no doublet removal for this sample."))
+    seurat_obj$Doublet_Status    <- "Singlet"
+    seurat_obj$scDblFinder_score <- NA_real_
+    seurat_obj$scDblFinder_class <- NA_character_
+    rollback_log[[sample_id]]    <- list(
+      fraction   = NA,
+      n_doublets = NA,
+      n_cells    = ncol(seurat_obj),
+      action     = "ERROR_SKIPPED"
+    )
   })
-
-  # Remove doublets from the main Seurat object
-  cells_before_dblt <- ncol(seurat_obj)
-  seurat_obj <- subset(seurat_obj, subset = Doublet_Status == "Singlet")
-  message(paste0("      -> Cells: ", cells_before_dblt, " -> ", ncol(seurat_obj),
-                 " (removed ", cells_before_dblt - ncol(seurat_obj), " doublets)"))
-
-  # Clean up DoubletFinder temporary objects
-  rm(seu_tmp, sweep.res.list, sweep.stats, bcmvn)
-  rm(list = intersect(c("doublet_labels", "in_range", "nExp_val",
-                         "n_doublets", "doublet_fraction", "initial_pk",
-                         "final_pk", "res_col", "cells_before_dblt"), ls()))
-  gc()
-
-  # ---- 7. Pre-merge QC: loose per-sample filters ---------------------------
-  # Applied after DecontX and doublet removal so QC metrics reflect the
-  # corrected, singlet-only count matrix. Removes empty droplets and
-  # clearly dying cells before merging.
-  seurat_obj[["percent.mt"]] <- PercentageFeatureSet(seurat_obj, pattern = "^MT-|^mt-")
-  seurat_obj <- subset(seurat_obj,
-                       subset = nFeature_RNA >= PRE_MIN_GENES_PER_CELL &
-                                percent.mt   <= PRE_MAX_MT_PERCENT)
-  message(paste0("      -> Pre-merge QC: ", ncol(seurat_obj), " cells retained."))
 
   # ---- 8. Save Checkpoint 2 (decontX + doublets + QC) and free memory ------
   # This is the FINAL per-sample checkpoint. It contains clean, singlet-only,
   # ambient-corrected cells and is the file that Step 2.1b will load for merging.
   # Saving here means a crash AFTER this point (e.g., during merge) will not
-  # require re-running DecontX or DoubletFinder on the next attempt.
-  message("    -> Saving full checkpoint (decontX + doublets + QC) and releasing memory...")
+  # require re-running DecontX or scDblFinder on the next attempt.
+  message("    -> Saving full checkpoint (decontX + scDblFinder + QC) and releasing memory...")
   saveRDS(seurat_obj, file = checkpoint_file_2)
   rm(seurat_obj)
   gc()
   message(paste("  [DONE]", sample_id, "- checkpoint 2 saved, memory freed."))
 }
 
-# --- Save DoubletFinder rollback summary (covers all processed samples) ------
+# --- Save scDblFinder rollback summary (covers all processed samples) --------
 if (length(rollback_log) > 0) {
   rollback_df <- do.call(rbind, lapply(names(rollback_log), function(s) {
     data.frame(
@@ -644,13 +696,13 @@ if (length(rollback_log) > 0) {
       N_Doublets_Flagged = rollback_log[[s]]$n_doublets,
       Doublet_Fraction   = round(rollback_log[[s]]$fraction * 100, 2),
       Threshold_Pct      = DOUBLET_ROLLBACK_THRESHOLD * 100,
-      pK_Used            = rollback_log[[s]]$final_pk,
+      Score_Threshold    = SCDBLFINDER_SCORE_THRESHOLD,
       Action             = rollback_log[[s]]$action,
       stringsAsFactors   = FALSE
     )
   }))
-  write_xlsx(rollback_df, file.path(OUTPUT_DIR, "doublet_finder_rollback_log.xlsx"))
-  message("  Doublet summary saved to: doublet_finder_rollback_log.xlsx")
+  write_xlsx(rollback_df, file.path(OUTPUT_DIR, "scDblFinder_rollback_log.xlsx"))
+  message("  Doublet summary saved to: scDblFinder_rollback_log.xlsx")
 }
 
 # =============================================================================
@@ -674,17 +726,17 @@ for (i in 1:nrow(metadata)) {
   checkpoint_file_1 <- file.path(sample_scevan_dir, paste0(sample_id, "_scevan_processed.rds"))
 
   if (file.exists(checkpoint_file_2)) {
-    # Normal case: full checkpoint (decontX + doublets + QC) is present.
-    message(paste("  [LOAD]", sample_id, "(checkpoint 2 — decontX + doublets + QC)"))
+    # Normal case: full checkpoint (decontX + scDblFinder + QC) is present.
+    message(paste("  [LOAD]", sample_id, "(checkpoint 2 — decontX + scDblFinder + QC)"))
     seurat_objects_list[[sample_id]] <- readRDS(checkpoint_file_2)
   } else if (file.exists(checkpoint_file_1)) {
     # Fallback: only the SCEVAN checkpoint exists (e.g., pipeline from a
     # previous version, or Step 2.1a crashed before saving checkpoint 2).
-    # NOTE: this object has NOT had DecontX or DoubletFinder applied — re-run
+    # NOTE: this object has NOT had DecontX or scDblFinder applied — re-run
     # Step 2.1a first to produce the complete checkpoint 2 before merging.
     warning(paste0(
       "  [FALLBACK] Sample '", sample_id, "': only SCEVAN checkpoint found. ",
-      "DecontX and DoubletFinder may NOT have been applied. ",
+      "DecontX and scDblFinder may NOT have been applied. ",
       "Re-run Step 2.1a to generate the full checkpoint before proceeding."
     ))
     seurat_objects_list[[sample_id]] <- readRDS(checkpoint_file_1)
@@ -961,3 +1013,4 @@ message(paste0(
 # Load if needed:
 # output_rds <- file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_processed_for_annotation.rds"))
 # data <- readRDS(output_rds)
+

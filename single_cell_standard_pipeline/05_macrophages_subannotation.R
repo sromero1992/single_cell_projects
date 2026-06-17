@@ -1,5 +1,5 @@
 # =============================================================================
-# scRNA-seq PIPELINE - SCRIPT 3: T CELL SUB-ANNOTATION
+# scRNA-seq PIPELINE - SCRIPT 5: Macrophages CELL SUB-ANNOTATION
 # Version: 1.0 (CSV-Driven, Seurat Wrappers, Harmony + Standard Clustering)
 #
 # PURPOSE:
@@ -53,7 +53,7 @@ set.seed(123)
 # --- 1.1: Project Paths (must match Scripts 01 and 02) -----------------------
 PROJECT_NAME <- "Nr4a1_s17_ack"
 ROOT_PATH <- "/home/ssromerogon/2026_nr4a1_ack/r_process"
-ROOT_PATH   <- "Z:/selim_working_dir/2026_nr4a1_ack/r_process"  # Windows
+#ROOT_PATH   <- "Z:/selim_working_dir/2026_nr4a1_ack/r_process"  # Windows
 
 OUTPUT_DIR       <- file.path(ROOT_PATH, "seurat_output")
 MAIN_RDS         <- file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_final_annotated.rds"))
@@ -61,12 +61,12 @@ MARKERS_CSV_FILE <- file.path(ROOT_PATH, "cell_type_markers.csv")
 
 # --- 1.2: Target Cell Type ---------------------------------------------------
 # Must exactly match a label in the broad_cell_types / CellType column from 02.
-PARENT_CELL_TYPE <- "T cells"
+PARENT_CELL_TYPE <- "Macrophages"
 
 # --- 1.3: Sub-Clustering Parameters ------------------------------------------
 SUBCLUSTER_N_HVG       <- 2000   # HVGs for sub-clustering PCA
 SUBCLUSTER_N_PCS       <- 50     # PCs used for kNN graph
-SUBCLUSTER_K_NEIGHBORS <- 15     # k for kNN
+SUBCLUSTER_K_NEIGHBORS <- 30     # k for kNN
 SUBCLUSTER_MIN_DIST    <- 0.2    # UMAP min.dist
 # Resolution: set to NULL to read from CSV (subcluster_resolution column),
 # or override with a number here.
@@ -111,17 +111,7 @@ parse_markers <- function(marker_string) {
 }
 
 # Default fallback sub-markers for T cells (used if CSV has no "T cells" sub rows)
-DEFAULT_SUB_MARKERS <- list(
-  "CD4+ T cells"     = c("Cd4", "Cd40lg", "Il7r", "Izumo1r"),
-  "CD8+ T cells"     = c("Cd8a", "Cd8b1", "Gzmb", "Gzma", "Nkg7"),
-  "Tregs"            = c("Foxp3", "Il2ra", "Ikzf2", "Ctla4", "Tigit"),
-  "NK cells"         = c("Ncr1", "Klrb1c", "Nkg7", "Klrd1", "Xcl1"),
-  "NKT cells"        = c("Cd3e", "Klrb1c", "Cd8a"),
-  "γδ T cells"        = c("Trdc", "Trgc1", "Trgc2"),
-  "Exhausted T"      = c("Pdcd1", "Lag3", "Havcr2", "Tigit", "Entpd1"),
-  "ILC2s"            = c("Il1rl1", "Gata3", "Il13", "Il5")
-)
-
+DEFAULT_SUB_MARKERS <-NULL
 SUB_MARKERS_LIST    <- DEFAULT_SUB_MARKERS
 sub_dotplot_markers <- unique(unlist(SUB_MARKERS_LIST))
 SUBCLUSTER_RESOLUTION_FINAL <- if (!is.null(SUBCLUSTER_RESOLUTION)) SUBCLUSTER_RESOLUTION else 1.5
@@ -264,9 +254,21 @@ if (!"CellType" %in% colnames(data@meta.data)) {
   }
 }
 
+# Rename cDCs to Macrophages in both CellType layers so extraction works
+data$CellType <- as.character(data$CellType)
+data$broad_cell_types <- as.character(data$broad_cell_types)
+
+data$CellType[data$CellType == "cDCs"] <- "Macrophages"
+data$broad_cell_types[data$broad_cell_types == "cDCs"] <- "Macrophages"
+
+# Verify
+table(data$CellType == "Macrophages")
+
+PARENT_CELL_TYPE <- "Macrophages"
+
 n_parent <- sum(data@meta.data$CellType == PARENT_CELL_TYPE, na.rm = TRUE)
 if (n_parent < 50) stop(paste("[ERROR] Only", n_parent, PARENT_CELL_TYPE,
-                               "cells found. Check that PARENT_CELL_TYPE matches exactly."))
+                              "cells found. Check that PARENT_CELL_TYPE matches exactly."))
 message(paste("  Found", n_parent, PARENT_CELL_TYPE, "cells for sub-clustering."))
 
 data_sub <- process_and_extract_cell_type(
@@ -286,7 +288,7 @@ p_harm_comp <- (
 ) + (
   DimPlot(data_sub, reduction = "umap_harmony", group.by = "SampleID") + ggtitle("Harmony Corrected")
 ) & theme(legend.position = "bottom")
-ggsave(file.path(OUTPUT_DIR, paste0("SUBCLUSTER_01_Harmony_comparison_T_cells.png")),
+ggsave(file.path(OUTPUT_DIR, paste0("SUBCLUSTER_01_Harmony_comparison_Macrophages.png")),
        p_harm_comp, width = 16, height = 8, dpi = DPI_SETTING)
 
 # --- 4.2: Cluster UMAPs (annotate from these) ---
@@ -295,9 +297,9 @@ p_clust_none <- DimPlot(data_sub, reduction = "umap_none",    group.by = "cluste
 p_clust_harm <- DimPlot(data_sub, reduction = "umap_harmony", group.by = "clusters_harmony",
                          label = TRUE) + NoLegend() + ggtitle("Clusters: Harmony")
 p_clust_comp <- p_clust_none + p_clust_harm
-ggsave(file.path(OUTPUT_DIR, "SUBCLUSTER_02_COMPARE_UMAP_T_cells.png"),
+ggsave(file.path(OUTPUT_DIR, "SUBCLUSTER_02_COMPARE_UMAP_Macrophages.png"),
        p_clust_comp, width = 16, height = 8, dpi = DPI_SETTING)
-ggsave(file.path(OUTPUT_DIR, "SUBCLUSTER_02_ANNOTATE_THIS_UMAP_T_cells.png"),
+ggsave(file.path(OUTPUT_DIR, "SUBCLUSTER_02_ANNOTATE_THIS_UMAP_Macrophages.png"),
        p_clust_harm, width = 10, height = 8, dpi = DPI_SETTING)
 
 # --- 4.3: DotPlot for cluster characterization ---
@@ -305,7 +307,7 @@ p_dot_sub <- DotPlot(data_sub, features = sub_dotplot_markers,
                       group.by = "clusters_harmony", dot.min = 0.05, cols = "RdBu") +
   theme(axis.text.x = element_text(angle = 55, hjust = 1, size = 11),  cluster.idents = T) +
   ggtitle(paste("Sub-Cluster Markers:", PARENT_CELL_TYPE))
-ggsave(file.path(OUTPUT_DIR, "SUBCLUSTER_02_ANNOTATE_USING_THIS_DOTPLOT_T_cells.png"),
+ggsave(file.path(OUTPUT_DIR, "SUBCLUSTER_02_ANNOTATE_USING_THIS_DOTPLOT_Macrophages.png"),
        p_dot_sub, width = 14, height = 9, dpi = DPI_SETTING, bg = "white")
 
 # =============================================================================
@@ -332,9 +334,9 @@ data_sub$sub_weighted_raw <- sub_results_raw$annotation_vector
 message("\n--- Sub-cluster Pre-scoring Top-5 Report (standardized) ---")
 print(sub_results_std$top5_report)
 write_xlsx(sub_results_std$top5_report,
-           file.path(OUTPUT_DIR, "SUBCLUSTER_PRESCORE_top5_T_cells_std.xlsx"))
+           file.path(OUTPUT_DIR, "SUBCLUSTER_PRESCORE_top5_Macrophages_std.xlsx"))
 write_xlsx(sub_results_raw$top5_report,
-           file.path(OUTPUT_DIR, "SUBCLUSTER_PRESCORE_top5_T_cells_raw.xlsx"))
+           file.path(OUTPUT_DIR, "SUBCLUSTER_PRESCORE_top5_Macrophages_raw.xlsx"))
 
 p_prescore <- (
   DimPlot(data_sub, reduction = "umap_harmony", group.by = "sub_weighted_std",
@@ -343,7 +345,7 @@ p_prescore <- (
   DimPlot(data_sub, reduction = "umap_harmony", group.by = "sub_weighted_raw",
           label = TRUE, repel = TRUE) + ggtitle("Sub Pre-Score: Raw")
 )
-ggsave(file.path(OUTPUT_DIR, "SUBCLUSTER_03_prescore_comparison_T_cells.png"),
+ggsave(file.path(OUTPUT_DIR, "SUBCLUSTER_03_prescore_comparison_Macrophages.png"),
        p_prescore, width = 18, height = 8, dpi = DPI_SETTING, bg = "white")
 
 # =============================================================================
@@ -361,114 +363,131 @@ ggsave(file.path(OUTPUT_DIR, "SUBCLUSTER_03_prescore_comparison_T_cells.png"),
 #   "NKT cells", "gdT cells", "Exhausted T", "ILC2s"
 #FeaturePlot(data_sub, reduction = "umap_harmony", features = "scDblFinder_score")
 
+# 'cDCs', # Itgax+ Clec9a+ → cDCs (no Cd68)
+# 'TAM resident',#  Folr2+ Timd4+  C1q1/b+ and Retnla- Arg1-
+# 'Monocytes', # Cd14+ Ccr2+ Ly6c2+ → Monocytes (no Timd4 no Adgre1)
+# 'pDCs', # Siglech+ Bst2+  → pDCs (ignore everything else)
 SUB_ANNOTATION_MAP <- c(
-  '0'  = 'ILC2',
-  '1'  = 'CD8+ T cells',
-  '2'  = 'Tregs',
-  '3'  = 'γδ  T cells',
-  '4'  = 'Tregs',
-  '5'  = 'Cyc. CD4+ T cells',
-  '6'  = 'Th17 cells', 
-  '7'  = 'CD4+ T cells', 
-  '8'  = 'CD8+ T cells',
-  '9'  = 'CD4+ T cells', 
-  '10' = 'NK cells', # Not ILC1, it is Prf1+
-  '11' = 'CD8+ T cells',
-  '12' = 'Tregs', # ??
-  '13' = 'Tregs',
-  '14' = 'Cyc. CD4+ T cells',
-  '15' = 'ILC3', 
-  '16' = 'Tregs', 
-  '17' = 'CD4+ T cells',
-  '18' = 'Tregs',
-  '19' = 'CD4+ T cells', 
-  '20' = 'CD8+ T cells', 
-  '21' = 'CD8+ T cells', 
-  '22' = 'Doublet', # ??
-  '23' = 'γδ  T cells',
-  '24' = 'Tregs',
-  '25' = 'Doublet', 
-  '26' = 'Doublet' # ??
-  )
+  '0'  = 'TAM resident',
+  '1'  = 'M0 Macrophages', # ?
+  '2'  = 'TAM resident',
+  '3'  = 'M0 Macrophages', # ?
+  '4'  = 'M0 Macrophages', # M1 macrophages
+  '5'  = 'TAM resident', # or M2 macrophage
+  '6'  = 'cDC1',
+  '7'  = 'cDC1',
+  '8'  = 'TAM resident',
+  '9'  = 'Cyc. cDC1',
+  '10' = 'M0 Macrophages',
+  '11' = 'cDC2',
+  '12' = 'Monocytes',
+  '13' = 'cDC2',
+  '14' = 'TAM SPP1', # or M1 macrophages or TAM inflammatory
+  '15' = 'mRegDCs',
+  '16' = 'Doublet', #?
+  '17' = 'Monocytes',
+  '18' = 'Doublet', #?
+  '19' = 'M1 Macrophages', # or TAM IFN
+  '20' = 'Cyc. Macrophages',
+  '21' = 'Doublet', # or TAM IFN
+  '22' = 'Monocytes',
+  '23' = 'Neutrophils',
+  '24' = 'Doublet',
+  '25' = 'M2 Macrophages', # or M0 macrophages
+  '26' = 'TAM resident',
+  '27' = 'Doublet', # or unlikely M0 macrophages or TAM SPP1? because Gpnmb+?
+  '28' = 'TAM IFN',
+  '29' = 'Doublet', # or M2 macrophages
+  '30' = 'pDCs',
+  '31' = 'Doublet' # Everything is weak here...
+)
 
 # =============================================================================
 # --- PART 6: APPLY SUB-ANNOTATIONS & FINAL VISUALIZATIONS -------------------
 # =============================================================================
 message("\n=== STEP 6: Applying Sub-Annotations ===")
+#data_sub_bak <- data_sub
+Idents(data_sub) <- "clusters_harmony"
+
+all_markers <- FindAllMarkers(
+  data_sub,
+  min.pct        = 0.05,
+  logfc.threshold = 0.25,
+  only.pos       = TRUE
+)
+
+# Top 30 per cluster by log2FC
+top30 <- all_markers %>%
+  group_by(cluster) %>%
+  arrange(desc(avg_log2FC)) %>%
+  slice_head(n = 100) %>%
+  ungroup()
+
+write_xlsx(top30, file.path(OUTPUT_DIR, "macrophage_top50_markers_per_cluster.xlsx"))
+message("Saved: macrophage_top30_markers_per_cluster.xlsx")
+
+
+# --- Contaminant marker FeaturePlots ---
+# 16 = Fibroblasts, 18 = SMCs, 21 = T cells, 24 = Mast cells
+# 25 = Plasma B cells, 27 = Neurons, 29 = VECs, 30 = T cells, 31 = B cells
+
+contaminant_markers <- c(
+  "Col1a1",  # 16 Fibroblasts
+  "Myh11",   # 18 SMCs
+  "Cd3e",    # 21 T cells
+  "Cpa3",    # 24 Mast cells
+  "Mzb1",    # 25 Plasma B cells
+  "Slc1a2",  # 27 Neurons
+  "Cldn5",   # 29 VECs
+  "Cd8b1",   # 30 T cells/lymphoid
+  "Cd19"     # 31 B cells
+)
+
+p2 <- FeaturePlot(data_sub, 
+                  features = contaminant_markers,
+                  reduction = "umap_harmony",
+                  ncol = 3) &
+  theme(plot.title = element_text(size = 10))
+p2
+ggsave(file.path(OUTPUT_DIR, "MAC_02_contaminant_markers_featureplot.png"),
+       p2, width = 12, height = 10, dpi = DPI_SETTING, bg = "white")
+
+message("Saved: MAC_01_annotation_umap.png")
+message("Saved: MAC_02_contaminant_markers_featureplot.png")
+
+p2<- FeaturePlot(data_sub,
+            features = c(
+              "Hexb",    # cluster 1  - TAM_resident/M2
+              "Cd209a",  # cluster 11 - cDC2
+              "Siglecg", # cluster 13 - pDC/regulatory
+              "Spp1",    # cluster 14 - TAM_inflammatory
+              "Ccr7",    # cluster 15 - Migratory cDCs
+              "Ccr2",    # cluster 17 - Monocytes
+              "Ccl3",    # cluster 19 - M1
+              "Bub1",    # cluster 20 - Cyc. Macrophages
+              "S100a8",  # cluster 23 - Neutrophils
+              "Tmem119",   # cluster 26 - TAM_resident
+              "Ifit1"    # cluster 28 - TAM_IFN
+            ),
+            reduction = "umap_harmony",
+            ncol = 4) &
+  theme(plot.title = element_text(size = 10))
+p2
+ggsave(file.path(OUTPUT_DIR, "MAC_02_new_markers_featureplot2.png"),
+       p2, width = 12, height = 10, dpi = DPI_SETTING, bg = "white")
+
+
 
 data_sub$sub_cell_types <- recode_factor(data_sub$clusters_harmony, !!!SUB_ANNOTATION_MAP)
 data_sub$CellType        <- data_sub$sub_cell_types
 data_sub$seurat_clusters <- data_sub$clusters_harmony
+#data_sub_bak <- data_sub
 
 # The find markers below and feature plots helped to determine the doublets of those cells
 data_sub <- subset(data_sub, subset = sub_cell_types != "Doublet")
 
 DimPlot(data_sub, reduction = "umap_harmony", group.by = "sub_cell_types",
         label = TRUE, repel = TRUE)
-
-
-# Exploring clusters content
-Idents(data_sub) <- "clusters_harmony"
-all_markers <- FindMarkers(data_sub, ident.1 = "26", min.pct = 0.05, logfc.threshold = 0.25)
-
-# 1. Sort by log2FoldChange and take the top 100
-top100_genes <- all_markers %>%
-  dplyr::arrange(desc(avg_log2FC)) %>%
-  head(100) %>%
-  rownames()
-
-# Print the genes to the console for manual copy
-cat(top100_genes, sep = "\n")
-
-
-# Checking if nk cells could be ILC1
-FeaturePlot(data_sub, features = c("Eomes", "Prdm1", "Pdcd1", "Havcr2", "Entpd1", "Lag3"), reduction = "umap_harmony")
-FeaturePlot(data_sub, features = c("Muc2", "Krt20", "Cd3e", "Cd3g"), reduction = "umap_harmony")
-FeaturePlot(data_sub, features = c("Cd3e","Cd3g","Cd8a", "Cd8b1", "Cd4", "Foxp3", "Mki67"), reduction = "umap_harmony")
-FeaturePlot(data_sub, features = c("Prf1", "Ncr1", "Tbx21", "Il12rb2", "Ifng"), reduction = "umap_harmony")
-
-FeaturePlot(data_sub, features = c("Rorc", "Rora", "Foxp3", "Il17a", "Il22"), 
-            blend = FALSE, ncol = 2, reduction = "umap_harmony")
-
-
-p<- FeaturePlot(data_sub, features = c("Prf1", "Ncr1", "Tbx21", "Rorc", "Stat3","Batf", "Irf4", "Ncam1", "Klrb1", "Il1r1", "Klrd1"), reduction = "umap_harmony")
-ggsave(file.path(OUTPUT_DIR, "NK_cells_ILC1_markers.png"),
-       p, width = 12, height = 10, dpi = DPI_SETTING, bg = "white")
-
-
-
-# 1. Define the Mouse-formatted gene lists
-nk_markers <- c("Eomes", "Gnly", "Nkg7", "Prf1", "Gzmb", "Fgfbp2", "Klrd1")
-ilc1_markers <- c("Tbx21", "Ifng", "Il7r", "Cxcr6", "Itga1", "Cd69", "Tnfsf10", "Znf683")
-
-# Combine all genes and check if they exist in the Seurat object
-all_features <- c(nk_markers, ilc1_markers)
-all_features_found <- intersect(all_features, rownames(data_sub))
-
-# =============================================================================
-# 2. FEATURE PLOT (UMAP)
-# =============================================================================
-# Organize into 4 columns for a clean grid
-p_umap <- FeaturePlot(
-  data_sub, 
-  features = all_features_found, 
-  reduction = "umap_harmony",
-  ncol = 4
-) & theme(
-  plot.title = element_text(size = 15, face = "italic"),
-  axis.title = element_blank()
-)
-p_umap
-# Save UMAP FeaturePlot
-ggsave(
-  filename = file.path(OUTPUT_DIR, "NK_ILC1_FeaturePlot_UMAP.png"),
-  plot = p_umap, 
-  width = 16, 
-  height = 12, 
-  dpi = 300, 
-  bg = "white"
-)
-
 
 
 # 
@@ -490,17 +509,24 @@ ggsave(
 # # 3. View them side-by-side
 # p1 | p2
 
+sub_type_levels_macrophages <- c(
+  "pDCs",
+  "cDC2",
+  "mRegDCs",
+  "cDC1", 
+  "Cyc. cDC1",
+  "Monocytes",
+  "Cyc. Macrophages",
+  "M0 Macrophages",
+  "TAM SPP1",
+  "M2 Macrophages",
+  "TAM resident",
+  "M1 Macrophages",
+  "TAM IFN",
+  "Neutrophils"
+)
 
-
-DimPlot(data_sub, reduction = "umap_harmony", group.by = "sub_cell_types",
-        label = TRUE, repel = TRUE)
-
-
-sub_type_levels2 <- c("CD8+ T cells", "γδ  T cells", "Cyc. CD4+ T cells",
-                      "CD4+ T cells", "Tregs", "Th17 cells",  
-                      "NK cells", "ILC2", "ILC3")
-data_sub$sub_cell_types   <- factor(data_sub$sub_cell_types,   levels = sub_type_levels2)
-
+data_sub$sub_cell_types <- factor(data_sub$sub_cell_types, levels = sub_type_levels_macrophages)
 
 # --- Final UMAP: manual annotation ---
 p_final <- DimPlot(data_sub, reduction = "umap_harmony", group.by = "sub_cell_types",
@@ -509,14 +535,14 @@ p_final <- DimPlot(data_sub, reduction = "umap_harmony", group.by = "sub_cell_ty
   theme(legend.text  = element_text(size = 12),
         legend.title = element_text(size = 14, face = "bold")) +
   guides(color = guide_legend(override.aes = list(size = 4)))
-ggsave(file.path(OUTPUT_DIR, "FINAL_SUBCLUSTER_UMAP_T_cells.png"),
+ggsave(file.path(OUTPUT_DIR, "FINAL_SUBCLUSTER_UMAP_Macrophages.png"),
        p_final, width = 10, height = 8, dpi = DPI_SETTING, bg = "white")
 
 # --- Comparison: manual vs weighted ---
 p_compare <- DimPlot(data_sub, reduction = "umap_harmony",
                      group.by = c("sub_cell_types", "sub_weighted_std", "sub_weighted_raw"),
                      label = FALSE, repel = TRUE)
-ggsave(file.path(OUTPUT_DIR, "FINAL_SUBCLUSTER_comparison_T_cells.png"),
+ggsave(file.path(OUTPUT_DIR, "FINAL_SUBCLUSTER_comparison_Macrophages.png"),
        p_compare, width = 26, height = 8, dpi = DPI_SETTING, bg = "white")
 
 
@@ -524,30 +550,24 @@ ggsave(file.path(OUTPUT_DIR, "FINAL_SUBCLUSTER_comparison_T_cells.png"),
 # 1. DEFINE LEVELS AND MAPPING OF DOTPLOT
 # =============================================================================
 # This is the order you want for your plot axes/legend
-sub_type_levels2 <- c(
-  "CD8+ T cells", 
-  "γδ  T cells", 
-  "Cyc. CD4+ T cells", 
-  "CD4+ T cells", 
-  "Tregs", 
-  "Th17 cells",
-  "NK cells", 
-  "ILC2", 
-  "ILC3"
-)
-
+sub_type_levels2 <- sub_type_levels_macrophages
 # This maps your Factor Levels (left) to the SUB_MARKERS_LIST names (right)
 # This handles the "Cyc. CD4+ T cells" -> "Cyc. T cells" mismatch
 name_mapping <- c(
-  "CD8+ T cells"      = "CD8+ T cells",
-  "γδ  T cells"       = "γδ  T cells",
-  "Cyc. CD4+ T cells" = "Cyc. T cells",
-  "CD4+ T cells"      = "CD4+ T cells",
-  "Tregs"             = "Tregs",
-  "Th17 cells"        = "Th17 cells",
-  "NK cells"          = "NK cells",
-  "ILC2"              = "ILC2",
-  "ILC3"              = "ILC3"
+  "pDCs"             = "pDCs",
+  "cDC1"             = "cDC1",
+  "Cyc. cDC1"        = "cDC1",
+  "cDC2"             = "cDC2",
+  "mRegDCs"          = "mRegDCs",
+  "Monocytes"        = "Monocytes",
+  "M0 Macrophages"   = "M0 macrophages",
+  "M2 Macrophages"   = "M2 macrophages",
+  "TAM resident"     = "TAM_resident",
+  "M1 Macrophages"   = "M1 macrophages",
+  "TAM IFN"          = "TAM_IFN",
+  "TAM SPP1"         = "TAM_SPP1",
+  "Cyc. Macrophages" = "Cyc. Macrophages",
+  "Neutrophils"      = "Neutrophils"
 )
 
 # Apply levels to the Seurat object
@@ -556,19 +576,24 @@ data_sub$sub_cell_types <- factor(
   levels = sub_type_levels2
 )
 
+# p_final <- DimPlot(data_sub, reduction = "umap_harmony", group.by = "sub_cell_types",
+#                    label = TRUE, repel = TRUE) +
+#   ggtitle(paste("Sub-Cell Types:", PARENT_CELL_TYPE)) +
+#   theme(legend.text  = element_text(size = 12),
+#         legend.title = element_text(size = 14, face = "bold")) +
+#   guides(color = guide_legend(override.aes = list(size = 4)))
+# 
+# p_final
 # =============================================================================
 # 2. EXTRACT AND ORCHESTRATE GENE LIST
 # =============================================================================
 
 # A. Set the mandatory lead genes
-lead_genes <- c("Cd3e", "Cd3g")
+lead_genes <- NULL
 
-# B. Extract markers based on the ordered factor levels and the mapping
-# We use lapply to ensure we follow 'sub_type_levels2' order exactly
 ordered_markers <- unlist(lapply(sub_type_levels2, function(lvl) {
   marker_key <- name_mapping[lvl]
-  
-  # Check if the key exists in your marker list to avoid errors
+  message("marker key: ", marker_key)
   if (!is.na(marker_key) && marker_key %in% names(SUB_MARKERS_LIST)) {
     return(SUB_MARKERS_LIST[[marker_key]])
   } else {
@@ -591,7 +616,7 @@ p_final_dot <- DotPlot(data_sub, features = final_gene_list,
   theme(axis.text.x = element_text(angle = 55, hjust = 1, size = 11))
 
 p_final_dot
-ggsave(file.path(OUTPUT_DIR, "FINAL_DotPlot_sub_T_cells.png"),
+ggsave(file.path(OUTPUT_DIR, "FINAL_DotPlot_sub_macrophages.png"),
        p_final_dot, width = 8, height = 12, dpi = DPI_SETTING, bg = "white")
 
 # Faceted UMAP
@@ -606,7 +631,7 @@ if (length(ADDITIONAL_GROUPS_TO_PLOT) > 0 &&
           legend.text = element_text(size = 14),
           legend.title = element_text(size = 14, face = "bold")) +
     guides(color = guide_legend(override.aes = list(size = 4))) 
-  ggsave(file.path(OUTPUT_DIR, paste0("FINAL_sub_UMAP_faceted_T_cells_by_", pgrp, ".png")),
+  ggsave(file.path(OUTPUT_DIR, paste0("FINAL_sub_UMAP_faceted_Macrophages_by_", pgrp, ".png")),
          p_facet, width = 5 * ceiling(n_levels / 2), height = 10, dpi = DPI_SETTING, bg = "white")
 }
 
@@ -614,10 +639,10 @@ if (length(ADDITIONAL_GROUPS_TO_PLOT) > 0 &&
 # --- PART 7: SAVE ------------------------------------------------------------
 # =============================================================================
 message("\n=== STEP 7: Saving T Cell Sub-Cluster Object ===")
-saveRDS(data_sub, file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_T_cells_subclustered.rds")))
+saveRDS(data_sub, file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_Macrophages_subclustered.rds")))
 message(paste0(
   "\n=== T CELL SUB-ANNOTATION COMPLETE ===\n",
-  "  Saved: ", PROJECT_NAME, "_T_cells_subclustered.rds\n",
+  "  Saved: ", PROJECT_NAME, "_Macrophages_subclustered.rds\n",
   "  Sub-types found: ", paste(levels(data_sub$sub_cell_types), collapse = ", "), "\n",
   "\nNext steps:\n",
   "  - Script 04: Colonocyte sub-annotation (04_colonocyte_subannotation.R)\n",
@@ -625,12 +650,12 @@ message(paste0(
 ))
 
 
+data_sub <- readRDS(file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_Macrophages_subclustered.rds")))
 
 # =============================================================================
 # --- PART 8: COMPOSITIONAL ANALYSIS ------------------------------------------
 # =============================================================================
 message("\n=== STEP 8: Compositional Analysis ===")
-data_sub <- readRDS(file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_T_cells_subclustered.rds")))
 
 # --- 1.4: Compositional Analysis Groups --------------------------------------
 ADDITIONAL_GROUPS_TO_PLOT <- c("Genotype_sex")
@@ -643,11 +668,14 @@ my_comparisons <- COMPARISON_PAIRS
 
 # --- Step 1: Calculate % per sample ---
 meta <- data_sub@meta.data
-
 df_pct <- meta %>%
   count(SampleID, Genotype_sex, sub_cell_types) %>%
   group_by(SampleID) %>%
   mutate(Percentage = (n / sum(n)) * 100) %>%
+  ungroup() %>%
+  # Fill missing cell types within each SampleID only
+  complete(nesting(SampleID, Genotype_sex), sub_cell_types,
+           fill = list(n = 0, Percentage = 0)) %>%
   ungroup()
 
 # --- Step 2: Plot ---
@@ -658,7 +686,7 @@ p_stats <- ggplot(df_pct, aes(x = Genotype_sex, y = Percentage, fill = Genotype_
   stat_compare_means(comparisons = my_comparisons, method = "t.test",
                      label = "p.signif", size = 4) +
   facet_wrap(~ sub_cell_types, scales = "free_y") +
-  scale_y_continuous(expand = expansion(mult = c(0, 0.3))) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
   labs(title = "Cell Type Proportions by Genotype/Sex",
        y = "% of Total Cells", x = NULL, fill = "Genotype_sex") +
   theme_bw(base_size = 16) +
@@ -670,9 +698,7 @@ p_stats <- ggplot(df_pct, aes(x = Genotype_sex, y = Percentage, fill = Genotype_
         legend.text = element_text(size = 14),
         legend.title = element_text(size = 15, face = "bold"),
         plot.title = element_text(size = 18, face = "bold", hjust = 0.5),
-        legend.position = "top")
-# --- Add these specific adjustments to your theme ---
-p_stats <- p_stats +
+        legend.position = "top") +
   guides(fill = guide_legend(nrow = 2, byrow = TRUE)) + # Keeps Females on top, Males on bottom
   theme(
     legend.position = "top",
@@ -684,9 +710,9 @@ p_stats
 
 # --- Step 3: Save ---
 #dir.create("proportion_analysis", showWarnings = FALSE)
-savef <- paste0(OUTPUT_DIR, "/tcells_stats_cell_props.png")
-ggsave(savef,p_stats, width = 10, height = 10, dpi=DPI_SETTING)
-savef <- paste0(OUTPUT_DIR, "/tcells_cell_props_long_data.xlsx")
+savef <- paste0(OUTPUT_DIR, "/macrophages_stats_cell_props.png")
+ggsave(savef,p_stats, width = 12, height = 10, dpi=DPI_SETTING)
+savef <- paste0(OUTPUT_DIR, "/macrophages_cell_props_long_data.xlsx")
 write_xlsx(df_pct, savef)
 
 
@@ -851,7 +877,7 @@ plot_results <- plot_expression_custom(
   facet_ncol    = 4,               # Arrange in 4 columns
   p_width     = 12,  # Force 12 inches wide
   p_height    = 8,  # Force 10 inches tall for multiple rows,
-  save_path     = file.path(OUTPUT_DIR, "Nr4a1_stats_plot_tcells.png"),
+  save_path     = file.path(OUTPUT_DIR, "Nr4a1_stats_plot_macrophages.png"),
   dpi           = DPI_SETTING
 )
 
@@ -869,7 +895,7 @@ plot_results <- plot_expression_custom(
   facet_ncol    = 4,               # Arrange in 4 columns
   p_width     = 12,  # Force 12 inches wide
   p_height    = 8,  # Force 10 inches tall for multiple rows,
-  save_path     = file.path(OUTPUT_DIR, "Nr4a1_custom_stats_plot_tcells.png"),
+  save_path     = file.path(OUTPUT_DIR, "Nr4a1_custom_stats_plot_macrophages.png"),
   dpi           = DPI_SETTING
 )
 
@@ -885,7 +911,7 @@ plot_results <- plot_expression_custom(
   facet_ncol    = 4,               # Arrange in 4 columns
   p_width     = 12,  # Force 12 inches wide
   p_height    = 8,  # Force 10 inches tall for multiple rows,
-  save_path     = file.path(OUTPUT_DIR, "Nr4a2_stats_plot_tcells.png"),
+  save_path     = file.path(OUTPUT_DIR, "Nr4a2_stats_plot_macrophages.png"),
   dpi           = DPI_SETTING
 )
 
@@ -901,74 +927,10 @@ plot_results <- plot_expression_custom(
   facet_ncol    = 4,               # Arrange in 4 columns
   p_width     = 12,  # Force 12 inches wide
   p_height    = 8,  # Force 10 inches tall for multiple rows,
-  save_path     = file.path(OUTPUT_DIR, "Nr4a3_stats_plot_tcells.png"),
+  save_path     = file.path(OUTPUT_DIR, "Nr4a3_stats_plot_macrophages.png"),
   dpi           = DPI_SETTING
 )
 
-
-plot_results <- plot_expression_custom(
-  seurat_obj    = data_sub,
-  gene          = "Pdcd1",
-  plot_type     = "bar", 
-  group_by      = "sub_cell_types",
-  condition_col = "Genotype_sex",
-  hide_x_text   = TRUE,      # Removes the crowded labels from the bottom of every plot
-  show_legend   = TRUE,      # Puts a clean color key at the very bottom
-  comparisons   = COMPARISON_PAIRS, # Use your 6 pairs
-  facet_ncol    = 4,               # Arrange in 4 columns
-  p_width     = 12,  # Force 12 inches wide
-  p_height    = 8,  # Force 10 inches tall for multiple rows,
-  save_path     = file.path(OUTPUT_DIR, "Pdcd1_stats_plot_tcells.png"),
-  dpi           = DPI_SETTING
-)
-
-plot_results <- plot_expression_custom(
-  seurat_obj    = data_sub,
-  gene          = "Ctla4",
-  plot_type     = "bar", 
-  group_by      = "sub_cell_types",
-  condition_col = "Genotype_sex",
-  hide_x_text   = TRUE,      # Removes the crowded labels from the bottom of every plot
-  show_legend   = TRUE,      # Puts a clean color key at the very bottom
-  comparisons   = COMPARISON_PAIRS, # Use your 6 pairs
-  facet_ncol    = 4,               # Arrange in 4 columns
-  p_width     = 12,  # Force 12 inches wide
-  p_height    = 8,  # Force 10 inches tall for multiple rows,
-  save_path     = file.path(OUTPUT_DIR, "Ctla4_stats_plot_tcells.png"),
-  dpi           = DPI_SETTING
-)
-
-plot_results <- plot_expression_custom(
-  seurat_obj    = data_sub,
-  gene          = "Lag3",
-  plot_type     = "bar", 
-  group_by      = "sub_cell_types",
-  condition_col = "Genotype_sex",
-  hide_x_text   = TRUE,      # Removes the crowded labels from the bottom of every plot
-  show_legend   = TRUE,      # Puts a clean color key at the very bottom
-  comparisons   = COMPARISON_PAIRS, # Use your 6 pairs
-  facet_ncol    = 4,               # Arrange in 4 columns
-  p_width     = 12,  # Force 12 inches wide
-  p_height    = 8,  # Force 10 inches tall for multiple rows,
-  save_path     = file.path(OUTPUT_DIR, "Lag3_stats_plot_tcells.png"),
-  dpi           = DPI_SETTING
-)
-
-plot_results <- plot_expression_custom(
-  seurat_obj    = data_sub,
-  gene          = "Havcr2",
-  plot_type     = "bar", 
-  group_by      = "sub_cell_types",
-  condition_col = "Genotype_sex",
-  hide_x_text   = TRUE,      # Removes the crowded labels from the bottom of every plot
-  show_legend   = TRUE,      # Puts a clean color key at the very bottom
-  comparisons   = COMPARISON_PAIRS, # Use your 6 pairs
-  facet_ncol    = 4,               # Arrange in 4 columns
-  p_width     = 12,  # Force 12 inches wide
-  p_height    = 8,  # Force 10 inches tall for multiple rows,
-  save_path     = file.path(OUTPUT_DIR, "Havcr2_stats_plot_tcells.png"),
-  dpi           = DPI_SETTING
-)
 
 
 library(Seurat)
@@ -978,10 +940,11 @@ library(ggpubr)
 library(dplyr)
 library(tidyr)
 
-message("\n##### Starting Multi-T Cell Exhaustion Analysis #####")
+message("\n##### Starting Targeted Macrophage Functional Scoring #####")
+data_sub <- readRDS(file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_Macrophages_subclustered.rds")))
 
 # =============================================================================
-# ENVIRONMENT & OUTPUT PATHS SETUP
+# ENVIRONMENT PATHS
 # =============================================================================
 #PROJECT_NAME <- "Nr4a1_s17_ack"
 #ROOT_PATH    <- "/home/ssromerogon/2026_nr4a1_ack/r_process"
@@ -990,52 +953,45 @@ message("\n##### Starting Multi-T Cell Exhaustion Analysis #####")
 if(!dir.exists(OUTPUT_DIR)) dir.create(OUTPUT_DIR, recursive = TRUE)
 
 # =============================================================================
-# 1. SUBSETTING
+# 1. SUBSETTING (Isolating Macrophage Continuum from Myeloid Object)
 # =============================================================================
-t_cells_of_interest <- c("CD8+ T cells", "CD4+ T cells", "Th17 cells", "Tregs", "γδ  T cells", "Cyc. CD4+ T cells")
-data_t <- subset(data_sub, subset = sub_cell_types %in% t_cells_of_interest)
+mac_lineages <- c("Monocytes", "Cyc. Macrophages", "M0 Macrophages", 
+                  "TAM SPP1", "M2 Macrophages", "TAM resident", 
+                  "M1 Macrophages", "TAM IFN")
+
+data_mac <- subset(data_sub, subset = sub_cell_types %in% mac_lineages)
 
 # =============================================================================
-# 2. GENE SIGNATURE PANELS
+# 2. DEFINE MACROPHAGE FUNCTIONAL GENE SETS
 # =============================================================================
-cd8_gene_sets <- list(
-  Exhaustion_Score = c("Lag3", "Pdcd1", "Havcr2", "Tigit", "Ctla4", "Tox", 
-                       "Eomes", "Cd244a", "Cxcl13", "Cd160", "Entpd1"),
-  Exhaustion_Score_nr4a = c("Lag3", "Pdcd1", "Havcr2", "Tigit", "Ctla4", "Tox", 
-                            "Eomes", "Cd244a", "Cxcl13", "Cd160", "Entpd1", 
-                            "Nr4a1-cust", "Nr4a2", "Nr4a3"),
-  Effector_Score = c("Gzmb", "Gzma", "Gzmk", "Ifng", "Tnf", "Il2", "Tbx21", "Prf1")
+mac_gene_sets <- list(
+  M1_ProInflammatory   = c("Stat1", "Irf1", "Nos2", "Irf5", "Il6", "Cxcl10", "Cxcl9", "Tnf", "Il1b"),
+  M2_Immunosuppressive = c("Arg1", "Mrc1", "Cd163", "Chil3", "Retnla", "C1qa", "C1qb", "C1qc"),
+  TAM_SPP1_Remodeling  = c("Spp1", "Fn1", "Vcan", "Gpnmb", "Lgals3", "Apoc1")
 )
 
 # =============================================================================
-# 3. AUCell ENRICHMENT PIPELINE (10% Threshold)
+# 3. AUCell PIPELINE (Seurat v5 Layer & 10% Threshold)
 # =============================================================================
-# Using universal matrix extraction
-expr_matrix <- GetAssayData(object = data_t, assay = "RNA", layer = "counts")
+expr_matrix_mac <- GetAssayData(object = data_mac, assay = "RNA", layer = "counts")
+rankings_mac    <- AUCell_buildRankings(expr_matrix_mac, plotStats = FALSE)
 
-cells_rankings <- AUCell_buildRankings(expr_matrix, plotStats = FALSE)
-
-# Filter out features missing from the expression matrix
-valid_gene_sets <- list()
-for (set_name in names(cd8_gene_sets)) {
-  genes_in_set <- cd8_gene_sets[[set_name]]
-  present_genes <- genes_in_set[genes_in_set %in% rownames(expr_matrix)]
-  
-  if (length(present_genes) > 0) {
-    valid_gene_sets[[set_name]] <- present_genes
-  }
+valid_mac_sets <- list()
+for (set_name in names(mac_gene_sets)) {
+  genes_in_set  <- mac_gene_sets[[set_name]]
+  present_genes <- genes_in_set[genes_in_set %in% rownames(expr_matrix_mac)]
+  if (length(present_genes) > 0) valid_mac_sets[[set_name]] <- present_genes
 }
 
-# Run execution (Cleaned up the duplicate chunk)
-cells_auc <- AUCell_calcAUC(valid_gene_sets, cells_rankings, aucMaxRank = nrow(cells_rankings) * 0.10)
-auc_matrix <- getAUC(cells_auc)
+auc_mac    <- AUCell_calcAUC(valid_mac_sets, rankings_mac, aucMaxRank = nrow(rankings_mac) * 0.10)
+matrix_mac <- getAUC(auc_mac)
 
-for (score_name in rownames(auc_matrix)) {
-  data_t[[score_name]] <- as.numeric(auc_matrix[score_name, ])
+for (score_name in rownames(matrix_mac)) {
+  data_mac[[score_name]] <- as.numeric(matrix_mac[score_name, ])
 }
 
 # =============================================================================
-# 4. EXPLICIT PLOTTING LOOP (PNG / 300 DPI / Custom Font Sizes)
+# 4. PLOTTING LOOP WITH REFINED TITLES & LARGE FONTS
 # =============================================================================
 custom_levels <- c(
   "WT_Female", "Polyp_Female", "Polyp_NR4a1_KO_Female",
@@ -1051,19 +1007,20 @@ COMPARISON_PAIRS <- list(
   c("WT_Male",         "Polyp_Male")
 )
 
-scores_to_plot <- c("Exhaustion_Score", "Exhaustion_Score_nr4a", "Effector_Score")
+scores_to_plot <- c("M1_ProInflammatory", "M2_Immunosuppressive", "TAM_SPP1_Remodeling")
 
 for (score_col in scores_to_plot) {
   message("Generating plot for: ", score_col)
   
-  plot_df <- data_t@meta.data %>%
+  plot_df <- data_mac@meta.data %>%
     select(all_of(c(score_col, "Genotype_sex", "sub_cell_types"))) %>%
     drop_na()
   
   plot_df$Genotype_sex <- factor(plot_df$Genotype_sex, levels = custom_levels)
   
+  # Format specific unified title layout requested
   clean_title <- gsub("_", " ", score_col)
-  display_title <- paste("T cell", clean_title, "Across Subpopulations")
+  display_title <- paste("Macrophage", clean_title, "Across Subpopulations")
   
   violin_p <- ggplot(plot_df, aes(x = Genotype_sex, y = .data[[score_col]], fill = Genotype_sex)) +
     geom_violin(trim = TRUE, alpha = 0.6, scale = "width") +
@@ -1078,6 +1035,7 @@ for (score_col in scores_to_plot) {
       tip.length = 0.01
     ) +
     
+    # Grid layout grouped by your specific macrophage UMAP clusters
     facet_wrap(~ sub_cell_types, scales = "free_y", ncol = 2) +
     
     labs(
@@ -1095,17 +1053,96 @@ for (score_col in scores_to_plot) {
       legend.position = "none"
     )
   
-  output_filename <- paste0("Multi_T_", score_col, "_Explicit_Groups.png")
+  output_filename <- paste0("Macrophage_", score_col, "_Explicit_Groups.png")
   
   ggsave(
     filename = file.path(OUTPUT_DIR, output_filename), 
     plot = violin_p, 
     device = "png",
     dpi = 300,
-    height = 12,
-    width = 10, 
+    height = 14,    # Increased height slightly to accommodate the 8 faceted clusters cleanly
+    width = 12, 
     units = "in"
   )
   
   print(violin_p)
+}
+
+# =============================================================================
+# GLOBAL MACROPHAGE SCORING (NO SUBPOPULATION SPLITTING)
+# =============================================================================
+message("\n##### Generating Global Macrophage Overview Plots #####")
+
+# Ensure your factor levels and pairs are set
+custom_levels <- c(
+  "WT_Female", "Polyp_Female", "Polyp_NR4a1_KO_Female",
+  "WT_Male", "Polyp_Male",   "Polyp_NR4a1_KO_Male"
+)
+
+COMPARISON_PAIRS <- list(
+  c("Polyp_Female",    "Polyp_NR4a1_KO_Female"),
+  c("Polyp_Male",      "Polyp_NR4a1_KO_Male"),
+  c("WT_Female",       "Polyp_NR4a1_KO_Female"),
+  c("WT_Male",         "Polyp_NR4a1_KO_Male"),
+  c("WT_Female",       "Polyp_Female"),
+  c("WT_Male",         "Polyp_Male")
+)
+
+scores_to_plot <- c("M1_ProInflammatory", "M2_Immunosuppressive", "TAM_SPP1_Remodeling")
+
+for (score_col in scores_to_plot) {
+  message("Generating global plot for: ", score_col)
+  
+  # 1. Pull metadata for all macrophages together
+  plot_df <- data_mac@meta.data %>%
+    select(all_of(c(score_col, "Genotype_sex"))) %>%
+    drop_na()
+  
+  plot_df$Genotype_sex <- factor(plot_df$Genotype_sex, levels = custom_levels)
+  
+  clean_title <- gsub("_", " ", score_col)
+  display_title <- paste("Global Macrophage", clean_title, "Profile")
+  
+  # 2. Build the unified plot (No facet_wrap here)
+  global_p <- ggplot(plot_df, aes(x = Genotype_sex, y = .data[[score_col]], fill = Genotype_sex)) +
+    geom_violin(trim = TRUE, alpha = 0.6, scale = "width") +
+    geom_boxplot(width = 0.1, outlier.shape = NA, alpha = 0.8) +
+    
+    stat_compare_means(
+      comparisons = COMPARISON_PAIRS,
+      method = "wilcox.test",
+      method.args = list(exact = FALSE, correct = TRUE),
+      label = "p.signif", 
+      step.increase = 0.06, 
+      tip.length = 0.01
+    ) +
+    
+    labs(
+      title = display_title,
+      y = "Cell Score (AUCell)"
+    ) +
+    theme_classic() + 
+    theme(
+      plot.title   = element_text(hjust = 0.5, size = 20, face = "bold"),
+      axis.text.x  = element_text(angle = 45, hjust = 1, size = 14),
+      axis.title.x = element_blank(),
+      axis.text.y  = element_text(size = 14),
+      axis.title.y = element_text(size = 16, face = "bold", margin = margin(r = 15)),
+      legend.position = "none"
+    )
+  
+  # 3. Save as a cleaner, single-panel shape (smaller dimensions since there are no facets)
+  output_filename <- paste0("Global_Macrophage_", score_col, "_Overview.png")
+  
+  ggsave(
+    filename = file.path(OUTPUT_DIR, output_filename), 
+    plot = global_p, 
+    device = "png",
+    dpi = 300,
+    height = 7,    
+    width = 8, 
+    units = "in"
+  )
+  
+  print(global_p)
 }

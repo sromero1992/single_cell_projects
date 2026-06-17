@@ -49,8 +49,8 @@ set.seed(123)
 # =============================================================================
 
 # --- 1.1: Project Paths (must match Scripts 01 and 02) -----------------------
-PROJECT_NAME <- "Nr4a1_Study17_Project"
-ROOT_PATH    <- "/mnt/SCDC/Optimus/selim_working_dir/2026_nr4a1_ack/r_process"
+PROJECT_NAME <- "Nr4a1_s17_ack"
+ROOT_PATH <- "/home/ssromerogon/2026_nr4a1_ack/r_process"
 #ROOT_PATH   <- "Z:/selim_working_dir/2026_nr4a1_ack/r_process"  # Windows
 
 OUTPUT_DIR       <- file.path(ROOT_PATH, "seurat_output")
@@ -64,22 +64,34 @@ PARENT_CELL_TYPE <- "Colonocytes"
 # --- 1.3: Sub-Clustering Parameters ------------------------------------------
 SUBCLUSTER_N_HVG       <- 2000   # HVGs for sub-clustering PCA
 SUBCLUSTER_N_PCS       <- 50     # PCs used for kNN graph
-SUBCLUSTER_K_NEIGHBORS <- 15     # k for kNN
-SUBCLUSTER_MIN_DIST    <- 0.3    # UMAP min.dist
+SUBCLUSTER_K_NEIGHBORS <- 30     # k for kNN
+SUBCLUSTER_MIN_DIST    <- 0.2    # UMAP min.dist
 # Resolution: set to NULL to read from CSV (subcluster_resolution column),
 # or override with a number here (e.g., 3.0 for fine-grained colonocyte clusters).
 SUBCLUSTER_RESOLUTION  <- NULL
 
+
 # --- 1.4: Compositional Analysis Groups --------------------------------------
-ADDITIONAL_GROUPS_TO_PLOT <- c("Genotype_Diet")
+ADDITIONAL_GROUPS_TO_PLOT <- c("Genotype_sex")
 
 # --- 1.5: Gene Expression Comparison -----------------------------------------
-COMPARISON_X_AXIS <- "Genotype_Diet"
-COMPARISON_GROUPS <- c("WT_cellulose", "KO_cellulose", "WT_inulin", "KO_inulin")
-COMPARISON_PAIRS  <- list(
-  c("WT_inulin",    "KO_inulin"),
-  c("WT_cellulose", "KO_cellulose"),
-  c("WT_cellulose", "WT_inulin")
+COMPARISON_X_AXIS  <- "Genotype_sex"
+COMPARISON_GROUPS  <- c("WT_Female", "Polyp_Female",  "Polyp_NR4a1_KO_Female", 
+                        "WT_Male", "Polyp_Male", "Polyp_NR4a1_KO_Male")
+
+# Define the custom order
+custom_levels <- c(
+  "WT_Female", "Polyp_Female", "Polyp_NR4a1_KO_Female",
+  "WT_Male", "Polyp_Male",   "Polyp_NR4a1_KO_Male"
+)
+
+COMPARISON_PAIRS   <- list(
+  c("Polyp_Female",    "Polyp_NR4a1_KO_Female"),
+  c("Polyp_Male",      "Polyp_NR4a1_KO_Male"),
+  c("WT_Female",       "Polyp_NR4a1_KO_Female"),
+  c("WT_Male",         "Polyp_NR4a1_KO_Male"),
+  c("WT_Female",       "Polyp_Female"),
+  c("WT_Male",         "Polyp_Male")
 )
 
 # --- 1.6: Output Resolution --------------------------------------------------
@@ -195,71 +207,6 @@ get_weighted_annotation <- function(seurat_obj, marker_genes, cluster_key,
   return(list(annotation_vector = annotation_vector, top5_report = top5_report))
 }
 
-summarize_annotations <- function(seurat_obj, annotation_column, print_summary = TRUE) {
-  if (!annotation_column %in% colnames(seurat_obj@meta.data))
-    stop(paste("Column", annotation_column, "not found in metadata."))
-  counts <- table(seurat_obj[[annotation_column]])
-  summary_df <- data.frame(
-    Count      = as.numeric(counts),
-    Percentage = as.numeric(prop.table(counts) * 100),
-    row.names  = names(counts)
-  ) %>% arrange(desc(Percentage))
-  if (print_summary) {
-    tmp <- summary_df; tmp$Percentage <- sprintf("%.2f%%", tmp$Percentage)
-    message(paste("\n--- Annotation Summary:", annotation_column, "---")); print(tmp)
-  }
-  return(summary_df)
-}
-
-plot_cell_proportions <- function(seurat_obj, cluster_col, group_col,
-                                  output_prefix, output_dir) {
-  meta <- seurat_obj@meta.data
-  make_label <- function(p) ifelse(p > 2.5, paste0(round(p, 1), "%"), "")
-
-  if (!group_col %in% colnames(meta)) {
-    parts <- strsplit(group_col, "_")[[1]]
-    if (all(parts %in% colnames(meta))) {
-      seurat_obj[[group_col]] <- apply(meta[, parts, drop = FALSE], 1, paste, collapse = "_")
-      meta <- seurat_obj@meta.data
-    } else { warning(paste("Skipping:", group_col, "not found.")); return(NULL) }
-  }
-
-  df_sample <- meta %>% group_by(SampleID, !!sym(cluster_col)) %>%
-    summarise(n = n(), .groups = "drop") %>% group_by(SampleID) %>%
-    mutate(percentage = n / sum(n) * 100)
-  df_group  <- meta %>% group_by(!!sym(group_col), !!sym(cluster_col)) %>%
-    summarise(n = n(), .groups = "drop") %>% group_by(!!sym(group_col)) %>%
-    mutate(percentage = n / sum(n) * 100)
-  df_global <- meta %>% group_by(!!sym(cluster_col)) %>%
-    summarise(n = n(), .groups = "drop") %>% mutate(percentage = n / sum(n) * 100)
-
-  write_xlsx(list(By_Sample = df_sample, By_Group = df_group, Global = df_global),
-             path = file.path(output_dir, paste0(output_prefix, "_Stats.xlsx")))
-
-  pt <- theme_classic() + theme(axis.text.x  = element_text(angle = 45, hjust = 1, size = 10),
-                                 axis.title.x = element_blank(), legend.position = "bottom")
-  p1 <- ggplot(df_sample, aes(SampleID, percentage, fill = !!sym(cluster_col))) +
-    geom_bar(stat = "identity", color = "white", linewidth = 0.3) +
-    geom_text(aes(label = make_label(percentage)), position = position_stack(vjust = 0.5), size = 3.5) +
-    labs(title = paste("Proportions by Sample:", cluster_col), y = "Percentage (%)") + pt
-  p2 <- ggplot(df_group, aes(!!sym(group_col), percentage, fill = !!sym(cluster_col))) +
-    geom_bar(stat = "identity", color = "white", linewidth = 0.3) +
-    geom_text(aes(label = make_label(percentage)), position = position_stack(vjust = 0.5), size = 3.5) +
-    labs(title = paste("Proportions by", group_col), y = "Percentage (%)") + pt
-  p3 <- ggplot(df_global, aes("Global", percentage, fill = !!sym(cluster_col))) +
-    geom_bar(stat = "identity", color = "white", width = 0.6) +
-    geom_text(aes(label = paste0(round(percentage, 1), "%")),
-              position = position_stack(vjust = 0.5), size = 4.5) +
-    labs(title = paste("Global Distribution:", cluster_col), y = "Percentage (%)") + pt
-
-  ggsave(file.path(output_dir, paste0(output_prefix, "_pct_by_Sample.png")),    p1,
-         width = max(8, 1.5 * n_distinct(meta$SampleID)), height = 7, bg = "white", dpi = DPI_SETTING)
-  ggsave(file.path(output_dir, paste0(output_prefix, "_pct_by_", group_col, ".png")), p2,
-         width = max(8, 1.5 * n_distinct(meta[[group_col]])), height = 7, bg = "white", dpi = DPI_SETTING)
-  ggsave(file.path(output_dir, paste0(output_prefix, "_pct_Global.png")), p3,
-         width = 7, height = 7, bg = "white", dpi = DPI_SETTING)
-  return(invisible(NULL))
-}
 
 process_and_extract_cell_type <- function(data, cell_type_name,
                                           num_hvg    = 2000,
@@ -385,16 +332,27 @@ p_clust_none <- DimPlot(data_sub, reduction = "umap_none",    group.by = "cluste
                          label = TRUE) + NoLegend() + ggtitle("Clusters: Standard PCA")
 p_clust_harm <- DimPlot(data_sub, reduction = "umap_harmony", group.by = "clusters_harmony",
                          label = TRUE) + NoLegend() + ggtitle("Clusters: Harmony")
-ggsave(file.path(OUTPUT_DIR, "SUBCLUSTER_02_ANNOTATE_THIS_UMAP_Colonocytes.png"),
+ggsave(file.path(OUTPUT_DIR, "SUBCLUSTER_02_COMPARE_UMAP_Colonocytes.png"),
        p_clust_none + p_clust_harm, width = 16, height = 8, dpi = DPI_SETTING)
+ggsave(file.path(OUTPUT_DIR, "SUBCLUSTER_02_ANNOTATE_THIS_UMAP_Colonocytes.png"),
+       p_clust_harm, width = 12, height = 8, dpi = DPI_SETTING)
 
 # --- 4.3: DotPlot ---
-p_dot_sub <- DotPlot(data_sub, features = sub_dotplot_markers,
-                      group.by = "clusters_harmony", dot.min = 0.05, cols = "RdBu") +
+p_dot_sub <- DotPlot(data_sub, features = sub_dotplot_markers, scale = T,
+                      group.by = "clusters_harmony", dot.min = 0.05, cols = "RdBu", cluster.idents = T) +
   theme(axis.text.x = element_text(angle = 55, hjust = 1, size = 11)) +
   ggtitle(paste("Sub-Cluster Markers:", PARENT_CELL_TYPE))
 ggsave(file.path(OUTPUT_DIR, "SUBCLUSTER_02_ANNOTATE_USING_THIS_DOTPLOT_Colonocytes.png"),
-       p_dot_sub, width = 14, height = 9, dpi = DPI_SETTING, bg = "white")
+       p_dot_sub, width = 14, height = 20, dpi = DPI_SETTING, bg = "white")
+
+# not scaled
+p_dot_sub <- DotPlot(data_sub, features = sub_dotplot_markers, scale = F, 
+                     cols = c("Dark Violet", "Magenta"),
+                     group.by = "clusters_harmony", dot.min = 0.05, cluster.idents = T) +
+  theme(axis.text.x = element_text(angle = 55, hjust = 1, size = 11)) +
+  ggtitle(paste("Sub-Cluster Markers:", PARENT_CELL_TYPE))
+ggsave(file.path(OUTPUT_DIR, "SUBCLUSTER_02_ANNOTATE_USING_THIS_DOTPLOT_NOT_SCALED_Colonocytes.png"),
+       p_dot_sub, width = 14, height = 20, dpi = DPI_SETTING, bg = "white")
 
 # =============================================================================
 # --- PART 5: WEIGHTED PRE-SCORING -------------------------------------------
@@ -442,69 +400,64 @@ ggsave(file.path(OUTPUT_DIR, "SUBCLUSTER_03_prescore_comparison_Colonocytes.png"
 # Available sub-types (defaults or from CSV):
 #   "Abs. colonocytes", "Goblet cells", "EECs", "Tuft cells", "TA cells", "Stem cells"
 SUB_ANNOTATION_MAP <- c(
-  '0'  = 'Goblet cells',      # REPLACE WITH YOUR ACTUAL ANNOTATIONS
-  '1'  = 'Abs. colonocytes',
+  '0'  = 'Stem cells',  
+  '1'  = 'Stem cells',
   '2'  = 'Abs. colonocytes',
   '3'  = 'Goblet cells',
-  '4'  = 'Stem cells',
-  '5'  = 'Goblet cells',
+  '4'  = 'Goblet cells',
+  '5'  = 'Abs. colonocytes',
   '6'  = 'Abs. colonocytes',
-  '7'  = 'Goblet cells',
+  '7'  = 'Abs. colonocytes',
   '8'  = 'Abs. colonocytes',
   '9'  = 'Abs. colonocytes',
-  '10' = 'TA cells',
+  '10' = 'Abs. colonocytes',
   '11' = 'Abs. colonocytes',
-  '12' = 'Abs. colonocytes',
-  '13' = 'TA cells',
-  '14' = 'TA cells',
-  '15' = 'Abs. colonocytes',
-  '16' = 'Abs. colonocytes',
-  '17' = 'TA cells',
-  '18' = 'Stem cells',
-  '19' = 'Abs. colonocytes',
-  '20' = 'Goblet cells',
-  '21' = 'Abs. colonocytes',
-  '22' = 'Goblet cells',
+  '12' = 'TA cells',
+  '13' = 'Stem cells', # Great stem signature
+  '14' = 'Abs. colonocytes',
+  '15' = 'Prol. Goblet cells', # but looks like TA/Stem signature
+  '16' = 'Stem cells',
+  '17' = 'Abs. colonocytes',
+  '18' = 'Abs. colonocytes',
+  '19' = 'Goblet cells',
+  '20' = 'Abs. colonocytes',
+  '21' = 'Prol. Goblet cells',# but looks like TA/Stem signature
+  '22' = 'Abs. colonocytes',
   '23' = 'Abs. colonocytes',
-  '24' = 'Goblet cells',
-  '25' = 'Goblet cells',
-  '26' = 'Goblet cells',
-  '27' = 'Abs. colonocytes',
-  '28' = 'Abs. colonocytes',
-  '29' = 'TA cells',
-  '30' = 'Abs. colonocytes',
+  '24' = 'Abs. colonocytes',
+  '25' = 'Abs. colonocytes',
+  '26' = 'Abs. colonocytes',
+  '27' = 'TA cells',
+  '28' = 'Goblet cells',
+  '29' = 'Goblet cells',
+  '30' = 'TA cells',
   '31' = 'Abs. colonocytes',
-  '32' = 'Stem cells',
+  '32' = 'Abs. colonocytes',
   '33' = 'Abs. colonocytes',
-  '34' = 'Goblet cells',
+  '34' = 'Abs. colonocytes',
   '35' = 'Abs. colonocytes',
-  '36' = 'TA cells',
-  '37' = 'Abs. colonocytes',
-  '38' = 'TA cells',
-  '39' = 'Abs. colonocytes',
-  '40' = 'EECs',
+  '36' = 'Abs. colonocytes',
+  '37' = 'Goblet cells',
+  '38' = 'Abs. colonocytes',
+  '39' = 'Abs. colonocytes', # or Stem cells
+  '40' = 'Prol. Goblet cells', # but looks like TA/Stem signature
   '41' = 'Goblet cells',
-  '42' = 'TA cells',
-  '43' = 'Goblet cells',
-  '44' = 'Goblet cells',
-  '45' = 'Tuft cells',
-  '46' = 'Tuft cells',
+  '42' = 'TA cells', # or Stem cells
+  '43' = 'TA cells', # or Stem cells
+  '44' = 'TA cells',
+  '45' = 'Abs. colonocytes',
+  '46' = 'Abs. colonocytes',
   '47' = 'EECs',
   '48' = 'Goblet cells',
-  '49' = 'Abs. colonocytes',
-  '50' = 'Abs. colonocytes',
-  '51' = 'Goblet cells',
-  '52' = 'Abs. colonocytes',
-  '53' = 'Goblet cells',
-  '54' = 'Goblet cells',
-  '55' = 'Goblet cells',
-  '56' = 'Abs. colonocytes',
-  '57' = 'Goblet cells',
-  '58' = 'Stem cells',
-  '59' = 'Goblet cells',
-  '60' = 'Abs. colonocytes',
-  '61' = 'TA cells',
-  '62' = 'Abs. colonocytes'
+  '49' = 'Goblet cells',
+  '50' = 'Tuft cells',
+  '51' = 'EECs',
+  '52' = 'TA cells',
+  '53' = 'Prol. Goblet cells', # This may be cancer derived
+  '54' = 'Abs. colonocytes',
+  '55' = 'Prol. Goblet cells', # but looks like TA/Stem signature
+  '56' = 'Stem cells',
+  '57' = 'Abs. colonocytes'
   # Add/remove entries matching your actual cluster count
 )
 
@@ -517,14 +470,34 @@ data_sub$sub_cell_types  <- recode_factor(data_sub$clusters_harmony, !!!SUB_ANNO
 data_sub$CellType        <- data_sub$sub_cell_types
 data_sub$seurat_clusters <- data_sub$clusters_harmony
 
-sub_type_levels <- names(SUB_MARKERS_LIST)
-sub_type_levels <- intersect(sub_type_levels,
-                              as.character(unique(data_sub$sub_cell_types)))
-data_sub$sub_cell_types   <- factor(data_sub$sub_cell_types,   levels = sub_type_levels)
-data_sub$sub_weighted_std <- factor(data_sub$sub_weighted_std, levels = sub_type_levels)
-data_sub$sub_weighted_raw <- factor(data_sub$sub_weighted_raw, levels = sub_type_levels)
+DimPlot(data_sub, reduction = "umap_harmony", group.by = "sub_cell_types",
+        label = TRUE, repel = TRUE)
 
-summarize_annotations(data_sub, "sub_cell_types")
+DimPlot(data_sub, reduction = "umap_harmony", group.by = "sub_cell_types",
+        label = TRUE, repel = TRUE, split.by = "Genotype_sex")
+
+cell_table <- data_sub@meta.data %>%
+  group_by(Genotype_sex, sub_cell_types) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(Genotype_sex) %>%
+  mutate(pct = n / sum(n) * 100) %>%
+  select(-n) %>%
+  pivot_wider(names_from = Genotype_sex, values_from = pct, values_fill = 0)
+
+print(cell_table)
+
+# sub_type_levels <- names(SUB_MARKERS_LIST)
+# sub_type_levels <- intersect(sub_type_levels,
+#                               as.character(unique(data_sub$sub_cell_types)))
+# data_sub$sub_cell_types   <- factor(data_sub$sub_cell_types,   levels = sub_type_levels)
+# data_sub$sub_weighted_std <- factor(data_sub$sub_weighted_std, levels = sub_type_levels)
+# data_sub$sub_weighted_raw <- factor(data_sub$sub_weighted_raw, levels = sub_type_levels)
+
+
+sub_type_levels2 <- c("EECs", "Tuft cells", "Goblet cells", "Prol. Goblet cells",
+                      "TA cells", "Stem cells", "Abs. colonocytes")
+data_sub$sub_cell_types   <- factor(data_sub$sub_cell_types,   levels = sub_type_levels2)
+
 
 # Final UMAP
 p_final <- DimPlot(data_sub, reduction = "umap_harmony", group.by = "sub_cell_types",
@@ -542,13 +515,71 @@ p_compare <- DimPlot(data_sub, reduction = "umap_harmony",
 ggsave(file.path(OUTPUT_DIR, "FINAL_SUBCLUSTER_comparison_Colonocytes.png"),
        p_compare, width = 26, height = 8, dpi = DPI_SETTING, bg = "white")
 
-# Final DotPlot
-p_final_dot <- DotPlot(data_sub, features = sub_dotplot_markers,
+
+
+
+
+# =============================================================================
+# 1. DEFINE LEVELS AND MAPPING OF DOTPLOT
+# =============================================================================
+# This is the order you want for your plot axes/legend
+sub_type_levels2 <- c("EECs", "Tuft cells", "Goblet cells", "Prol. Goblet cells",
+                      "TA cells", "Stem cells", "Abs. colonocytes")
+# This maps your Factor Levels (left) to the SUB_MARKERS_LIST names (right)
+# This handles the "Cyc. CD4+ T cells" -> "Cyc. T cells" mismatch
+name_mapping <- c(
+  "EECs"   =  "EECs", 
+  "Tuft cells" = "Tuft cells", 
+  "Goblet cells" = "Goblet cells", 
+  "Prol. Goblet cells" = "Goblet cells",
+  "TA cells" = "TA cells", 
+  "Stem cells" = "Stem cells", 
+  "Abs. colonocytes" = "Abs. colonocytes"
+  )
+
+
+# Apply levels to the Seurat object
+data_sub$sub_cell_types <- factor(
+  data_sub$sub_cell_types, 
+  levels = sub_type_levels2
+)
+
+# =============================================================================
+# 2. EXTRACT AND ORCHESTRATE GENE LIST
+# =============================================================================
+
+# A. Set the mandatory lead genes
+lead_genes <- c("Epcam")
+
+# B. Extract markers based on the ordered factor levels and the mapping
+# We use lapply to ensure we follow 'sub_type_levels2' order exactly
+ordered_markers <- unlist(lapply(sub_type_levels2, function(lvl) {
+  marker_key <- name_mapping[lvl]
+  
+  # Check if the key exists in your marker list to avoid errors
+  if (!is.na(marker_key) && marker_key %in% names(SUB_MARKERS_LIST)) {
+    return(SUB_MARKERS_LIST[[marker_key]])
+  } else {
+    return(NULL)
+  }
+}))
+
+# C. Combine, remove duplicates, and verify existence in the dataset
+# unique() ensures Cd3e/g stay at the top and don't repeat later
+final_gene_list <- c(lead_genes, ordered_markers)
+final_gene_list <- unique(final_gene_list)
+
+# D. Final check against the Seurat object's actual genes
+final_gene_list <- intersect(final_gene_list, rownames(data_sub))
+
+# --- Final DotPlot ---
+p_final_dot <- DotPlot(data_sub, features = final_gene_list,
                         group.by = "sub_cell_types", dot.min = 0.05,
                         cols = "RdBu", scale = TRUE) + coord_flip() +
   theme(axis.text.x = element_text(angle = 55, hjust = 1, size = 11))
 ggsave(file.path(OUTPUT_DIR, "FINAL_DotPlot_sub_Colonocytes.png"),
        p_final_dot, width = 8, height = 12, dpi = DPI_SETTING, bg = "white")
+
 
 # Faceted UMAP
 if (length(ADDITIONAL_GROUPS_TO_PLOT) > 0 &&
@@ -557,34 +588,16 @@ if (length(ADDITIONAL_GROUPS_TO_PLOT) > 0 &&
   n_levels <- n_distinct(data_sub@meta.data[[pgrp]])
   p_facet  <- DimPlot(data_sub, reduction = "umap_harmony", group.by = "sub_cell_types",
                       split.by = pgrp, label = FALSE, repel = TRUE) +
-    facet_wrap(as.formula(paste("~", pgrp)), ncol = 2) +
-    theme(strip.text = element_text(size = 13, face = "bold")) +
-    guides(color = guide_legend(override.aes = list(size = 4)))
+    facet_wrap(as.formula(paste("~", pgrp)), ncol = 3) +
+    theme(strip.text = element_text(size = 13, face = "bold"),
+          legend.text = element_text(size = 14),
+          legend.title = element_text(size = 14, face = "bold")) +
+    guides(color = guide_legend(override.aes = list(size = 4))) 
   ggsave(file.path(OUTPUT_DIR, paste0("FINAL_sub_UMAP_faceted_Colonocytes_by_", pgrp, ".png")),
-         p_facet, width = 12, height = 5 * ceiling(n_levels / 2), dpi = DPI_SETTING, bg = "white")
+         p_facet, width = 5 * ceiling(n_levels / 2), height = 10, dpi = DPI_SETTING, bg = "white")
 }
 
-# Proportional analysis
-plot_cell_proportions(data_sub, "sub_cell_types", "SampleID",
-                      "FINAL_sub_proportions_Colonocytes", OUTPUT_DIR)
-for (group in ADDITIONAL_GROUPS_TO_PLOT) {
-  plot_cell_proportions(data_sub, "sub_cell_types", group,
-                        paste0("FINAL_sub_proportions_Colonocytes_by_", group), OUTPUT_DIR)
-}
 
-# Example gene expression comparison
-p_pparg <- generate_gene_comparison_plots(
-  seurat_obj    = data_sub,
-  score_col     = "Pparg",
-  group_by      = "sub_cell_types",
-  x_axis        = COMPARISON_X_AXIS,
-  comparisons   = COMPARISON_PAIRS,
-  plot_type     = "violin",
-  output_prefix = "Pparg_expression_Colonocytes_",
-  plot_title    = "Pparg Expression — Colonocyte Sub-types",
-  y_label       = "Log-Normalized Expression",
-  fig_width     = 14, fig_height = 8
-)
 
 # =============================================================================
 # --- PART 7: SAVE ------------------------------------------------------------
@@ -598,3 +611,283 @@ message(paste0(
   "\nNext step:\n",
   "  - Script 05: DE + Two-Way ANOVA (05_DE_and_two_way_ANOVA.R)\n"
 ))
+
+# =============================================================================
+# --- PART 8: COMPOSITIONAL ANALYSIS ------------------------------------------
+# =============================================================================
+message("\n=== STEP 8: Compositional Analysis ===")
+
+# --- 1.4: Compositional Analysis Groups --------------------------------------
+ADDITIONAL_GROUPS_TO_PLOT <- c("Genotype_sex")
+
+# --- 1.5: Gene Expression Comparison -----------------------------------------
+library(dplyr); library(tidyr)
+library(ggplot2); library(ggpubr); library(writexl)
+
+my_comparisons <- COMPARISON_PAIRS
+
+# --- Step 1: Calculate % per sample ---
+meta <- data_sub@meta.data
+
+df_pct <- meta %>%
+  count(SampleID, Genotype_sex, sub_cell_types) %>%
+  group_by(SampleID) %>%
+  mutate(Percentage = (n / sum(n)) * 100) %>%
+  ungroup()
+
+# --- Step 2: Plot ---
+p_stats <- ggplot(df_pct, aes(x = Genotype_sex, y = Percentage, fill = Genotype_sex)) +
+  stat_summary(fun = "mean", geom = "bar", width = 0.7, color = "black", alpha = 0.8) +
+  stat_summary(fun.data = "mean_se", geom = "errorbar", width = 0.25, linewidth = 0.8) +
+  geom_jitter(shape = 21, color = "black", size = 2, width = 0.15) +
+  stat_compare_means(comparisons = my_comparisons, method = "t.test",
+                     label = "p.signif", size = 4) +
+  facet_wrap(~ sub_cell_types, scales = "free_y") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.3))) +
+  labs(title = "Cell Type Proportions by Genotype/Sex",
+       y = "% of Total Cells", x = NULL, fill = "Genotype_sex") +
+  theme_bw(base_size = 16) +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.text.y = element_text(size = 14),
+        axis.title = element_text(size = 16, face = "bold"),
+        strip.text = element_text(size = 16, face = "bold"),
+        legend.text = element_text(size = 14),
+        legend.title = element_text(size = 15, face = "bold"),
+        plot.title = element_text(size = 18, face = "bold", hjust = 0.5),
+        legend.position = "top")
+# --- Add these specific adjustments to your theme ---
+p_stats <- p_stats +
+  guides(fill = guide_legend(nrow = 2, byrow = TRUE)) + # Keeps Females on top, Males on bottom
+  theme(
+    legend.position = "top",
+    legend.justification = "left",   # This snaps the legend to the left side
+    legend.box.just = "left"
+  )
+
+p_stats
+
+# --- Step 3: Save ---
+#dir.create("proportion_analysis", showWarnings = FALSE)
+savef <- paste0(OUTPUT_DIR, "/colonocytes_stats_cell_props.png")
+ggsave(savef,p_stats, width = 10, height = 10, dpi=DPI_SETTING)
+savef <- paste0(OUTPUT_DIR, "/colonocytes_cell_props_long_data.xlsx")
+write_xlsx(df_pct, savef)
+
+
+
+# Apply custom theme
+cust_theme <- theme_classic() + theme(
+  plot.title = element_text(hjust = 0.5, size = 16), # Center and enlarge title
+  axis.text.x = element_text(angle = 0, hjust = 0.5, size = 12),
+  axis.title.x = element_blank(),
+  axis.text.y = element_text(size = 15),
+  axis.title.y = element_text(size = 16),
+  strip.text   = element_text(size = 16, face = "bold"),
+  legend.text = element_text(size = 16),
+  legend.title = element_text(size = 14)
+)
+
+# =============================================================================
+# plot_expression_custom() - Final Clean Version with Bottom Legend
+# =============================================================================
+plot_expression_custom <- function(seurat_obj,
+                                   gene,
+                                   plot_type      = "bar",
+                                   group_by       = "SubCellType",
+                                   condition_col  = "Genotype",
+                                   comparisons    = NULL,     
+                                   facet_ncol     = NULL,     
+                                   p_width        = NULL,     
+                                   p_height       = NULL,
+                                   x_angle        = 0,
+                                   show_legend    = TRUE,     # New Argument
+                                   hide_x_text    = TRUE,     # New Argument
+                                   conditions     = NULL,     
+                                   groups_to_keep = NULL,    
+                                   assay          = "RNA",
+                                   layer          = "data",
+                                   save_path      = NULL,
+                                   colors         = NULL,
+                                   dpi            = 300) {
+  
+  # 1. Gene Check
+  if (!gene %in% rownames(seurat_obj)) {
+    warning("Gene not found: ", gene)
+    return(NULL)
+  }
+  
+  # 2. Extract Data
+  expr_vec <- as.numeric(GetAssayData(seurat_obj, assay = assay, layer = layer)[gene, ])
+  
+  # 3. Handle Defaults
+  if (is.null(conditions)) {
+    conditions <- levels(factor(seurat_obj@meta.data[[condition_col]]))
+  }
+  if (is.null(groups_to_keep)) {
+    groups_to_keep <- levels(factor(seurat_obj@meta.data[[group_by]]))
+  }
+  if (is.null(colors)) {
+    colors <- scales::hue_pal()(length(conditions))
+    names(colors) <- conditions
+  }
+  
+  # 4. Filter and Prep Data
+  plot_df <- seurat_obj@meta.data %>%
+    dplyr::mutate(
+      expr      = expr_vec,
+      group     = .data[[group_by]],
+      condition = .data[[condition_col]]
+    ) %>%
+    dplyr::filter(group %in% groups_to_keep, condition %in% conditions) %>%
+    dplyr::mutate(
+      group     = factor(group,     levels = groups_to_keep),
+      condition = factor(condition, levels = conditions)
+    )
+  
+  # 5. Comparisons and Theme
+  if (is.null(comparisons) && length(conditions) == 2) {
+    comparisons <- list(conditions)
+  }
+  
+  plot_theme <- if(exists("cust_theme")) cust_theme else theme_minimal()
+  
+  # Helper to handle saving logic
+  save_plot_and_data <- function(plot_obj, path, summary_df = NULL, w_factor) {
+    if (!is.null(path)) {
+      ext <- tolower(tools::file_ext(path))
+      dev <- if(ext == "svg") "svg" else NULL
+      final_w <- if(!is.null(p_width)) p_width else (w_factor * (if(!is.null(facet_ncol)) facet_ncol else length(groups_to_keep)))
+      final_h <- if(!is.null(p_height)) p_height else 5
+      
+      ggplot2::ggsave(filename = path, plot = plot_obj, width = final_w, height = final_h, dpi = dpi, device = dev)
+      if (!is.null(summary_df)) {
+        write.csv(summary_df, sub("\\.[^.]+$", "_summary.csv", path))
+      }
+    }
+  }
+  
+  # --- PLOT GENERATION ---
+  p <- ggplot(plot_df, aes(x = condition, y = expr, fill = condition))
+  
+  if (plot_type == "bar") {
+    p <- p +
+      geom_bar(stat = "summary", fun = "mean", color = "black", width = 0.7) +
+      geom_errorbar(stat = "summary", fun.data = mean_se, width = 0.25) +
+      geom_jitter(shape = 21, color = "black", stroke = 0.4, width = 0.12, size = 1.2, alpha = 0.5) +
+      labs(y = "Mean normalized expression")
+  } else {
+    p <- p +
+      geom_violin(trim = TRUE, scale = "width", alpha = 0.8) +
+      geom_boxplot(width = 0.1, outlier.size = 0.1, fill = "white") +
+      labs(y = "Expression")
+  }
+  
+  p <- p + facet_wrap(~ group, ncol = facet_ncol, scales = "free_y") +
+    scale_fill_manual(values = colors, name = "Condition") + # Named for the legend
+    scale_y_continuous(expand = expansion(mult = c(0, 0.35))) + 
+    labs(title = bquote(italic(.(gene))), x = NULL) +
+    theme_classic() + plot_theme + 
+    theme(
+      legend.position = if(show_legend) "bottom" else "none",
+      # Logic to hide x-axis text
+      axis.text.x = if(hide_x_text) element_blank() else element_text(angle = x_angle, hjust = if(x_angle != 0) 1 else 0.5),
+      axis.ticks.x = if(hide_x_text) element_blank() else element_line()
+    )
+  
+  if (!is.null(comparisons)) {
+    p <- p + stat_compare_means(
+      comparisons = comparisons, 
+      method      = "wilcox.test", 
+      label       = "p.signif",
+      step.increase = 0.12
+    )
+  }
+  
+  p <- p +
+    guides(fill = guide_legend(nrow = 2, byrow = TRUE)) + # Keeps Females on top, Males on bottom
+    theme(
+      legend.position = "top",
+      legend.justification = "left",   # This snaps the legend to the left side
+      legend.box.just = "left"
+    )  
+  
+  summary_data <- plot_df %>%
+    dplyr::group_by(group, condition) %>%
+    dplyr::summarise(Mean = mean(expr), SE = sd(expr)/sqrt(n()), n = n(), .groups = "drop")
+  
+  save_plot_and_data(p, save_path, summary_data, w_factor = 2.5)
+  
+  return(list(plot = p, summary = summary_data))
+}
+
+
+# Correct call for Nr4a1
+# Recommended call for Nr4a1 using your new function
+plot_results <- plot_expression_custom(
+  seurat_obj    = data_sub,
+  gene          = "Nr4a1",
+  plot_type     = "bar", 
+  group_by      = "sub_cell_types",
+  condition_col = "Genotype_sex",
+  hide_x_text   = TRUE,      # Removes the crowded labels from the bottom of every plot
+  show_legend   = TRUE,      # Puts a clean color key at the very bottom
+  comparisons   = COMPARISON_PAIRS, # Use your 6 pairs
+  facet_ncol    = 4,               # Arrange in 4 columns
+  p_width     = 12,  # Force 12 inches wide
+  p_height    = 8,  # Force 10 inches tall for multiple rows,
+  save_path     = file.path(OUTPUT_DIR, "Nr4a1_stats_plot_colonocytes.png"),
+  dpi           = DPI_SETTING
+)
+
+# Correct call for Nr4a1-cust
+# Recommended call for Nr4a1 using your new function
+plot_results <- plot_expression_custom(
+  seurat_obj    = data_sub,
+  gene          = "Nr4a1-cust",
+  plot_type     = "bar", 
+  group_by      = "sub_cell_types",
+  condition_col = "Genotype_sex",
+  hide_x_text   = TRUE,      # Removes the crowded labels from the bottom of every plot
+  show_legend   = TRUE,      # Puts a clean color key at the very bottom
+  comparisons   = COMPARISON_PAIRS, # Use your 6 pairs
+  facet_ncol    = 4,               # Arrange in 4 columns
+  p_width     = 12,  # Force 12 inches wide
+  p_height    = 8,  # Force 10 inches tall for multiple rows,
+  save_path     = file.path(OUTPUT_DIR, "Nr4a1_custom_stats_plot_colonocytes.png"),
+  dpi           = DPI_SETTING
+)
+
+plot_results <- plot_expression_custom(
+  seurat_obj    = data_sub,
+  gene          = "Nr4a2",
+  plot_type     = "bar", 
+  group_by      = "sub_cell_types",
+  condition_col = "Genotype_sex",
+  hide_x_text   = TRUE,      # Removes the crowded labels from the bottom of every plot
+  show_legend   = TRUE,      # Puts a clean color key at the very bottom
+  comparisons   = COMPARISON_PAIRS, # Use your 6 pairs
+  facet_ncol    = 4,               # Arrange in 4 columns
+  p_width     = 12,  # Force 12 inches wide
+  p_height    = 8,  # Force 10 inches tall for multiple rows,
+  save_path     = file.path(OUTPUT_DIR, "Nr4a2_stats_plot_colonocytes.png"),
+  dpi           = DPI_SETTING
+)
+
+plot_results <- plot_expression_custom(
+  seurat_obj    = data_sub,
+  gene          = "Nr4a3",
+  plot_type     = "bar", 
+  group_by      = "sub_cell_types",
+  condition_col = "Genotype_sex",
+  hide_x_text   = TRUE,      # Removes the crowded labels from the bottom of every plot
+  show_legend   = TRUE,      # Puts a clean color key at the very bottom
+  comparisons   = COMPARISON_PAIRS, # Use your 6 pairs
+  facet_ncol    = 4,               # Arrange in 4 columns
+  p_width     = 12,  # Force 12 inches wide
+  p_height    = 8,  # Force 10 inches tall for multiple rows,
+  save_path     = file.path(OUTPUT_DIR, "Nr4a3_stats_plot_colonocytes.png"),
+  dpi           = DPI_SETTING
+)
+
+
