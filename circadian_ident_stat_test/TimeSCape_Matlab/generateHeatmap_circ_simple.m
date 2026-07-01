@@ -91,16 +91,17 @@ function generateHeatmap_circ_simple(celltype, strict, customName, circ, period1
         if height(D) <= 60
             ax.YTick       = 1 : height(D);
             ax.YTickLabels = string(Dzts{:,1});
-            ax.FontSize    = max(6, min(10, floor(300 / height(D))));
+            ax.FontSize    = max(8, min(12, floor(300 / height(D)) + 2));
         else
             ax.YTick       = [];
             ax.YTickLabels = {};
-            ax.FontSize    = 9;
+            ax.FontSize    = 11;
         end
-        title(ax, sprintf('%s  –  %d genes  (z-score)', celltype, height(D)), ...
-              'Color','k', 'FontWeight','bold', 'FontSize', 11);
-        xlabel(ax, 'Zeitgeber Time', 'Color','k', 'FontSize', 10);
-        ylabel(ax, 'Genes  (sorted by acrophase)', 'Color','k', 'FontSize', 10);
+        display_name = strrep(celltype, '_', ' ');
+        title(ax, sprintf('%s  –  %d genes  (z-score)', display_name, height(D)), ...
+              'Color','k', 'FontWeight','bold', 'FontSize', 13);
+        xlabel(ax, 'Zeitgeber Time', 'Color','k', 'FontSize', 12);
+        ylabel(ax, 'Genes  (sorted by acrophase)', 'Color','k', 'FontSize', 12);
         dr = [min(data_scaled(:)), max(data_scaled(:))];
         if diff(dr) > 0; clim(ax, dr); end
         colormap(parent_fig, cmap);

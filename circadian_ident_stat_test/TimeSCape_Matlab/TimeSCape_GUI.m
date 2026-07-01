@@ -208,6 +208,7 @@ function TimeSCape_GUI
     xlabel(hPlotAxes, 'Zeitgeber Time (hrs)');
     ylabel(hPlotAxes, 'Expression (log-normalised)');
     title(hPlotAxes,  '← Use the Gene Explorer panel to plot a single gene');
+    fix_ax_colors(hPlotAxes);
 
     % ── Save figure button (above plot area, right side) ─────────────────
     uicontrol('Parent', hFig, ...
