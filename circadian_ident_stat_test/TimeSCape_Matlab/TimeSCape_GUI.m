@@ -78,7 +78,8 @@ function TimeSCape_GUI
     section_label(cpan, pn(8,618,320,18), '② Analysis Settings', ACCENT, PAN_BG);
 
     uicontrol('Parent',cpan,'Style','text','Position',pn(10,592,120,20),...
-        'String','Cell Type:','BackgroundColor',PAN_BG,'HorizontalAlignment','left');
+        'String','Cell Type:','BackgroundColor',PAN_BG,'HorizontalAlignment','left',...
+        'ForegroundColor',[0 0 0]);
     cell_types = unique(sce.c_cell_type_tx);
     hCells = uicontrol('Parent',cpan,'Style','popupmenu',...
         'Position',pn(135,594,158,22),'String',cell_types,'BackgroundColor','white');
@@ -87,7 +88,8 @@ function TimeSCape_GUI
     mk_btn(cpan, pn(297,594,30,22), '⚙', @setAttrSourceCallback, [0.35 0.35 0.40], BTN_FG);
 
     uicontrol('Parent',cpan,'Style','text','Position',pn(10,562,120,20),...
-        'String','Normalization:','BackgroundColor',PAN_BG,'HorizontalAlignment','left');
+        'String','Normalization:','BackgroundColor',PAN_BG,'HorizontalAlignment','left',...
+        'ForegroundColor',[0 0 0]);
     hNorm = uicontrol('Parent',cpan,'Style','popupmenu',...
         'Position',pn(135,564,195,22),...
         'String',{'lib_size','none','magic_impute'},'BackgroundColor','white');
@@ -101,7 +103,8 @@ function TimeSCape_GUI
         'BackgroundColor',PAN_BG);
 
     uicontrol('Parent',cpan,'Style','text','Position',pn(204,537,54,16),...
-        'String','Workers:','BackgroundColor',PAN_BG,'HorizontalAlignment','left');
+        'String','Workers:','BackgroundColor',PAN_BG,'HorizontalAlignment','left',...
+        'ForegroundColor',[0 0 0]);
     default_cores = max(2, ceil(feature('numcores') / 4));
     hCores = uicontrol('Parent',cpan,'Style','edit',...
         'Position',pn(260,534,68,22),...
@@ -140,29 +143,34 @@ function TimeSCape_GUI
         'Value',0,'BackgroundColor',PAN_BG);
 
     uicontrol('Parent',cpan,'Style','text','Position',pn(12,272,110,20),...
-        'String','Custom label:','BackgroundColor',PAN_BG,'HorizontalAlignment','left');
+        'String','Custom label:','BackgroundColor',PAN_BG,'HorizontalAlignment','left',...
+        'ForegroundColor',[0 0 0]);
     hCustomName = uicontrol('Parent',cpan,'Style','edit',...
         'Position',pn(128,270,200,24),'String','','BackgroundColor','white');
 
-    mk_btn(cpan, pn(12,234,200,30), 'Generate Heatmap', @heatmapCallback, BTN_PLOT, BTN_FG);
+    mk_btn(cpan, pn(12,234,186,30),  'Generate Heatmap',  @heatmapCallback,    BTN_PLOT,            BTN_FG);
+    mk_btn(cpan, pn(204,234,120,30), 'All Heatmaps',      @allHeatmapsCallback,[0.18 0.36 0.60],    BTN_FG);
 
     % ── ⑤ Gene explorer ───────────────────────────────────────────────────
     section_label(cpan, pn(8,204,320,18), '⑤ Gene Explorer', ACCENT, PAN_BG);
 
     plot_types = {'Confident genes','Non-confident genes','Classic circadian genes'};
     uicontrol('Parent',cpan,'Style','text','Position',pn(10,178,110,20),...
-        'String','Batch plots:','BackgroundColor',PAN_BG,'HorizontalAlignment','left');
+        'String','Batch plots:','BackgroundColor',PAN_BG,'HorizontalAlignment','left',...
+        'ForegroundColor',[0 0 0]);
     hPlotType = uicontrol('Parent',cpan,'Style','popupmenu',...
         'Position',pn(125,180,205,22),'String',plot_types,'BackgroundColor','white');
     mk_btn(cpan, pn(12,146,220,30), 'Save Gene Plots (Batch)', @batchPlotsCallback, BTN_PLOT, BTN_FG);
 
     uicontrol('Parent',cpan,'Style','text','Position',pn(10,114,130,20),...
-        'String','Single gene:','BackgroundColor',PAN_BG,'HorizontalAlignment','left');
+        'String','Single gene:','BackgroundColor',PAN_BG,'HorizontalAlignment','left',...
+        'ForegroundColor',[0 0 0]);
     genes_sorted = sort(sce.g);
     hGeneDropdown = uicontrol('Parent',cpan,'Style','popupmenu',...
         'Position',pn(145,116,185,22),'String',genes_sorted,'BackgroundColor','white');
     uicontrol('Parent',cpan,'Style','text','Position',pn(10,86,90,20),...
-        'String','Or type:','BackgroundColor',PAN_BG,'HorizontalAlignment','left');
+        'String','Or type:','BackgroundColor',PAN_BG,'HorizontalAlignment','left',...
+        'ForegroundColor',[0 0 0]);
     hGeneEdit = uicontrol('Parent',cpan,'Style','edit',...
         'Position',pn(105,86,175,24),'String','','BackgroundColor','white');
 
@@ -173,7 +181,7 @@ function TimeSCape_GUI
     % Violin / scatter toggle (only active when overlay is checked)
     uicontrol('Parent',cpan,'Style','text','Position',pn(12,38,80,18),...
         'String','SC style:','BackgroundColor',PAN_BG,'HorizontalAlignment','left',...
-        'FontSize',FSZ);
+        'FontSize',FSZ,'ForegroundColor',[0 0 0]);
     hViolinBtn = uicontrol('Parent',cpan,'Style','radiobutton',...
         'Position',pn(95,38,82,18),'String','Violin',...
         'BackgroundColor',PAN_BG,'Value',1,'FontSize',FSZ);
@@ -251,23 +259,37 @@ function TimeSCape_GUI
         init(:,2)      = num2cell(prefilled);
         init(:,3)      = num2cell(cell_counts(:));
 
+        % ── Apply current theme to dialog ─────────────────────────────────
+        if guiData.dark
+            dlg_bg  = [0.12 0.12 0.16];
+            tbl_rows = [0.17 0.17 0.22; 0.20 0.20 0.26];
+            tbl_fg  = [0.88 0.88 0.90];
+            txt_col = [0.88 0.88 0.90];
+        else
+            dlg_bg  = [1.00 1.00 1.00];
+            tbl_rows = [1.00 1.00 1.00; 0.97 0.97 1.00];
+            tbl_fg  = [0.05 0.05 0.05];
+            txt_col = [0.00 0.00 0.00];
+        end
+
         tfig = figure('Name','Define ZT Tmeta','Position',[180,180,590,450],...
-                      'Color',BG,'MenuBar','none','ToolBar','none',...
+                      'Color',dlg_bg,'MenuBar','none','ToolBar','none',...
                       'NumberTitle','off');
 
         uicontrol('Parent',tfig,'Style','text',...
             'Position',[15,400,560,30],...
             'String',['Set the ZT hour for each batch. ' ...
                       'Enter -1 to exclude a batch completely.'],...
-            'BackgroundColor',BG,'HorizontalAlignment','left',...
-            'ForegroundColor',[0 0 0]);
+            'BackgroundColor',dlg_bg,'HorizontalAlignment','left',...
+            'ForegroundColor',txt_col);
 
         tbl = uitable('Parent',tfig,'Position',[15,80,560,310],...
             'Data',init,...
             'ColumnName',{'Original Batch ID','ZT Hour (numeric)','# Cells'},...
             'ColumnEditable',[false,true,false],...
             'ColumnWidth',{200,150,100},...
-            'BackgroundColor',[1 1 1; 0.97 0.97 1]);
+            'BackgroundColor',tbl_rows,...
+            'ForegroundColor',tbl_fg);
 
         mk_btn(tfig,[15,20,130,40],'Save & Apply',@saveTmeta,ACCENT,BTN_FG);
         mk_btn(tfig,[160,20,130,40],'Save SCE .mat',@saveNewSCE,[0.4 0.4 0.4],BTN_FG);
@@ -523,6 +545,47 @@ function TimeSCape_GUI
         catch ME
             errordlg(['Heatmap error: ', ME.message], 'Error');
         end
+    end
+
+    % ── ④b All Heatmaps (post-processing) ────────────────────────────────
+    function allHeatmapsCallback(~,~)
+        if ~check_tmeta(); return; end
+        all_types  = unique(sce.c_cell_type_tx);
+        n_types    = numel(all_types);
+        period12   = logical(hPeriod12.Value);
+        strict     = logical(hStrictFilter.Value);
+        circ       = logical(hClassicCirc.Value);
+        customName = strtrim(hCustomName.String);
+        if period12; pl = '_period_12_'; else; pl = '_period_24_'; end
+
+        set(hRunStatus,'String', ...
+            sprintf('⏳  Generating heatmaps for %d cell types…', n_types), ...
+            'ForegroundColor',[0.4 0.2 0]);
+        drawnow;
+
+        n_heat = 0;  n_skip = 0;
+        for ii = 1 : n_types
+            ct      = char(all_types(ii));
+            ct_safe = safe_name(ct);
+            ct_dir  = fullfile(pwd, ct_safe);
+            chk_f   = fullfile(ct_dir, [ct_safe pl 'circadian_analysis_all.csv']);
+            if exist(chk_f, 'file')
+                try
+                    generateHeatmap_circ_simple(ct_safe, strict, customName, circ, ...
+                                                period12, ct_dir, []);
+                    n_heat = n_heat + 1;
+                catch
+                    n_skip = n_skip + 1;   % too few confident genes — skip silently
+                end
+            else
+                n_skip = n_skip + 1;       % analysis not run yet for this type
+            end
+        end
+
+        set(hRunStatus,'String', ...
+            sprintf('✓  Heatmaps: %d saved, %d skipped (no data / too few genes)', ...
+                    n_heat, n_skip), ...
+            'ForegroundColor',[0.1 0.5 0.1]);
     end
 
     % ── ⑤a Batch gene plots ───────────────────────────────────────────────
