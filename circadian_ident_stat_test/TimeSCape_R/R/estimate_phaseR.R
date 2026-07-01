@@ -143,6 +143,15 @@ estimate_phaseR <- function(Xg_zts, actual_times, period12, test_type) {
       p_value <- NA_real_
     }
 
+    # ── Canonical form: positive amplitude ────────────────────────────────────
+    # If NLS converges with amp < 0 the trough is at acro_fit and the true
+    # peak is half a period away. Flip both for the positive-amplitude convention.
+    if (is.finite(amp_fit) && amp_fit < 0) {
+      amp_fit  <- -amp_fit
+      acro_fit <- (acro_fit + period / 2) %% period
+    }
+    acro_fit <- acro_fit %% period   # robust wrap into [0, period)
+
     # ── 7. Macro-level Pearson correlation (per-ZT means vs fitted cosine) ─────
     fval      <- amp_fit * cos(2 * pi * (actual_times - acro_fit) / period) + mesor_fit
     cor_test  <- stats::cor.test(R0, fval, method = "pearson")

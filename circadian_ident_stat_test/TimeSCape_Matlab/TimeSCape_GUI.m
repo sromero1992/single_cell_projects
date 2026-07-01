@@ -518,6 +518,7 @@ function TimeSCape_GUI
             % Pass sanitised name -- files on disk are named with safe_name()
             generateHeatmap_circ_simple(ct_safe, strict, customName, circ, period12, ...
                                         ct_outdir, hPlotAxes);
+            fix_ax_colors(hPlotAxes);
             msgbox(sprintf('Heatmap saved →  %s', ct_outdir), 'Done');
         catch ME
             errordlg(['Heatmap error: ', ME.message], 'Error');
@@ -569,6 +570,7 @@ function TimeSCape_GUI
             cla(hPlotAxes);
             sce_circ_plot_gene(sce, guiData.tmeta, cust_cells, period12, ...
                                gene, hPlotAxes, print_scdata, norm_str, use_violin, guiData.outdir);
+            fix_ax_colors(hPlotAxes);
         catch ME
             errordlg(['Plot error: ', ME.message],'Error');
         end
@@ -794,6 +796,22 @@ function TimeSCape_GUI
             'Position',pos,'String',lbl,'Callback',cb,...
             'BackgroundColor',bg,'ForegroundColor',fg,...
             'FontName',FNT,'FontSize',FSZ,'FontWeight','bold');
+    end
+
+    function fix_ax_colors(ax)
+        % After any external function plots into the embedded axes, MATLAB
+        % creates new Title/XLabel/YLabel text objects that inherit default
+        % gray colours.  This helper re-enforces the correct colours for
+        % both light and dark mode.
+        if guiData.dark
+            tc = [0.80 0.80 0.82];
+        else
+            tc = [0.10 0.10 0.10];
+        end
+        set(ax, 'XColor', tc, 'YColor', tc);
+        set(get(ax, 'Title'),  'Color', tc);
+        set(get(ax, 'XLabel'), 'Color', tc);
+        set(get(ax, 'YLabel'), 'Color', tc);
     end
 
 end  % TimeSCape_GUI

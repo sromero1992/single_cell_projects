@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name            = "timescape"
+version         = "0.2.0"
+description     = "Circadian rhythm detection in single-cell RNA-seq data"
+readme          = "README.md"
+license         = { text = "MIT" }
+authors         = [{ name = "Selim Romero", email = "ssromerogon@tamu.edu" }]
+requires-python = ">=3.9"
+
+dependencies = [
+    "numpy>=1.24",
+    "pandas>=1.5",
+    "scipy>=1.10",
+    "matplotlib>=3.7",
+    "seaborn>=0.12",
+    "scanpy>=1.9",
+    "anndata>=0.9",
+    "joblib>=1.3",
+    "scikit-learn>=1.3",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "jupyter", "ipykernel"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["timescape*"]

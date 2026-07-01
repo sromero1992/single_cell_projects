@@ -117,6 +117,16 @@ function [acrophase, amp, period, mesor, ...
     amp       = fmdl.amp;
     mesor     = fmdl.mesor;
 
+    % ── Canonical form: positive amplitude ───────────────────────────────
+    % If the NLS converges with amp < 0 the trough is at acrophase and the
+    % true peak is half a period away. Flip both so the reported amplitude
+    % is always positive and acrophase is the true peak time.
+    if amp < 0
+        amp       = -amp;
+        acrophase = mod(acrophase + period/2, period);
+    end
+    acrophase = mod(acrophase, period);   % robust wrap into [0, period)
+
     % ── Correlation t-test: cosine fit vs. per-timepoint means ───────────
     % Uses actual ZT values so missing points don't bias the correlation.
     fval = amp * cos(2*pi*(actual_times - acrophase) / period) + mesor;
