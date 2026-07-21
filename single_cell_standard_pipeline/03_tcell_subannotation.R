@@ -1,6 +1,10 @@
 # =============================================================================
 # scRNA-seq PIPELINE - SCRIPT 3: T CELL SUB-ANNOTATION
 # Version: 1.0 (CSV-Driven, Seurat Wrappers, Harmony + Standard Clustering)
+# UNIFIED BUILD: part of unified_pipeline/. Consumes the object produced by
+#   01_process_data.R v11.0. Doublet calls arrive standardised in the
+#   'Doublet_Status' column regardless of which caller ran, so this script
+#   requires no changes when DOUBLET_METHOD is switched.
 #
 # PURPOSE:
 #   Loads the globally annotated Seurat object from Script 02 and performs
@@ -52,10 +56,12 @@ set.seed(123)
 
 # --- 1.1: Project Paths (must match Scripts 01 and 02) -----------------------
 PROJECT_NAME <- "Nr4a1_s17_ack"
-ROOT_PATH <- "/home/ssromerogon/2026_nr4a1_ack/r_process"
-ROOT_PATH   <- "Z:/selim_working_dir/2026_nr4a1_ack/r_process"  # Windows
+#ROOT_PATH <- "/home/ssromerogon/2026_nr4a1_ack/r_process"
+#ROOT_PATH   <- "Z:/selim_working_dir/2026_nr4a1_ack/r_process"  # Windows
+ROOT_PATH <- "/home/ssromerogon/local_drive/optimus_drive/selim_working_dir/2026_nr4a1_ack/r_process"
 
 OUTPUT_DIR       <- file.path(ROOT_PATH, "seurat_output")
+TCELL_DIR        <- file.path(OUTPUT_DIR, "tcell_subannotation")   # <-- all T cell plots go here
 MAIN_RDS         <- file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_final_annotated.rds"))
 MARKERS_CSV_FILE <- file.path(ROOT_PATH, "cell_type_markers.csv")
 
@@ -102,6 +108,9 @@ DPI_SETTING <- 300
 # --- PART 2: LOAD DATA & MARKERS --------------------------------------------
 # =============================================================================
 message("=== Loading globally annotated Seurat object ===")
+if (!dir.exists(OUTPUT_DIR)) dir.create(OUTPUT_DIR, recursive = TRUE)
+if (!dir.exists(TCELL_DIR))  dir.create(TCELL_DIR,  recursive = TRUE)
+message(paste("  T cell output folder:", TCELL_DIR))
 data <- readRDS(MAIN_RDS)
 message(paste("  Loaded:", ncol(data), "cells"))
 
@@ -112,9 +121,9 @@ parse_markers <- function(marker_string) {
 
 # Default fallback sub-markers for T cells (used if CSV has no "T cells" sub rows)
 DEFAULT_SUB_MARKERS <- list(
-  "CD4+ T cells"     = c("Cd4", "Cd40lg", "Il7r", "Izumo1r"),
-  "CD8+ T cells"     = c("Cd8a", "Cd8b1", "Gzmb", "Gzma", "Nkg7"),
-  "Tregs"            = c("Foxp3", "Il2ra", "Ikzf2", "Ctla4", "Tigit"),
+  "CD4+ T cells"     = c("Cd4"),
+  "CD8+ T cells"     = c("Cd8a", "Cd8b1"),
+  "Tregs"            = c("Foxp3", "Il2ra", "Ikzf2", "Tigit"),
   "NK cells"         = c("Ncr1", "Klrb1c", "Nkg7", "Klrd1", "Xcl1"),
   "NKT cells"        = c("Cd3e", "Klrb1c", "Cd8a"),
   "γδ T cells"        = c("Trdc", "Trgc1", "Trgc2"),
@@ -156,25 +165,28 @@ message(paste("  Sub-clustering resolution:", SUBCLUSTER_RESOLUTION_FINAL))
 # --- PART 3: UTILITY FUNCTIONS -----------------------------------------------
 # =============================================================================
 
+# Convenience negation of %in% (used in dirty-cluster removal)
+`%nin%` <- Negate(`%in%`)
+
 get_weighted_annotation <- function(seurat_obj, marker_genes, cluster_key,
                                     standardize_expression = TRUE) {
   all_obj_genes <- rownames(seurat_obj)
   marker_genes  <- lapply(marker_genes, function(gs) intersect(gs, all_obj_genes))
   marker_genes  <- marker_genes[sapply(marker_genes, length) > 0]
   if (length(marker_genes) == 0) stop("No valid marker genes found in dataset.")
-
+  
   all_marker_genes <- sort(unique(unlist(marker_genes)))
   cell_types       <- names(marker_genes)
-
+  
   W_binary <- matrix(0, nrow = length(all_marker_genes), ncol = length(cell_types),
                      dimnames = list(all_marker_genes, cell_types))
   for (ct in cell_types) W_binary[marker_genes[[ct]], ct] <- 1.0
-
+  
   gene_occurrence <- rowSums(W_binary)
   W_specificity   <- W_binary / gene_occurrence
   W_final         <- sweep(W_specificity, 2, colSums(W_specificity), "/")
   W_final[is.na(W_final)] <- 0
-
+  
   X_subset <- GetAssayData(seurat_obj, assay = "RNA", layer = "data")[all_marker_genes, ]
   if (standardize_expression) {
     X_subset <- t(scale(t(as.matrix(X_subset))))
@@ -182,14 +194,14 @@ get_weighted_annotation <- function(seurat_obj, marker_genes, cluster_key,
   } else {
     X_subset <- as.matrix(X_subset)
   }
-
+  
   W <- t(W_final)
   clusters   <- seurat_obj[[cluster_key, drop = TRUE]]
   unique_cls <- unique(clusters)
   annotation_vector <- character(length = ncol(seurat_obj))
   names(annotation_vector) <- colnames(seurat_obj)
   cluster_score_data <- list()
-
+  
   for (cluster_id in unique_cls) {
     cell_idx <- which(clusters == cluster_id)
     if (length(cell_idx) == 0) next
@@ -218,29 +230,29 @@ process_and_extract_cell_type <- function(data, cell_type_name,
   message(paste("  Subsetting and re-clustering:", cell_type_name))
   data_sub <- subset(data, subset = CellType == cell_type_name)
   data_sub@reductions <- list(); data_sub@graphs <- list()
-
+  
   data_sub <- FindVariableFeatures(data_sub, selection.method = "vst", nfeatures = num_hvg) %>%
     ScaleData(verbose = FALSE) %>%
     RunPCA(npcs = dims_pca, reduction.name = "pca", verbose = FALSE)
   gc()
-
+  
   # Track A: Standard PCA
   data_sub <- FindNeighbors(data_sub, dims = 1:dims_pca, reduction = "pca",
-                             k.param = kneigh, graph.name = "pca_nn", verbose = FALSE) %>%
+                            k.param = kneigh, graph.name = "pca_nn", verbose = FALSE) %>%
     FindClusters(resolution = resolution, graph.name = "pca_nn",
                  cluster.name = "clusters_none", verbose = FALSE) %>%
     RunUMAP(dims = 1:dims_pca, reduction = "pca", n.neighbors = kneigh,
             min.dist = min_dist, n.epochs = 500,
             reduction.name = "umap_none", verbose = FALSE)
   gc()
-
+  
   # Track B: Harmony
   message("  Running Harmony for sub-clustering...")
   data_sub <- RunHarmony(data_sub, group.by.vars = "SampleID",
-                          reduction = "pca", reduction.save = "harmony", verbose = FALSE)
+                         reduction = "pca", reduction.save = "harmony", verbose = FALSE)
   gc()
   data_sub <- FindNeighbors(data_sub, dims = 1:dims_pca, reduction = "harmony",
-                             k.param = kneigh, graph.name = "harmony_nn", verbose = FALSE) %>%
+                            k.param = kneigh, graph.name = "harmony_nn", verbose = FALSE) %>%
     FindClusters(resolution = resolution, graph.name = "harmony_nn",
                  cluster.name = "clusters_harmony", verbose = FALSE) %>%
     RunUMAP(dims = 1:dims_pca, reduction = "harmony", n.neighbors = kneigh,
@@ -248,6 +260,41 @@ process_and_extract_cell_type <- function(data, cell_type_name,
             reduction.name = "umap_harmony", verbose = FALSE)
   gc()
   return(data_sub)
+}
+
+
+run_pca_umap <- function(data,
+                         num_hvg  = 2000,
+                         dims_pca = 50,
+                         min_dist = 0.3,
+                         kneigh   = 15) {
+  
+  message("  Running HVG selection, scaling, and PCA...")
+  data <- FindVariableFeatures(data, selection.method = "vst", nfeatures = num_hvg) %>%
+    ScaleData(verbose = FALSE) %>%
+    RunPCA(npcs = dims_pca, reduction.name = "pca", verbose = FALSE)
+  gc()
+  
+  # Track A: Standard PCA → UMAP
+  message("  Running UMAP on PCA...")
+  data <- RunUMAP(data, dims = 1:dims_pca, reduction = "pca", n.neighbors = kneigh,
+                  min.dist = min_dist, n.epochs = 500,
+                  reduction.name = "umap_none", verbose = FALSE)
+  gc()
+  
+  # Track B: Harmony → UMAP
+  message("  Running Harmony...")
+  data <- RunHarmony(data, group.by.vars = "SampleID",
+                     reduction = "pca", reduction.save = "harmony", verbose = FALSE)
+  gc()
+  
+  message("  Running UMAP on Harmony...")
+  data <- RunUMAP(data, dims = 1:dims_pca, reduction = "harmony", n.neighbors = kneigh,
+                  min.dist = min_dist, n.epochs = 500,
+                  reduction.name = "umap_harmony", verbose = FALSE)
+  gc()
+  
+  return(data)
 }
 
 # =============================================================================
@@ -266,7 +313,7 @@ if (!"CellType" %in% colnames(data@meta.data)) {
 
 n_parent <- sum(data@meta.data$CellType == PARENT_CELL_TYPE, na.rm = TRUE)
 if (n_parent < 50) stop(paste("[ERROR] Only", n_parent, PARENT_CELL_TYPE,
-                               "cells found. Check that PARENT_CELL_TYPE matches exactly."))
+                              "cells found. Check that PARENT_CELL_TYPE matches exactly."))
 message(paste("  Found", n_parent, PARENT_CELL_TYPE, "cells for sub-clustering."))
 
 data_sub <- process_and_extract_cell_type(
@@ -286,26 +333,26 @@ p_harm_comp <- (
 ) + (
   DimPlot(data_sub, reduction = "umap_harmony", group.by = "SampleID") + ggtitle("Harmony Corrected")
 ) & theme(legend.position = "bottom")
-ggsave(file.path(OUTPUT_DIR, paste0("SUBCLUSTER_01_Harmony_comparison_T_cells.png")),
+ggsave(file.path(TCELL_DIR, paste0("SUBCLUSTER_01_Harmony_comparison_T_cells.png")),
        p_harm_comp, width = 16, height = 8, dpi = DPI_SETTING)
 
 # --- 4.2: Cluster UMAPs (annotate from these) ---
 p_clust_none <- DimPlot(data_sub, reduction = "umap_none",    group.by = "clusters_none",
-                         label = TRUE) + NoLegend() + ggtitle("Clusters: Standard PCA")
+                        label = TRUE) + NoLegend() + ggtitle("Clusters: Standard PCA")
 p_clust_harm <- DimPlot(data_sub, reduction = "umap_harmony", group.by = "clusters_harmony",
-                         label = TRUE) + NoLegend() + ggtitle("Clusters: Harmony")
+                        label = TRUE) + NoLegend() + ggtitle("Clusters: Harmony")
 p_clust_comp <- p_clust_none + p_clust_harm
-ggsave(file.path(OUTPUT_DIR, "SUBCLUSTER_02_COMPARE_UMAP_T_cells.png"),
+ggsave(file.path(TCELL_DIR, "SUBCLUSTER_02_COMPARE_UMAP_T_cells.png"),
        p_clust_comp, width = 16, height = 8, dpi = DPI_SETTING)
-ggsave(file.path(OUTPUT_DIR, "SUBCLUSTER_02_ANNOTATE_THIS_UMAP_T_cells.png"),
+ggsave(file.path(TCELL_DIR, "SUBCLUSTER_02_ANNOTATE_THIS_UMAP_T_cells.png"),
        p_clust_harm, width = 10, height = 8, dpi = DPI_SETTING)
 
 # --- 4.3: DotPlot for cluster characterization ---
 p_dot_sub <- DotPlot(data_sub, features = sub_dotplot_markers,
-                      group.by = "clusters_harmony", dot.min = 0.05, cols = "RdBu") +
+                     group.by = "clusters_harmony", dot.min = 0.05, cols = "RdBu") +
   theme(axis.text.x = element_text(angle = 55, hjust = 1, size = 11),  cluster.idents = T) +
   ggtitle(paste("Sub-Cluster Markers:", PARENT_CELL_TYPE))
-ggsave(file.path(OUTPUT_DIR, "SUBCLUSTER_02_ANNOTATE_USING_THIS_DOTPLOT_T_cells.png"),
+ggsave(file.path(TCELL_DIR, "SUBCLUSTER_02_ANNOTATE_USING_THIS_DOTPLOT_T_cells.png"),
        p_dot_sub, width = 14, height = 9, dpi = DPI_SETTING, bg = "white")
 
 # =============================================================================
@@ -332,9 +379,9 @@ data_sub$sub_weighted_raw <- sub_results_raw$annotation_vector
 message("\n--- Sub-cluster Pre-scoring Top-5 Report (standardized) ---")
 print(sub_results_std$top5_report)
 write_xlsx(sub_results_std$top5_report,
-           file.path(OUTPUT_DIR, "SUBCLUSTER_PRESCORE_top5_T_cells_std.xlsx"))
+           file.path(TCELL_DIR, "SUBCLUSTER_PRESCORE_top5_T_cells_std.xlsx"))
 write_xlsx(sub_results_raw$top5_report,
-           file.path(OUTPUT_DIR, "SUBCLUSTER_PRESCORE_top5_T_cells_raw.xlsx"))
+           file.path(TCELL_DIR, "SUBCLUSTER_PRESCORE_top5_T_cells_raw.xlsx"))
 
 p_prescore <- (
   DimPlot(data_sub, reduction = "umap_harmony", group.by = "sub_weighted_std",
@@ -343,7 +390,7 @@ p_prescore <- (
   DimPlot(data_sub, reduction = "umap_harmony", group.by = "sub_weighted_raw",
           label = TRUE, repel = TRUE) + ggtitle("Sub Pre-Score: Raw")
 )
-ggsave(file.path(OUTPUT_DIR, "SUBCLUSTER_03_prescore_comparison_T_cells.png"),
+ggsave(file.path(TCELL_DIR, "SUBCLUSTER_03_prescore_comparison_T_cells.png"),
        p_prescore, width = 18, height = 8, dpi = DPI_SETTING, bg = "white")
 
 # =============================================================================
@@ -359,16 +406,18 @@ ggsave(file.path(OUTPUT_DIR, "SUBCLUSTER_03_prescore_comparison_T_cells.png"),
 # Available sub-types from CSV (or defaults if CSV had no entries):
 #   "CD4+ T cells", "CD8+ T cells", "Tregs", "NK cells",
 #   "NKT cells", "gdT cells", "Exhausted T", "ILC2s"
-#FeaturePlot(data_sub, reduction = "umap_harmony", features = "scDblFinder_score")
+# Doublet score column depends on DOUBLET_METHOD used in Script 01:
+#   DoubletFinder -> "DF_score"   |   scDblFinder -> "scDblFinder_score"
+#FeaturePlot(data_sub, reduction = "umap_harmony", features = "DF_score")
 
 SUB_ANNOTATION_MAP <- c(
   '0'  = 'ILC2',
   '1'  = 'CD8+ T cells',
   '2'  = 'Tregs',
-  '3'  = 'γδ  T cells',
+  '3'  = 'γδ T cells',
   '4'  = 'Tregs',
   '5'  = 'Cyc. CD4+ T cells',
-  '6'  = 'Th17 cells', 
+  '6'  = 'γδ T cells', 
   '7'  = 'CD4+ T cells', 
   '8'  = 'CD8+ T cells',
   '9'  = 'CD4+ T cells', 
@@ -385,170 +434,361 @@ SUB_ANNOTATION_MAP <- c(
   '20' = 'CD8+ T cells', 
   '21' = 'CD8+ T cells', 
   '22' = 'Doublet', # ??
-  '23' = 'γδ  T cells',
+  '23' = 'γδ T cells',
   '24' = 'Tregs',
   '25' = 'Doublet', 
   '26' = 'Doublet' # ??
-  )
+)
 
 # =============================================================================
-# --- PART 6: APPLY SUB-ANNOTATIONS & FINAL VISUALIZATIONS -------------------
+# --- PART 6: FIRST-PASS ANNOTATION & DIRTY-CLUSTER QC -----------------------
 # =============================================================================
-message("\n=== STEP 6: Applying Sub-Annotations ===")
+message("\n=== STEP 6a: First-Pass Sub-Annotation (pre-cleaning) ===")
 
-data_sub$sub_cell_types <- recode_factor(data_sub$clusters_harmony, !!!SUB_ANNOTATION_MAP)
+# ACTION 5 annotation map is applied here (see above).
+# Label anything you are unsure about as "Doublet" or "Unknown" — those get
+# removed in the cleaning step below.
+data_sub$sub_cell_types  <- recode_factor(data_sub$clusters_harmony, !!!SUB_ANNOTATION_MAP)
 data_sub$CellType        <- data_sub$sub_cell_types
 data_sub$seurat_clusters <- data_sub$clusters_harmony
 
-# The find markers below and feature plots helped to determine the doublets of those cells
-data_sub <- subset(data_sub, subset = sub_cell_types != "Doublet")
+# --- 6a.1: Pre-cleaning overview UMAP (dirty, includes flagged clusters) ---
+p_dirty <- DimPlot(data_sub, reduction = "umap_harmony", group.by = "sub_cell_types",
+                   label = TRUE, repel = TRUE) +
+  ggtitle("Pre-Cleaning: All Clusters Labelled (including Doublet/Unknown)") +
+  theme(legend.text = element_text(size = 11))
+ggsave(file.path(TCELL_DIR, "CLEANING_00_pre_removal_overview.png"),
+       p_dirty, width = 10, height = 8, dpi = DPI_SETTING, bg = "white")
 
-DimPlot(data_sub, reduction = "umap_harmony", group.by = "sub_cell_types",
-        label = TRUE, repel = TRUE)
+# --- 6a.2: QC FeaturePlots for suspicious clusters -------------------------
+# Edit the cluster numbers in the FindMarkers calls and the feature lists here
+# as you discover new dirty clusters. Save them all to TCELL_DIR for records.
 
+message("  Generating QC FeaturePlots for dirty cluster inspection...")
 
-# Exploring clusters content
-Idents(data_sub) <- "clusters_harmony"
-all_markers <- FindMarkers(data_sub, ident.1 = "26", min.pct = 0.05, logfc.threshold = 0.25)
+# Broad identity QC
+p_qc1 <- FeaturePlot(data_sub, reduction = "umap_harmony",
+                     features = c("Cd3e", "Cd3g", "Cd8a", "Cd8b1", "Cd4", "Foxp3", "Mki67", "nCount_RNA"),
+                     ncol = 4) &
+  theme(plot.title = element_text(size = 13, face = "italic"), axis.title = element_blank())
+ggsave(file.path(TCELL_DIR, "CLEANING_01_QC_broad_identity_markers.png"),
+       p_qc1, width = 16, height = 8, dpi = DPI_SETTING, bg = "white")
 
-# 1. Sort by log2FoldChange and take the top 100
-top100_genes <- all_markers %>%
-  dplyr::arrange(desc(avg_log2FC)) %>%
-  head(100) %>%
-  rownames()
+# Contamination / non-T markers
+p_qc2 <- FeaturePlot(data_sub, reduction = "umap_harmony",
+                     features = c("Muc2", "Krt20", "Epcam", "Ptprc", "Cd19", "Ms4a1"),
+                     ncol = 3) &
+  theme(plot.title = element_text(size = 13, face = "italic"), axis.title = element_blank())
+ggsave(file.path(TCELL_DIR, "CLEANING_02_QC_contamination_markers.png"),
+       p_qc2, width = 14, height = 10, dpi = DPI_SETTING, bg = "white")
 
-# Print the genes to the console for manual copy
-cat(top100_genes, sep = "\n")
-
-
-# Checking if nk cells could be ILC1
-FeaturePlot(data_sub, features = c("Eomes", "Prdm1", "Pdcd1", "Havcr2", "Entpd1", "Lag3"), reduction = "umap_harmony")
-FeaturePlot(data_sub, features = c("Muc2", "Krt20", "Cd3e", "Cd3g"), reduction = "umap_harmony")
-FeaturePlot(data_sub, features = c("Cd3e","Cd3g","Cd8a", "Cd8b1", "Cd4", "Foxp3", "Mki67"), reduction = "umap_harmony")
-FeaturePlot(data_sub, features = c("Prf1", "Ncr1", "Tbx21", "Il12rb2", "Ifng"), reduction = "umap_harmony")
-
-FeaturePlot(data_sub, features = c("Rorc", "Rora", "Foxp3", "Il17a", "Il22"), 
-            blend = FALSE, ncol = 2, reduction = "umap_harmony")
-
-
-p<- FeaturePlot(data_sub, features = c("Prf1", "Ncr1", "Tbx21", "Rorc", "Stat3","Batf", "Irf4", "Ncam1", "Klrb1", "Il1r1", "Klrd1"), reduction = "umap_harmony")
-ggsave(file.path(OUTPUT_DIR, "NK_cells_ILC1_markers.png"),
-       p, width = 12, height = 10, dpi = DPI_SETTING, bg = "white")
-
-
-
-# 1. Define the Mouse-formatted gene lists
-nk_markers <- c("Eomes", "Gnly", "Nkg7", "Prf1", "Gzmb", "Fgfbp2", "Klrd1")
+# NK / ILC disambiguation
+nk_markers   <- c("Eomes", "Gnly", "Nkg7", "Prf1", "Gzmb", "Fgfbp2", "Klrd1")
 ilc1_markers <- c("Tbx21", "Ifng", "Il7r", "Cxcr6", "Itga1", "Cd69", "Tnfsf10", "Znf683")
+nk_ilc_features <- intersect(c(nk_markers, ilc1_markers), rownames(data_sub))
+p_qc3 <- FeaturePlot(data_sub, features = nk_ilc_features, reduction = "umap_harmony", ncol = 4) &
+  theme(plot.title = element_text(size = 13, face = "italic"), axis.title = element_blank())
+ggsave(file.path(TCELL_DIR, "CLEANING_03_NK_ILC1_disambiguation.png"),
+       p_qc3, width = 16, height = 12, dpi = DPI_SETTING, bg = "white")
 
-# Combine all genes and check if they exist in the Seurat object
-all_features <- c(nk_markers, ilc1_markers)
-all_features_found <- intersect(all_features, rownames(data_sub))
+# ILC / Th17 markers
+p_qc4 <- FeaturePlot(data_sub, reduction = "umap_harmony",
+                     features = intersect(c("Rorc", "Rora", "Il17a", "Il22", "Prf1",
+                                            "Ncr1", "Tbx21", "Rorc", "Stat3", "Batf",
+                                            "Irf4", "Ncam1", "Klrb1", "Il1r1", "Klrd1"),
+                                          rownames(data_sub)),
+                     ncol = 4) &
+  theme(plot.title = element_text(size = 13, face = "italic"), axis.title = element_blank())
+ggsave(file.path(TCELL_DIR, "CLEANING_04_ILC_Th17_markers.png"),
+       p_qc4, width = 16, height = 12, dpi = DPI_SETTING, bg = "white")
+
+# Exhaustion markers
+p_qc5 <- FeaturePlot(data_sub, reduction = "umap_harmony",
+                     features = intersect(c("Eomes", "Prdm1", "Pdcd1", "Havcr2", "Entpd1", "Lag3"),
+                                          rownames(data_sub)),
+                     ncol = 3) &
+  theme(plot.title = element_text(size = 13, face = "italic"), axis.title = element_blank())
+ggsave(file.path(TCELL_DIR, "CLEANING_05_exhaustion_markers.png"),
+       p_qc5, width = 14, height = 10, dpi = DPI_SETTING, bg = "white")
+
+
+# --- 6a.3: Per-suspect-cluster FindMarkers (edit cluster IDs as needed) -----
+Idents(data_sub) <- "clusters_harmony"
+message("  Running FindAllMarkers on all clusters...")
+all_cluster_markers <- FindAllMarkers(
+  data_sub,
+  only.pos        = TRUE,
+  min.pct         = 0.05,
+  logfc.threshold = 0.25,
+  verbose         = FALSE
+)
+
+top30_by_cluster <- all_cluster_markers %>%
+  dplyr::group_by(cluster) %>%
+  dplyr::slice_max(order_by = avg_log2FC, n = 30) %>%
+  dplyr::arrange(cluster, desc(avg_log2FC)) %>%
+  dplyr::ungroup()
+
+write_xlsx(
+  as.data.frame(top30_by_cluster),
+  file.path(TCELL_DIR, "CLEANING_top30_per_cluster.xlsx")
+)
+
+message(paste("  Marker table saved —",
+              length(unique(all_cluster_markers$cluster)), "clusters,",
+              nrow(top30_by_cluster), "rows total."))
 
 # =============================================================================
-# 2. FEATURE PLOT (UMAP)
+# --- PART 6b: REMOVE DIRTY CLUSTERS & RE-EMBED ----------------------------
 # =============================================================================
-# Organize into 4 columns for a clean grid
-p_umap <- FeaturePlot(
-  data_sub, 
-  features = all_features_found, 
-  reduction = "umap_harmony",
-  ncol = 4
-) & theme(
-  plot.title = element_text(size = 15, face = "italic"),
-  axis.title = element_blank()
+message("\n=== STEP 6b: Removing dirty clusters and re-running UMAP ===")
+
+# ACTION: set the label(s) used for dirty clusters in SUB_ANNOTATION_MAP above.
+# Default is "Doublet" — add "Unknown" or others if you used them.
+DIRTY_LABELS <- c("Doublet", "Unknown")   # <-- ACTION: edit if you used different labels
+
+n_before <- ncol(data_sub)
+data_sub  <- subset(data_sub, subset = sub_cell_types %nin% DIRTY_LABELS)
+n_after   <- ncol(data_sub)
+message(paste("  Removed", n_before - n_after, "dirty cells.",
+              n_after, "clean cells remain."))
+
+# Drop used reductions so run_pca_umap starts fresh
+data_sub@reductions <- list()
+data_sub@graphs     <- list()
+
+message("  Re-running HVG / PCA / Harmony / UMAP on clean cells...")
+data_sub <- run_pca_umap(
+  data     = data_sub,
+  num_hvg  = SUBCLUSTER_N_HVG,
+  dims_pca = SUBCLUSTER_N_PCS,
+  min_dist = SUBCLUSTER_MIN_DIST,
+  kneigh   = SUBCLUSTER_K_NEIGHBORS
 )
-p_umap
-# Save UMAP FeaturePlot
-ggsave(
-  filename = file.path(OUTPUT_DIR, "NK_ILC1_FeaturePlot_UMAP.png"),
-  plot = p_umap, 
-  width = 16, 
-  height = 12, 
-  dpi = 300, 
-  bg = "white"
+gc()
+
+# Re-cluster on the clean embedding so cluster IDs are stable for re-annotation
+SUBCLUSTER_N_PCS <- 20
+message("  Re-clustering clean cells on harmony embedding...")
+data_sub <- FindNeighbors(data_sub, dims = 1:SUBCLUSTER_N_PCS, reduction = "harmony",
+                          k.param = SUBCLUSTER_K_NEIGHBORS, graph.name = "harmony_nn",
+                          verbose = FALSE) %>%
+  FindClusters(resolution = SUBCLUSTER_RESOLUTION_FINAL, graph.name = "harmony_nn",
+               cluster.name = "clusters_harmony_clean", verbose = FALSE)
+Idents(data_sub) <- "clusters_harmony_clean"
+gc()
+
+# --- 6b.1: Save clean cluster UMAPs for re-annotation review ---------------
+p_clean_clust <- DimPlot(data_sub, reduction = "umap_harmony",
+                         group.by = "clusters_harmony_clean",
+                         label = TRUE, repel = TRUE) +
+  NoLegend() + ggtitle("CLEAN Clusters: Harmony (re-embedded)")
+ggsave(file.path(TCELL_DIR, "CLEANING_06_clean_clusters_ANNOTATE_THIS.png"),
+       p_clean_clust, width = 10, height = 8, dpi = DPI_SETTING, bg = "white")
+
+p_clean_both <- (
+  DimPlot(data_sub, reduction = "umap_none",    group.by = "clusters_harmony_clean",
+          label = TRUE) + NoLegend() + ggtitle("Clean — Standard PCA")
+) + (
+  DimPlot(data_sub, reduction = "umap_harmony", group.by = "clusters_harmony_clean",
+          label = TRUE) + NoLegend() + ggtitle("Clean — Harmony")
+)
+ggsave(file.path(TCELL_DIR, "CLEANING_07_clean_compare_both_embeddings.png"),
+       p_clean_both, width = 16, height = 8, dpi = DPI_SETTING)
+
+# --- 6b.2: Re-run weighted pre-scoring on clean clusters -------------------
+message("  Re-running weighted pre-scoring on clean clusters...")
+sub_results_clean_std <- get_weighted_annotation(
+  seurat_obj             = data_sub,
+  marker_genes           = SUB_MARKERS_LIST,
+  cluster_key            = "clusters_harmony_clean",
+  standardize_expression = TRUE
+)
+sub_results_clean_raw <- get_weighted_annotation(
+  seurat_obj             = data_sub,
+  marker_genes           = SUB_MARKERS_LIST,
+  cluster_key            = "clusters_harmony_clean",
+  standardize_expression = FALSE
+)
+data_sub$sub_weighted_std_clean <- sub_results_clean_std$annotation_vector
+data_sub$sub_weighted_raw_clean <- sub_results_clean_raw$annotation_vector
+
+message("\n--- Clean Sub-cluster Pre-scoring Top-5 Report (standardized) ---")
+print(sub_results_clean_std$top5_report)
+write_xlsx(sub_results_clean_std$top5_report,
+           file.path(TCELL_DIR, "CLEANING_08_prescore_clean_std.xlsx"))
+write_xlsx(sub_results_clean_raw$top5_report,
+           file.path(TCELL_DIR, "CLEANING_08_prescore_clean_raw.xlsx"))
+
+p_prescore_clean <- (
+  DimPlot(data_sub, reduction = "umap_harmony", group.by = "sub_weighted_std_clean",
+          label = TRUE, repel = TRUE) + ggtitle("Clean Pre-Score: Standardized")
+) | (
+  DimPlot(data_sub, reduction = "umap_harmony", group.by = "sub_weighted_raw_clean",
+          label = TRUE, repel = TRUE) + ggtitle("Clean Pre-Score: Raw")
+)
+ggsave(file.path(TCELL_DIR, "CLEANING_09_prescore_clean_comparison.png"),
+       p_prescore_clean, width = 18, height = 8, dpi = DPI_SETTING, bg = "white")
+
+# --- 6b.3: DotPlot for clean cluster characterization ----------------------
+p_dot_clean <- DotPlot(data_sub, features = sub_dotplot_markers,
+                       group.by = "clusters_harmony_clean", dot.min = 0.05,
+                       cols = "RdBu") +
+  theme(axis.text.x = element_text(angle = 55, hjust = 1, size = 11)) +
+  ggtitle(paste("Clean Sub-Cluster Markers:", PARENT_CELL_TYPE))
+ggsave(file.path(TCELL_DIR, "CLEANING_10_clean_ANNOTATE_USING_THIS_DOTPLOT.png"),
+       p_dot_clean, width = 14, height = 9, dpi = DPI_SETTING, bg = "white")
+
+# --- 6c: Per-suspect-cluster FindMarkers (edit cluster IDs as needed) -----
+Idents(data_sub) <- "clusters_harmony_clean"
+message("  Running FindAllMarkers on all clusters...")
+all_cluster_markers <- FindAllMarkers(
+  data_sub,
+  only.pos        = TRUE,
+  min.pct         = 0.05,
+  logfc.threshold = 0.25,
+  verbose         = FALSE
 )
 
+top30_by_cluster <- all_cluster_markers %>%
+  dplyr::group_by(cluster) %>%
+  dplyr::slice_max(order_by = avg_log2FC, n = 30) %>%
+  dplyr::arrange(cluster, desc(avg_log2FC)) %>%
+  dplyr::ungroup()
+
+write_xlsx(
+  as.data.frame(top30_by_cluster),
+  file.path(TCELL_DIR, "CLEANING_top30_per_cluster_clean.xlsx")
+)
+
+message(paste("  Marker table saved —",
+              length(unique(all_cluster_markers$cluster)), "clusters,",
+              nrow(top30_by_cluster), "rows total."))
+
+# =============================================================================
+# --- ACTION 6: FILL IN CLEAN CLUSTER ANNOTATIONS HERE -----------------------
+# =============================================================================
+# Review (in TCELL_DIR):
+#   CLEANING_06_clean_clusters_ANNOTATE_THIS.png     — new cluster layout
+#   CLEANING_10_clean_ANNOTATE_USING_THIS_DOTPLOT.png — marker expression
+#   CLEANING_08_prescore_clean_std.xlsx              — top-5 per clean cluster
+#   CLEANING_09_prescore_clean_comparison.png        — automated suggestions
+#
+# Map each NEW cluster number (as a string) to a sub-type name.
+# These will differ from the original SUB_ANNOTATION_MAP because cells were
+# re-embedded and re-clustered after doublet removal.
+
+SUB_ANNOTATION_MAP_CLEAN <- c(
+  '0'  = 'ILC2', #      
+  '1'  = 'CD8+ T cells', #
+  '2'  = 'Tregs', #
+  '3'  = 'Tregs', # 
+  '4'  = 'γδ T cells', #
+  '5'  = 'γδ T cells', #  
+  '6'  = 'Cyc. T cells', # 
+  '7'  = 'CD4+ T cells', #
+  '8'  = 'CD8+ T cells', #
+  '9'  = 'CD4+ T cells', #
+  '10' = 'Tregs', # 
+  '11' = 'NK cells', #
+  '12' = 'CD8+ T cells', #
+  '13' = 'CD8+ T cells', #
+  '14' = 'Doublet',#  
+  '15' = 'CD4+ T cells', #
+  '16' = 'CD4+ T cells', #
+  '17' = 'CD4+ T cells', # 
+  '18' = 'CD4+ T cells', #
+  '19' = 'CD4+ T cells',#
+  '20' = 'Cyc. T cells', #
+  '21' = 'γδ T cells', #
+  '22' = 'Cyc. T cells', #
+  '23' = 'CD4+ T cells', #
+  '24' = 'NK cells', #
+  '25' = 'Tregs'
+)
+
+# =============================================================================
+# --- PART 6c: APPLY CLEAN ANNOTATIONS & FINAL VISUALIZATIONS ---------------
+# =============================================================================
+message("\n=== STEP 6c: Applying clean sub-annotations ===")
+
+data_sub$sub_cell_types  <- recode_factor(data_sub$clusters_harmony_clean, !!!SUB_ANNOTATION_MAP_CLEAN)
+data_sub$CellType        <- data_sub$sub_cell_types
+data_sub$seurat_clusters <- data_sub$clusters_harmony_clean
+
+# Remove any remaining dirty clusters before finalizing levels
+DIRTY_LABELS_CLEAN <- c("Doublet", "Unknown")   # <-- edit if you used different labels
+n_before <- ncol(data_sub)
+data_sub <- subset(data_sub, subset = sub_cell_types %nin% DIRTY_LABELS_CLEAN)
+message(paste("  Removed", n_before - ncol(data_sub), "additional dirty cells.",
+              ncol(data_sub), "final clean cells."))
+
+sub_type_levels2 <- c(
+  "CD8+ T cells", "γδ T cells", "Cyc. T cells",
+  "CD4+ T cells", "Tregs",
+  "NK cells", "ILC2"
+)
+data_sub$sub_cell_types <- factor(data_sub$sub_cell_types, levels = sub_type_levels2)
 
 
-# 
-# # Load the necessary libraries
-# library(RColorBrewer)
-# library(ggplot2)
-# library(patchwork)
-# 
-# # 1. Plot nCount_RNA (Total molecules)
-# p1 <- FeaturePlot(data_sub, features = "nCount_RNA", reduction = "umap_harmony",  pt.size = 0.5) +
-#   scale_colour_gradientn(colours = rev(brewer.pal(n = 11, name = "Spectral"))) +
-#   ggtitle("Total RNA Counts (nCount)")
-# 
-# # 2. Plot nFeature_RNA (Unique genes)
-# p2 <- FeaturePlot(data_sub, features = "nFeature_RNA", reduction = "umap_harmony", pt.size = 0.5) +
-#   scale_colour_gradientn(colours = rev(brewer.pal(n = 11, name = "Spectral"))) +
-#   ggtitle("Unique Genes (nFeature)")
-# 
-# # 3. View them side-by-side
-# p1 | p2
+# Drop reductions and re-embed without the removed cells
+data_sub@reductions <- list()
+data_sub@graphs     <- list()
+
+data_sub <- run_pca_umap(
+  data     = data_sub,
+  num_hvg  = SUBCLUSTER_N_HVG,
+  dims_pca = SUBCLUSTER_N_PCS,
+  min_dist = SUBCLUSTER_MIN_DIST,
+  kneigh   = SUBCLUSTER_K_NEIGHBORS
+)
+gc()
+# Re-cluster on the clean embedding so cluster IDs are stable for re-annotation
+SUBCLUSTER_N_PCS <- 20
+message("  Re-clustering clean cells on harmony embedding...")
+data_sub <- FindNeighbors(data_sub, dims = 1:SUBCLUSTER_N_PCS, reduction = "harmony",
+                          k.param = SUBCLUSTER_K_NEIGHBORS, graph.name = "harmony_nn",
+                          verbose = FALSE) %>%
+  FindClusters(resolution = SUBCLUSTER_RESOLUTION_FINAL, graph.name = "harmony_nn",
+               cluster.name = "clusters_harmony_clean", verbose = FALSE)
+Idents(data_sub) <- "clusters_harmony_clean"
+gc()
 
 
 
-DimPlot(data_sub, reduction = "umap_harmony", group.by = "sub_cell_types",
-        label = TRUE, repel = TRUE)
-
-
-sub_type_levels2 <- c("CD8+ T cells", "γδ  T cells", "Cyc. CD4+ T cells",
-                      "CD4+ T cells", "Tregs", "Th17 cells",  
-                      "NK cells", "ILC2", "ILC3")
-data_sub$sub_cell_types   <- factor(data_sub$sub_cell_types,   levels = sub_type_levels2)
-
-
-# --- Final UMAP: manual annotation ---
+# --- Final UMAP: clean manual annotation ---
 p_final <- DimPlot(data_sub, reduction = "umap_harmony", group.by = "sub_cell_types",
                    label = TRUE, repel = TRUE) +
-  ggtitle(paste("Sub-Cell Types:", PARENT_CELL_TYPE)) +
+  ggtitle(paste("Sub-Cell Types:", PARENT_CELL_TYPE, "(Clean)")) +
   theme(legend.text  = element_text(size = 12),
         legend.title = element_text(size = 14, face = "bold")) +
   guides(color = guide_legend(override.aes = list(size = 4)))
-ggsave(file.path(OUTPUT_DIR, "FINAL_SUBCLUSTER_UMAP_T_cells.png"),
+ggsave(file.path(TCELL_DIR, "FINAL_SUBCLUSTER_UMAP_T_cells.png"),
        p_final, width = 10, height = 8, dpi = DPI_SETTING, bg = "white")
 
-# --- Comparison: manual vs weighted ---
+# --- Comparison: manual vs automated pre-scores (on clean embedding) ---
 p_compare <- DimPlot(data_sub, reduction = "umap_harmony",
-                     group.by = c("sub_cell_types", "sub_weighted_std", "sub_weighted_raw"),
+                     group.by = c("sub_cell_types",
+                                  "sub_weighted_std_clean",
+                                  "sub_weighted_raw_clean"),
                      label = FALSE, repel = TRUE)
-ggsave(file.path(OUTPUT_DIR, "FINAL_SUBCLUSTER_comparison_T_cells.png"),
+ggsave(file.path(TCELL_DIR, "FINAL_SUBCLUSTER_comparison_T_cells.png"),
        p_compare, width = 26, height = 8, dpi = DPI_SETTING, bg = "white")
 
 
 # =============================================================================
 # 1. DEFINE LEVELS AND MAPPING OF DOTPLOT
 # =============================================================================
-# This is the order you want for your plot axes/legend
-sub_type_levels2 <- c(
-  "CD8+ T cells", 
-  "γδ  T cells", 
-  "Cyc. CD4+ T cells", 
-  "CD4+ T cells", 
-  "Tregs", 
-  "Th17 cells",
-  "NK cells", 
-  "ILC2", 
-  "ILC3"
-)
-
-# This maps your Factor Levels (left) to the SUB_MARKERS_LIST names (right)
-# This handles the "Cyc. CD4+ T cells" -> "Cyc. T cells" mismatch
+# sub_type_levels2 is already defined and applied above in Part 6c.
 name_mapping <- c(
   "CD8+ T cells"      = "CD8+ T cells",
-  "γδ  T cells"       = "γδ  T cells",
-  "Cyc. CD4+ T cells" = "Cyc. T cells",
+  "γδ T cells"       = "γδ T cells",
+  "Cyc. T cells" = "Cyc. T cells",
   "CD4+ T cells"      = "CD4+ T cells",
   "Tregs"             = "Tregs",
-  "Th17 cells"        = "Th17 cells",
   "NK cells"          = "NK cells",
-  "ILC2"              = "ILC2",
-  "ILC3"              = "ILC3"
-)
+  "ILC2"              = "ILC2"
+  )
 
 # Apply levels to the Seurat object
 data_sub$sub_cell_types <- factor(
@@ -561,7 +801,7 @@ data_sub$sub_cell_types <- factor(
 # =============================================================================
 
 # A. Set the mandatory lead genes
-lead_genes <- c("Cd3e", "Cd3g")
+lead_genes <- c("Cd3e", "Cd3g", "Cd3d")
 
 # B. Extract markers based on the ordered factor levels and the mapping
 # We use lapply to ensure we follow 'sub_type_levels2' order exactly
@@ -586,12 +826,12 @@ final_gene_list <- intersect(final_gene_list, rownames(data_sub))
 
 # --- Final DotPlot ---
 p_final_dot <- DotPlot(data_sub, features = final_gene_list,
-                        group.by = "sub_cell_types", dot.min = 0.05,
-                        cols = "RdBu", scale = TRUE) + coord_flip() +
+                       group.by = "sub_cell_types", dot.min = 0.05,
+                       cols = "RdBu", scale = TRUE) + coord_flip() +
   theme(axis.text.x = element_text(angle = 55, hjust = 1, size = 11))
 
 p_final_dot
-ggsave(file.path(OUTPUT_DIR, "FINAL_DotPlot_sub_T_cells.png"),
+ggsave(file.path(TCELL_DIR, "FINAL_DotPlot_sub_T_cells.png"),
        p_final_dot, width = 8, height = 12, dpi = DPI_SETTING, bg = "white")
 
 # Faceted UMAP
@@ -606,7 +846,7 @@ if (length(ADDITIONAL_GROUPS_TO_PLOT) > 0 &&
           legend.text = element_text(size = 14),
           legend.title = element_text(size = 14, face = "bold")) +
     guides(color = guide_legend(override.aes = list(size = 4))) 
-  ggsave(file.path(OUTPUT_DIR, paste0("FINAL_sub_UMAP_faceted_T_cells_by_", pgrp, ".png")),
+  ggsave(file.path(TCELL_DIR, paste0("FINAL_sub_UMAP_faceted_T_cells_by_", pgrp, ".png")),
          p_facet, width = 5 * ceiling(n_levels / 2), height = 10, dpi = DPI_SETTING, bg = "white")
 }
 
@@ -614,7 +854,7 @@ if (length(ADDITIONAL_GROUPS_TO_PLOT) > 0 &&
 # --- PART 7: SAVE ------------------------------------------------------------
 # =============================================================================
 message("\n=== STEP 7: Saving T Cell Sub-Cluster Object ===")
-saveRDS(data_sub, file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_T_cells_subclustered.rds")))
+saveRDS(data_sub, file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_tcells_subclustered.rds")))
 message(paste0(
   "\n=== T CELL SUB-ANNOTATION COMPLETE ===\n",
   "  Saved: ", PROJECT_NAME, "_T_cells_subclustered.rds\n",
@@ -623,7 +863,6 @@ message(paste0(
   "  - Script 04: Colonocyte sub-annotation (04_colonocyte_subannotation.R)\n",
   "  - Script 05: DE + Two-Way ANOVA (05_DE_and_two_way_ANOVA.R)\n"
 ))
-
 
 
 # =============================================================================
@@ -684,9 +923,9 @@ p_stats
 
 # --- Step 3: Save ---
 #dir.create("proportion_analysis", showWarnings = FALSE)
-savef <- paste0(OUTPUT_DIR, "/tcells_stats_cell_props.png")
+savef <- paste0(TCELL_DIR, "/tcells_stats_cell_props.png")
 ggsave(savef,p_stats, width = 10, height = 10, dpi=DPI_SETTING)
-savef <- paste0(OUTPUT_DIR, "/tcells_cell_props_long_data.xlsx")
+savef <- paste0(TCELL_DIR, "/tcells_cell_props_long_data.xlsx")
 write_xlsx(df_pct, savef)
 
 
@@ -851,7 +1090,7 @@ plot_results <- plot_expression_custom(
   facet_ncol    = 4,               # Arrange in 4 columns
   p_width     = 12,  # Force 12 inches wide
   p_height    = 8,  # Force 10 inches tall for multiple rows,
-  save_path     = file.path(OUTPUT_DIR, "Nr4a1_stats_plot_tcells.png"),
+  save_path     = file.path(TCELL_DIR, "Nr4a1_stats_plot_tcells.png"),
   dpi           = DPI_SETTING
 )
 
@@ -869,7 +1108,7 @@ plot_results <- plot_expression_custom(
   facet_ncol    = 4,               # Arrange in 4 columns
   p_width     = 12,  # Force 12 inches wide
   p_height    = 8,  # Force 10 inches tall for multiple rows,
-  save_path     = file.path(OUTPUT_DIR, "Nr4a1_custom_stats_plot_tcells.png"),
+  save_path     = file.path(TCELL_DIR, "Nr4a1_custom_stats_plot_tcells.png"),
   dpi           = DPI_SETTING
 )
 
@@ -885,7 +1124,7 @@ plot_results <- plot_expression_custom(
   facet_ncol    = 4,               # Arrange in 4 columns
   p_width     = 12,  # Force 12 inches wide
   p_height    = 8,  # Force 10 inches tall for multiple rows,
-  save_path     = file.path(OUTPUT_DIR, "Nr4a2_stats_plot_tcells.png"),
+  save_path     = file.path(TCELL_DIR, "Nr4a2_stats_plot_tcells.png"),
   dpi           = DPI_SETTING
 )
 
@@ -901,7 +1140,7 @@ plot_results <- plot_expression_custom(
   facet_ncol    = 4,               # Arrange in 4 columns
   p_width     = 12,  # Force 12 inches wide
   p_height    = 8,  # Force 10 inches tall for multiple rows,
-  save_path     = file.path(OUTPUT_DIR, "Nr4a3_stats_plot_tcells.png"),
+  save_path     = file.path(TCELL_DIR, "Nr4a3_stats_plot_tcells.png"),
   dpi           = DPI_SETTING
 )
 
@@ -918,7 +1157,7 @@ plot_results <- plot_expression_custom(
   facet_ncol    = 4,               # Arrange in 4 columns
   p_width     = 12,  # Force 12 inches wide
   p_height    = 8,  # Force 10 inches tall for multiple rows,
-  save_path     = file.path(OUTPUT_DIR, "Pdcd1_stats_plot_tcells.png"),
+  save_path     = file.path(TCELL_DIR, "Pdcd1_stats_plot_tcells.png"),
   dpi           = DPI_SETTING
 )
 
@@ -934,7 +1173,7 @@ plot_results <- plot_expression_custom(
   facet_ncol    = 4,               # Arrange in 4 columns
   p_width     = 12,  # Force 12 inches wide
   p_height    = 8,  # Force 10 inches tall for multiple rows,
-  save_path     = file.path(OUTPUT_DIR, "Ctla4_stats_plot_tcells.png"),
+  save_path     = file.path(TCELL_DIR, "Ctla4_stats_plot_tcells.png"),
   dpi           = DPI_SETTING
 )
 
@@ -950,7 +1189,7 @@ plot_results <- plot_expression_custom(
   facet_ncol    = 4,               # Arrange in 4 columns
   p_width     = 12,  # Force 12 inches wide
   p_height    = 8,  # Force 10 inches tall for multiple rows,
-  save_path     = file.path(OUTPUT_DIR, "Lag3_stats_plot_tcells.png"),
+  save_path     = file.path(TCELL_DIR, "Lag3_stats_plot_tcells.png"),
   dpi           = DPI_SETTING
 )
 
@@ -966,7 +1205,7 @@ plot_results <- plot_expression_custom(
   facet_ncol    = 4,               # Arrange in 4 columns
   p_width     = 12,  # Force 12 inches wide
   p_height    = 8,  # Force 10 inches tall for multiple rows,
-  save_path     = file.path(OUTPUT_DIR, "Havcr2_stats_plot_tcells.png"),
+  save_path     = file.path(TCELL_DIR, "Havcr2_stats_plot_tcells.png"),
   dpi           = DPI_SETTING
 )
 
@@ -988,22 +1227,23 @@ message("\n##### Starting Multi-T Cell Exhaustion Analysis #####")
 #OUTPUT_DIR   <- file.path(ROOT_PATH, "seurat_output")
 
 if(!dir.exists(OUTPUT_DIR)) dir.create(OUTPUT_DIR, recursive = TRUE)
+# (TCELL_DIR is already created at load time above)
 
 # =============================================================================
 # 1. SUBSETTING
 # =============================================================================
-t_cells_of_interest <- c("CD8+ T cells", "CD4+ T cells", "Th17 cells", "Tregs", "γδ  T cells", "Cyc. CD4+ T cells")
+t_cells_of_interest <- c("CD8+ T cells", "CD4+ T cells", "Tregs", "γδ T cells", "Cyc. T cells")
 data_t <- subset(data_sub, subset = sub_cell_types %in% t_cells_of_interest)
+
+# --- Final UMAP: clean manual annotation ---
+DimPlot(data_t, reduction = "umap_harmony", group.by = "sub_cell_types",
+                   label = TRUE, repel = TRUE) 
 
 # =============================================================================
 # 2. GENE SIGNATURE PANELS
 # =============================================================================
 cd8_gene_sets <- list(
-  Exhaustion_Score = c("Lag3", "Pdcd1", "Havcr2", "Tigit", "Ctla4", "Tox", 
-                       "Eomes", "Cd244a", "Cxcl13", "Cd160", "Entpd1"),
-  Exhaustion_Score_nr4a = c("Lag3", "Pdcd1", "Havcr2", "Tigit", "Ctla4", "Tox", 
-                            "Eomes", "Cd244a", "Cxcl13", "Cd160", "Entpd1", 
-                            "Nr4a1-cust", "Nr4a2", "Nr4a3"),
+  Exhaustion_Score = c("Lag3", "Pdcd1", "Havcr2", "Tigit", "Ctla4", "Tox"),
   Effector_Score = c("Gzmb", "Gzma", "Gzmk", "Ifng", "Tnf", "Il2", "Tbx21", "Prf1")
 )
 
@@ -1051,7 +1291,7 @@ COMPARISON_PAIRS <- list(
   c("WT_Male",         "Polyp_Male")
 )
 
-scores_to_plot <- c("Exhaustion_Score", "Exhaustion_Score_nr4a", "Effector_Score")
+scores_to_plot <- c("Exhaustion_Score", "Effector_Score")
 
 for (score_col in scores_to_plot) {
   message("Generating plot for: ", score_col)
@@ -1078,7 +1318,7 @@ for (score_col in scores_to_plot) {
       tip.length = 0.01
     ) +
     
-    facet_wrap(~ sub_cell_types, scales = "free_y", ncol = 2) +
+    facet_wrap(~ sub_cell_types, scales = "free_y", ncol = 3) +
     
     labs(
       title = display_title,
@@ -1098,12 +1338,12 @@ for (score_col in scores_to_plot) {
   output_filename <- paste0("Multi_T_", score_col, "_Explicit_Groups.png")
   
   ggsave(
-    filename = file.path(OUTPUT_DIR, output_filename), 
+    filename = file.path(TCELL_DIR, output_filename), 
     plot = violin_p, 
     device = "png",
     dpi = 300,
-    height = 12,
-    width = 10, 
+    height = 10,
+    width = 12, 
     units = "in"
   )
   

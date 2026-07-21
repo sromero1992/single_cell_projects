@@ -1,6 +1,19 @@
 # =============================================================================
 # scRNA-seq PIPELINE - SCRIPT 1: DATA PROCESSING ENGINE
-# Version: 10.0 (scDblFinder replaces DoubletFinder)
+# Version: 11.0 - UNIFIED (dual-method doublet detection)
+#
+# UNIFIED BUILD PROVENANCE:
+#   This script merges the best components of three prior project pipelines:
+#     - 2026_nr4a1 / github_pipeline (v10.0) : overall architecture, SCEVAN +
+#       DecontX dual-checkpoint system, probe integration, Harmony integration,
+#       BPCells memory handling, rollback safeguard, scDblFinder path.
+#     - eithan_coffee (01_process_data_SG.R) : DoubletFinder paramSweep loop
+#       with constrained pK selection ("safe zone" + fallback) and per-sample
+#       rollback logging.
+#     - wu_project1 (01_processing_samples.R) : enhanced pK diagnostic plot
+#       (grey trace, red dashed line at selection, red diamond marking the
+#       selected peak) and the explicit reasonable-range/fallback messaging.
+#   See CHANGELOG.md in this folder for a full file-by-file provenance table.
 #
 # PURPOSE:
 #   This script is the computational backbone of the single-cell RNA-seq
@@ -11,40 +24,62 @@
 #     4. Pre-merge QC (loose filters, per-sample)
 #     5. Ambient RNA correction via DecontX (optional, per-sample),
 #        with optional rounding of corrected counts to integers.
-#     6. Doublet detection + removal via scDblFinder (per-sample),
-#        with a ROLLBACK SAFEGUARD: if the detected doublet fraction exceeds
-#        DOUBLET_ROLLBACK_THRESHOLD, removal is skipped for that sample.
+#     6. Doublet detection + removal (per-sample) via a SELECTABLE METHOD
+#        (DoubletFinder | scDblFinder | both), with a ROLLBACK SAFEGUARD: if
+#        the detected doublet fraction exceeds DOUBLET_ROLLBACK_THRESHOLD,
+#        removal is skipped for that sample.
 #     7. Post-merge QC (stringent filters applied after merging all samples)
 #     8. Data normalization, dimensionality reduction, and batch-correction
 #        via Harmony, producing parallel (PCA vs. Harmony) clusterings.
 #     9. Saving a fully processed, un-annotated Seurat object for Script 02.
 #
 # PER-SAMPLE PROCESSING ORDER (STEP 2.1a):
-#   Load → [SCEVAN] → [DecontX] → scDblFinder → Remove Doublets → Pre-QC
-#   → Checkpoint
+#   Load → [SCEVAN] → Pre-QC → [DecontX] → Doublet Detection →
+#   Remove Doublets → Checkpoint
 #   This order ensures that:
 #     - SCEVAN sees unmodified raw counts (best for CNA detection)
-#     - scDblFinder operates on ambient-corrected counts
-#     - Pre-merge QC metrics reflect the corrected, singlet-only matrix
+#     - Doublet detection operates on ambient-corrected counts
+#     - Empty drops are gone before doublet calling, but filtering stays light
+#       (stringent filtering biases the doublet-rate estimate)
 #     - Each checkpoint contains clean, singlet-only cells
 #
-# WHY scDblFinder INSTEAD OF DoubletFinder:
-#   scDblFinder (Germain et al. 2021, F1000Research) was independently
-#   benchmarked and found to outperform DoubletFinder in detection accuracy
-#   and speed. Key advantages:
-#     - No pK parameter tuning required (fully automatic)
-#     - Faster (gradient boosted trees on kNN features, not full PCA sweep)
-#     - Explicit recommendation: object should NOT have undergone stringent
-#       filtering before running (only empty-drop removal), which aligns with
-#       our light pre-QC strategy
-#     - Outputs a continuous doublet score AND a binary call
-#     - Iterative training removes known doublets from the training set,
-#       reducing classifier bias
+# ============================================================================
+# DOUBLET DETECTION: TWO METHODS, ONE SWITCH  (DOUBLET_METHOD, Section 1.4)
+# ============================================================================
+#   "DoubletFinder"  (DEFAULT) — McGinnis et al. 2019, Cell Systems.
+#       Simulates artificial doublets by averaging random cell pairs, embeds
+#       them with the real cells, and scores each real cell by the proportion
+#       of artificial nearest neighbours (pANN) in a neighbourhood of size pK.
+#       Requires a paramSweep to choose pK; this pipeline runs the sweep and
+#       then CONSTRAINS the choice to a biologically plausible pK window
+#       (DF_PK_RANGE_MIN..MAX) with a hardcoded fallback, because the raw
+#       BCmetric global maximum frequently lands at implausible extremes.
+#       Chosen as the default here on the basis of observed real-world
+#       behaviour on this lab's colon/immune datasets, where scDblFinder was
+#       over-aggressive and stripped biologically real transitional and
+#       proliferating populations.
+#
+#   "scDblFinder"    — Germain et al. 2021, F1000Research.
+#       Gradient-boosted classifier on kNN features from artificial doublets.
+#       Fully automatic (no pK), faster, and better in published benchmarks.
+#       Retained as a switchable alternative and as a cross-check.
+#
+#   "both"           — Runs BOTH methods, writes a CONCORDANCE table and a
+#       confusion matrix per sample, and removes cells according to
+#       DOUBLET_CONSENSUS_RULE ("union", "intersect", or "DoubletFinder" /
+#       "scDblFinder" to let one method decide while still logging the other).
+#       Use this once on a new dataset to decide which method to trust, then
+#       switch to the single method for production runs.
+#
+#   Regardless of method, the resulting per-cell call is standardised into a
+#   single metadata column, Doublet_Status ("Singlet" / "Doublet"), so every
+#   downstream script (02-08) is method-agnostic.
+# ============================================================================
 #
 # CHECKPOINT SYSTEM (dual-checkpoint per sample):
 #   Each sample produces two checkpoint .rds files inside SCEVAN_DIR/<SampleID>/:
 #     _scevan_processed.rds       — saved right after SCEVAN (Checkpoint 1)
-#     _decontx_dblt_processed.rds — saved after DecontX + scDblFinder + Pre-QC
+#     _decontx_dblt_processed.rds — saved after DecontX + doublet removal + Pre-QC
 #                                   (Checkpoint 2 — the file used for merging)
 #   On re-run, Checkpoint 2 is tried first (sample fully done → skip). If only
 #   Checkpoint 1 exists, SCEVAN is skipped and the pipeline resumes from
@@ -76,7 +111,8 @@ library(dplyr)          # Data manipulation
 library(ggplot2)        # Publication-quality plotting
 library(patchwork)      # Combining multiple ggplot objects
 library(celda)          # DecontX for ambient RNA correction
-library(scDblFinder)    # Doublet detection (replaces DoubletFinder)
+library(DoubletFinder)  # Doublet detection - paramSweep/pK method (DEFAULT)
+library(scDblFinder)    # Doublet detection - ML method (alternative / cross-check)
 library(writexl)        # Writing .xlsx outputs
 library(Matrix)         # Sparse matrix support
 library(SCEVAN)         # Copy-number variation analysis
@@ -185,31 +221,143 @@ POST_MAX_UMIS           <- 100000 # Max UMI count. Similarly look at QC violins 
 POST_MAX_MT             <- 5.0   # Max mitochondrial %. Standard range: 5-20%.
 POST_MIN_CELLS_PER_GENE <- 15     # Genes expressed in fewer cells than this are removed.
 
-# --- 1.4: scDblFinder Parameters ---
-# scDblFinder (Germain et al. 2021) requires no manual pK tuning.
-# It automatically optimizes all parameters internally.
+# =============================================================================
+# --- 1.4: DOUBLET DETECTION PARAMETERS ---------------------------------------
+# =============================================================================
+
+# --- 1.4.0: METHOD SELECTION -------------------------------------------------
+# DOUBLET_METHOD: Which doublet caller to use. One of:
+#   "DoubletFinder" — (DEFAULT) paramSweep + constrained pK. Slower but, on
+#                     this lab's datasets, more conservative and less prone to
+#                     deleting real transitional/proliferating populations.
+#   "scDblFinder"   — automatic ML classifier. Faster, no pK tuning.
+#   "both"          — run both, log concordance, and resolve the final call
+#                     using DOUBLET_CONSENSUS_RULE below.
+DOUBLET_METHOD <- "DoubletFinder"
+
+# DOUBLET_CONSENSUS_RULE: Only used when DOUBLET_METHOD == "both".
+#   "union"         — a cell is a doublet if EITHER method calls it (aggressive)
+#   "intersect"     — a cell is a doublet only if BOTH agree (conservative;
+#                     recommended, highest precision)
+#   "DoubletFinder" — DoubletFinder decides; scDblFinder is logged only
+#   "scDblFinder"   — scDblFinder decides; DoubletFinder is logged only
+DOUBLET_CONSENSUS_RULE <- "intersect"
+
+# --- 1.4.1: Shared Parameters (apply to BOTH methods) ------------------------
 #
 # DOUBLET_RATE: Expected fraction of doublets in each sample.
-#   Use the 10x rule of thumb: ~0.8% per 1,000 cells loaded.
-#   Example: 10,000 cells loaded → 0.08 (8%).
-#   Set to NULL to let scDblFinder estimate the rate automatically
-#   from the data (recommended when cell loading density is unknown).
-DOUBLET_RATE <- 0.16
+#
+#   *** THIS IS THE MOST CONSEQUENTIAL PARAMETER IN THE DOUBLET STEP. ***
+#   For DoubletFinder it directly sets nExp (nExp = n_cells * DOUBLET_RATE),
+#   which is a HARD QUOTA, not a ceiling: DoubletFinder will call approximately
+#   that many doublets whether or not they exist. Setting it too high silently
+#   deletes real cells. For scDblFinder it is a softer prior (dbr).
+#
+#   ACCEPTED VALUES:
+#     "auto"   — (RECOMMENDED) compute the rate PER SAMPLE from that sample's
+#                own recovered cell count, using the 10x multiplet rule below.
+#                This is the correct behaviour when samples differ in depth,
+#                which they almost always do.
+#     <number> — a fixed rate applied to every sample (e.g. 0.08). Use only
+#                when you have a specific reason to override the estimate.
+#
+DOUBLET_RATE <- "auto"
 
+# --- 10x multiplet-rate model (used only when DOUBLET_RATE == "auto") --------
+# 10x Genomics publishes an approximately LINEAR relationship between the
+# number of cells recovered and the multiplet rate for 3' GEM chemistry:
+#
+#     multiplet rate  ~=  0.8% per 1,000 cells recovered
+#
+#   Cells recovered   Expected multiplet rate
+#   ---------------   -----------------------
+#        1,000                 0.8%
+#        5,000                 4.0%
+#       10,000                 8.0%     <- common target
+#       16,000                12.8%
+#       20,000                16.0%     <- high-load target
+#
+# So a 10,000-cell target gives ~0.08 and a 20,000-cell target gives ~0.16.
+# The previous hardcoded 0.16 was therefore only correct for samples that
+# actually recovered ~20,000 cells; applied to a 6,000-cell sample it would
+# have destroyed roughly 10% of that sample's real cells.
+#
+# The rate is computed from each sample's cell count AFTER the loose pre-merge
+# QC and DecontX, i.e. the actual number of cells going into doublet calling.
+DOUBLET_RATE_PER_1K <- 0.008   # 0.8% per 1,000 cells recovered
+
+# Guard rails on the automatic estimate:
+#   MIN — below this the estimate is noise; very small samples still carry
+#         some multiplet burden, so do not let it collapse to ~0.
+#   MAX — above this the linear model is no longer trustworthy (10x's own
+#         curve flattens, and super-loaded lanes should be handled manually).
+DOUBLET_RATE_AUTO_MIN <- 0.008   # floor:  0.8%
+DOUBLET_RATE_AUTO_MAX <- 0.20    # ceiling: 20%
+
+# DOUBLET_ROLLBACK_THRESHOLD: Safety mechanism (applies to BOTH methods).
+#   If the chosen method classifies MORE than this fraction of cells as
+#   doublets for a given sample, the result is suspicious. In that case,
+#   doublet removal is ROLLED BACK for that sample (all cells kept) and a
+#   warning is issued. A >25% doublet rate is biologically implausible for
+#   standard 10x runs and most likely reflects a classification artifact.
+#   NOTE: if DOUBLET_RATE is set at/above this value, rollback will trigger on
+#   every sample under DoubletFinder (since nExp is a hard target). Keep
+#   DOUBLET_ROLLBACK_THRESHOLD comfortably above DOUBLET_RATE. With
+#   DOUBLET_RATE = "auto" this is enforced automatically, since the automatic
+#   estimate is capped at DOUBLET_RATE_AUTO_MAX.
+DOUBLET_ROLLBACK_THRESHOLD <- 0.25
+
+# --- 1.4.2: DoubletFinder-Specific Parameters --------------------------------
+# DF_PN: Proportion of artificial doublets to generate, as a fraction of the
+#   merged real+artificial cell pool. McGinnis et al. show results are largely
+#   invariant to pN; 0.25 is the published default and should rarely change.
+DF_PN <- 0.25
+
+# DF_PK_RANGE_MIN / DF_PK_RANGE_MAX: The "safe zone" for pK selection.
+#   The paramSweep BCmetric curve often peaks at implausible extremes (e.g.
+#   pK = 0.005 or 0.30), which produces nonsense neighbourhoods. If the global
+#   BCmetric maximum falls outside this window, the pipeline instead selects
+#   the highest peak WITHIN the window. Range [0.01, 0.15] covers the values
+#   reported as optimal across the published DoubletFinder validation datasets.
+DF_PK_RANGE_MIN <- 0.01
+DF_PK_RANGE_MAX <- 0.15
+
+# DF_PK_FALLBACK: Used only if NO peak exists inside the safe zone at all.
+#   0.09 is the median optimal pK across the DoubletFinder validation sets and
+#   is a safe, well-behaved default.
+DF_PK_FALLBACK <- 0.09
+
+# DF_HOMOTYPIC_ADJUST: Adjust nExp downward for HOMOTYPIC doublets.
+#   DoubletFinder can only detect HETEROtypic doublets (two different cell
+#   types). Homotypic doublets (two cells of the SAME type) are statistically
+#   invisible to it. modelHomotypic() estimates their proportion from the
+#   cluster-annotation frequencies and shrinks nExp accordingly, so the
+#   algorithm is not forced to over-call heterotypic doublets to hit its quota.
+#   This is the McGinnis-recommended behaviour. Requires a clustering to exist
+#   on the per-sample object, which this pipeline computes automatically.
+#   Set FALSE to use the raw, unadjusted nExp.
+DF_HOMOTYPIC_ADJUST <- TRUE
+
+# DF_CLUSTER_RES: Clustering resolution used ONLY for the homotypic adjustment
+#   above (not used for any downstream biology). Coarse is fine.
+DF_CLUSTER_RES <- 0.5
+
+# DF_SCT: Set TRUE only if the per-sample object was normalised with SCTransform.
+#   This pipeline uses standard LogNormalize per sample, so keep FALSE.
+DF_SCT <- FALSE
+
+# --- 1.4.3: scDblFinder-Specific Parameters ----------------------------------
 # SCDBLFINDER_SCORE_THRESHOLD: Minimum doublet score to call a cell a doublet.
 #   scDblFinder outputs scores in [0,1] where 1 = most likely doublet.
-#   The default threshold is 0.5 (cells with score > 0.5 are called doublets).
+#   The default threshold is 0.5 (cells with score >= 0.5 are called doublets).
 #   Lower to be more aggressive (catch more doublets, more false positives).
 #   Raise to be more conservative (fewer false positives, may miss real doublets).
 SCDBLFINDER_SCORE_THRESHOLD <- 0.5
 
-# DOUBLET_ROLLBACK_THRESHOLD: Safety mechanism.
-#   If scDblFinder classifies MORE than this fraction of cells as doublets
-#   for a given sample, the result is suspicious. In that case, doublet
-#   removal is ROLLED BACK for that sample (all cells kept) and a warning
-#   is issued. A >25% doublet rate is biologically implausible for standard
-#   10x runs and most likely reflects a classification artifact.
-DOUBLET_ROLLBACK_THRESHOLD <- 0.25
+# SCDBLFINDER_DBR_NULL: If TRUE, pass dbr = NULL so scDblFinder estimates the
+#   doublet rate from cell number itself instead of using DOUBLET_RATE.
+#   Recommended when the cell loading density is unknown.
+SCDBLFINDER_DBR_NULL <- FALSE
 
 # --- 1.5: Core Dimensionality Reduction & Clustering Parameters ---
 N_VARIABLE_FEATURES <- 2000  # Number of highly variable genes for PCA.
@@ -276,6 +424,401 @@ SCEVAN_PLOTTREE  <- FALSE    # Plot phylogenetic tree of subclones (slow; set TR
 if (!dir.exists(OUTPUT_DIR)) { dir.create(OUTPUT_DIR, recursive = TRUE) }
 if (!dir.exists(SCEVAN_DIR)) { dir.create(SCEVAN_DIR, recursive = TRUE) }
 
+# DOUBLET_DIAG_DIR: all doublet diagnostics (pK plots, score histograms,
+# concordance matrices) are collected here in one place for easy review.
+DOUBLET_DIAG_DIR <- file.path(OUTPUT_DIR, "doublet_diagnostics")
+if (!dir.exists(DOUBLET_DIAG_DIR)) { dir.create(DOUBLET_DIAG_DIR, recursive = TRUE) }
+
+# =============================================================================
+# --- CONFIGURATION VALIDATION ------------------------------------------------
+# =============================================================================
+# Fail fast and loudly on impossible parameter combinations, rather than
+# discovering them 6 hours into a run.
+validate_config <- function() {
+  errs <- character(0)
+
+  if (!DOUBLET_METHOD %in% c("DoubletFinder", "scDblFinder", "both")) {
+    errs <- c(errs, paste0("DOUBLET_METHOD must be one of 'DoubletFinder', ",
+                           "'scDblFinder', or 'both'. Got: '", DOUBLET_METHOD, "'"))
+  }
+  if (DOUBLET_METHOD == "both" &&
+      !DOUBLET_CONSENSUS_RULE %in% c("union", "intersect", "DoubletFinder", "scDblFinder")) {
+    errs <- c(errs, paste0("DOUBLET_CONSENSUS_RULE must be one of 'union', ",
+                           "'intersect', 'DoubletFinder', 'scDblFinder'. Got: '",
+                           DOUBLET_CONSENSUS_RULE, "'"))
+  }
+  # DOUBLET_RATE must be either the string "auto" or a proper fraction.
+  rate_is_auto <- is.character(DOUBLET_RATE) && identical(DOUBLET_RATE, "auto")
+  if (!rate_is_auto) {
+    if (is.null(DOUBLET_RATE) || !is.numeric(DOUBLET_RATE) ||
+        DOUBLET_RATE <= 0 || DOUBLET_RATE >= 1) {
+      errs <- c(errs, paste0(
+        "DOUBLET_RATE must be either \"auto\" or a number strictly between ",
+        "0 and 1. Got: ", paste(deparse(DOUBLET_RATE), collapse = "")))
+    }
+  }
+  if (DOUBLET_METHOD %in% c("DoubletFinder", "both")) {
+    if (DF_PK_RANGE_MIN >= DF_PK_RANGE_MAX) {
+      errs <- c(errs, "DF_PK_RANGE_MIN must be less than DF_PK_RANGE_MAX.")
+    }
+    if (DF_PN <= 0 || DF_PN >= 1) {
+      errs <- c(errs, "DF_PN must be strictly between 0 and 1 (published default: 0.25).")
+    }
+  }
+  # Auto-mode sanity: the guard rails must themselves be coherent.
+  if (rate_is_auto) {
+    if (DOUBLET_RATE_AUTO_MIN >= DOUBLET_RATE_AUTO_MAX) {
+      errs <- c(errs, "DOUBLET_RATE_AUTO_MIN must be less than DOUBLET_RATE_AUTO_MAX.")
+    }
+    if (DOUBLET_RATE_AUTO_MAX >= DOUBLET_ROLLBACK_THRESHOLD) {
+      errs <- c(errs, paste0(
+        "DOUBLET_RATE_AUTO_MAX (", DOUBLET_RATE_AUTO_MAX,
+        ") must be LESS than DOUBLET_ROLLBACK_THRESHOLD (",
+        DOUBLET_ROLLBACK_THRESHOLD, "), otherwise a densely loaded sample ",
+        "would hit its own rollback and lose all doublet removal."))
+    }
+  } else if (is.numeric(DOUBLET_RATE) && DOUBLET_ROLLBACK_THRESHOLD <= DOUBLET_RATE) {
+    # Rollback must sit above the target rate or DoubletFinder rolls back always.
+    errs <- c(errs, paste0(
+      "DOUBLET_ROLLBACK_THRESHOLD (", DOUBLET_ROLLBACK_THRESHOLD,
+      ") must be GREATER than DOUBLET_RATE (", DOUBLET_RATE,
+      "). DoubletFinder always calls ~DOUBLET_RATE doublets, so rollback ",
+      "would trigger on every sample."))
+  }
+  if (length(errs) > 0) {
+    stop(paste0("\n\n=== CONFIGURATION ERRORS (Section 1.4) ===\n  - ",
+                paste(errs, collapse = "\n  - "), "\n"), call. = FALSE)
+  }
+  invisible(TRUE)
+}
+validate_config()
+
+message(paste0("=== Doublet detection method: ", DOUBLET_METHOD,
+               if (DOUBLET_METHOD == "both")
+                 paste0(" (consensus rule: ", DOUBLET_CONSENSUS_RULE, ")") else "",
+               " ==="))
+
+# =============================================================================
+# --- DOUBLET RATE RESOLVER ---------------------------------------------------
+# =============================================================================
+# Returns the expected doublet rate for ONE sample.
+#
+#   DOUBLET_RATE == "auto"  -> estimate from this sample's own recovered cell
+#                              count using the 10x linear multiplet model,
+#                              clamped to [DOUBLET_RATE_AUTO_MIN, ..._MAX].
+#   DOUBLET_RATE == number  -> that fixed number, for every sample.
+#
+# Called once per sample, immediately before doublet detection, using the cell
+# count at that moment (post pre-QC, post-DecontX) - which is the best
+# available proxy for "cells recovered" from the 10x lane.
+resolve_doublet_rate <- function(n_cells, sample_id = "") {
+  if (!identical(DOUBLET_RATE, "auto")) {
+    return(list(rate = DOUBLET_RATE, source = "FIXED", raw = DOUBLET_RATE))
+  }
+
+  raw_rate <- (n_cells / 1000) * DOUBLET_RATE_PER_1K
+  rate     <- min(max(raw_rate, DOUBLET_RATE_AUTO_MIN), DOUBLET_RATE_AUTO_MAX)
+
+  source <- if (raw_rate < DOUBLET_RATE_AUTO_MIN) {
+    "AUTO_FLOORED"
+  } else if (raw_rate > DOUBLET_RATE_AUTO_MAX) {
+    "AUTO_CAPPED"
+  } else {
+    "AUTO"
+  }
+
+  message(paste0("    -> Doublet rate (auto): ", n_cells, " cells recovered -> ",
+                 round(rate * 100, 2), "%",
+                 if (source != "AUTO")
+                   paste0("  [", source, "; uncapped estimate was ",
+                          round(raw_rate * 100, 2), "%]") else "",
+                 "  (expected ~", round(n_cells * rate), " doublets)"))
+
+  if (source == "AUTO_CAPPED") {
+    warning(paste0("  [RATE CAP] Sample '", sample_id, "' recovered ", n_cells,
+                   " cells, implying a ", round(raw_rate * 100, 1),
+                   "% multiplet rate. Capped at ",
+                   round(DOUBLET_RATE_AUTO_MAX * 100, 1),
+                   "%. Verify this lane was not overloaded."))
+  }
+
+  list(rate = rate, source = source, raw = raw_rate)
+}
+
+# =============================================================================
+# --- DOUBLET DETECTION ENGINE ------------------------------------------------
+# =============================================================================
+# Two interchangeable detectors, each with an identical contract:
+#
+#   INPUT :  seu        — a per-sample Seurat object (post-DecontX, post-pre-QC)
+#            sample_id  — character label, used for plot filenames
+#            diag_dir   — directory to write diagnostic plots into
+#            dbl_rate   — the expected doublet rate FOR THIS SAMPLE, already
+#                         resolved by resolve_doublet_rate(). Passed in rather
+#                         than read from the global, so that each sample can
+#                         carry its own rate under DOUBLET_RATE = "auto".
+#
+#   OUTPUT:  a list with
+#              $calls  — character vector ("Doublet"/"Singlet"), names = cell barcodes
+#              $score  — numeric vector of doublet scores (pANN or scDblFinder score)
+#              $info   — named list of method-specific diagnostics for the log
+#
+# Because both return the same shape, the caller does not care which ran.
+# -----------------------------------------------------------------------------
+
+# --- DETECTOR 1: DoubletFinder (paramSweep + constrained pK) -----------------
+# Ported from eithan_coffee/01_process_data_SG.R, with the enhanced diagnostic
+# plot from wu_project1/01_processing_samples.R and homotypic adjustment added.
+run_doubletfinder <- function(seu, sample_id, diag_dir, dbl_rate) {
+
+  # --- A) Preliminary processing required by DoubletFinder ------------------
+  # DoubletFinder operates in PCA space, so the sample must be normalised,
+  # scaled and PCA-reduced first. This is done on a THROWAWAY copy: none of
+  # these reductions are kept, because the real clustering happens post-merge
+  # on the Harmony-integrated object.
+  n_cells <- ncol(seu)
+
+  # Guard: PCA cannot request more PCs than cells-1. Small samples get fewer.
+  npcs_use <- min(N_PCS_TO_USE, n_cells - 1)
+  if (npcs_use < 5) {
+    warning(paste0("  [SKIP] Sample '", sample_id, "' has only ", n_cells,
+                   " cells - too few for DoubletFinder. All cells kept as Singlets."))
+    return(list(
+      calls = setNames(rep("Singlet", n_cells), colnames(seu)),
+      score = setNames(rep(NA_real_, n_cells), colnames(seu)),
+      info  = list(method = "DoubletFinder", pk = NA, pk_initial = NA,
+                   nExp = 0, nExp_adj = 0, rate_used = dbl_rate,
+                   homotypic_prop = NA, note = "TOO_FEW_CELLS")
+    ))
+  }
+
+  seu <- NormalizeData(seu, verbose = FALSE)
+  seu <- FindVariableFeatures(seu, selection.method = "vst",
+                              nfeatures = N_VARIABLE_FEATURES, verbose = FALSE)
+  seu <- ScaleData(seu, verbose = FALSE)
+  seu <- RunPCA(seu, npcs = npcs_use, verbose = FALSE)
+
+  # --- B) paramSweep: build the BCmetric curve over candidate pK values -----
+  # paramSweep generates artificial doublets at many pN/pK combinations and
+  # computes pANN distributions. summarizeSweep + find.pK then reduce this to
+  # a single BCmetric (bimodality coefficient) per pK. The pK that maximises
+  # BCmetric is, in principle, the one that best separates doublets from
+  # singlets. In practice the curve is noisy at the extremes, hence step C.
+  message(paste("    -> [DoubletFinder] Running paramSweep for", sample_id,
+                "(this is the slow step)..."))
+  sweep.res.list <- paramSweep(seu, PCs = 1:npcs_use, sct = DF_SCT)
+  sweep.stats    <- summarizeSweep(sweep.res.list, GT = FALSE)
+  bcmvn          <- find.pK(sweep.stats)
+  bcmvn$pK       <- as.numeric(as.character(bcmvn$pK))
+
+  # --- C) Constrained pK selection ------------------------------------------
+  # 1. Identify the global maximum first.
+  initial_pk <- bcmvn$pK[which.max(bcmvn$BCmetric)]
+  final_pk   <- initial_pk
+  pk_note    <- "GLOBAL_PEAK_IN_RANGE"
+
+  # 2. If it is outside the plausible window, look for the best in-window peak.
+  if (final_pk < DF_PK_RANGE_MIN || final_pk > DF_PK_RANGE_MAX) {
+    message(paste0("    -> [WARNING] Global optimal pK (", initial_pk,
+                   ") is outside the plausible range [", DF_PK_RANGE_MIN,
+                   " - ", DF_PK_RANGE_MAX, "]. Attempting constrained selection."))
+    in_range <- bcmvn[bcmvn$pK >= DF_PK_RANGE_MIN & bcmvn$pK <= DF_PK_RANGE_MAX, ]
+
+    if (nrow(in_range) > 0 && any(is.finite(in_range$BCmetric))) {
+      final_pk <- in_range$pK[which.max(in_range$BCmetric)]
+      pk_note  <- "CONSTRAINED_TO_RANGE"
+      message(paste("      --> Using best in-range peak:", final_pk))
+    } else {
+      final_pk <- DF_PK_FALLBACK
+      pk_note  <- "HARDCODED_FALLBACK"
+      message(paste("      --> No usable peak in range. Reverting to fallback pK:", final_pk))
+    }
+  } else {
+    message(paste0("    -> Optimal pK (", final_pk, ") is within the plausible range. Proceeding."))
+  }
+
+  # --- D) Diagnostic pK plot (enhanced version from wu_project1) ------------
+  # Grey trace = full BCmetric curve; red dashed line = selected pK;
+  # red diamond = the selected point itself (omitted if a fallback pK was used
+  # that does not correspond to any swept value).
+  tryCatch({
+    selected_point_data <- bcmvn[bcmvn$pK == final_pk, ]
+    pk_plot <- ggplot(bcmvn, aes(x = pK, y = BCmetric, group = 1)) +
+      geom_line(color = "grey60") +
+      geom_point(color = "grey60") +
+      annotate("rect", xmin = DF_PK_RANGE_MIN, xmax = DF_PK_RANGE_MAX,
+               ymin = -Inf, ymax = Inf, alpha = 0.08, fill = "#4393C3") +
+      geom_vline(xintercept = final_pk, linetype = "dashed", color = "red") +
+      { if (nrow(selected_point_data) > 0)
+          geom_point(data = selected_point_data, aes(x = pK, y = BCmetric),
+                     color = "red", size = 4, shape = 18)
+      } +
+      ggtitle(paste0("pK Finder: ", sample_id),
+              subtitle = paste0("Selected pK = ", final_pk,
+                                "  |  Global peak = ", initial_pk,
+                                "  |  ", pk_note,
+                                "\nShaded band = plausible range [",
+                                DF_PK_RANGE_MIN, ", ", DF_PK_RANGE_MAX, "]")) +
+      theme_minimal() +
+      theme(plot.title = element_text(face = "bold"))
+    ggsave(file.path(diag_dir, paste0(sample_id, "_DF_pk_plot.png")),
+           plot = pk_plot, width = 7, height = 5, dpi = DPI_SETTING, bg = "white")
+    rm(pk_plot)
+  }, error = function(e) {
+    message(paste("      -> [WARNING] pK plot failed:", e$message))
+  })
+
+  # --- E) nExp estimation, with optional homotypic adjustment ---------------
+  nExp_raw       <- round(n_cells * dbl_rate)
+  nExp_use       <- nExp_raw
+  homotypic_prop <- NA_real_
+
+  if (DF_HOMOTYPIC_ADJUST) {
+    # modelHomotypic() needs cluster labels. A coarse clustering is enough:
+    # it is only used to estimate what fraction of doublets would be
+    # same-type (and therefore undetectable) given the cluster proportions.
+    tryCatch({
+      seu <- FindNeighbors(seu, dims = 1:npcs_use, verbose = FALSE)
+      seu <- FindClusters(seu, resolution = DF_CLUSTER_RES, verbose = FALSE)
+      homotypic_prop <- modelHomotypic(seu$seurat_clusters)
+      nExp_use <- round(nExp_raw * (1 - homotypic_prop))
+      message(paste0("    -> Homotypic adjustment: proportion = ",
+                     round(homotypic_prop, 3), " | nExp ", nExp_raw,
+                     " -> ", nExp_use))
+    }, error = function(e) {
+      message(paste("      -> [WARNING] Homotypic adjustment failed:", e$message,
+                    "| Using unadjusted nExp =", nExp_raw))
+    })
+  }
+  # Never let nExp collapse to 0 or exceed the cell count.
+  nExp_use <- max(1, min(nExp_use, n_cells - 1))
+
+  # --- F) Run DoubletFinder with the final, validated parameters -----------
+  seu <- doubletFinder(seu,
+                       PCs   = 1:npcs_use,
+                       pN    = DF_PN,
+                       pK    = final_pk,
+                       nExp  = nExp_use,
+                       sct   = DF_SCT)
+
+  # DoubletFinder appends columns whose names embed the parameters used, e.g.
+  # "DF.classifications_0.25_0.09_412" and "pANN_0.25_0.09_412". Grab the last
+  # of each (the most recently added) rather than hardcoding the name.
+  res_col  <- tail(grep("^DF.classifications", colnames(seu@meta.data), value = TRUE), 1)
+  pann_col <- tail(grep("^pANN", colnames(seu@meta.data), value = TRUE), 1)
+
+  calls <- setNames(as.character(seu@meta.data[[res_col]]), rownames(seu@meta.data))
+  score <- if (length(pann_col) == 1 && !is.na(pann_col)) {
+    setNames(as.numeric(seu@meta.data[[pann_col]]), rownames(seu@meta.data))
+  } else {
+    setNames(rep(NA_real_, n_cells), rownames(seu@meta.data))
+  }
+
+  list(
+    calls = calls,
+    score = score,
+    info  = list(method = "DoubletFinder", pk = final_pk, pk_initial = initial_pk,
+                 nExp = nExp_raw, nExp_adj = nExp_use, rate_used = dbl_rate,
+                 homotypic_prop = homotypic_prop, note = pk_note)
+  )
+}
+
+# --- DETECTOR 2: scDblFinder (automatic ML classifier) -----------------------
+# Retained unchanged in behaviour from the 2026_nr4a1 v10.0 pipeline.
+run_scdblfinder <- function(seu, sample_id, diag_dir, dbl_rate) {
+  n_cells <- ncol(seu)
+
+  sce_tmp <- as.SingleCellExperiment(seu)
+  sce_tmp <- scDblFinder(
+    sce_tmp,
+    dbr     = if (SCDBLFINDER_DBR_NULL) NULL else dbl_rate,
+    BPPARAM = BiocParallel::SerialParam(RNGseed = 123),
+    verbose = FALSE
+  )
+
+  score <- setNames(as.numeric(sce_tmp$scDblFinder.score), colnames(seu))
+  calls <- setNames(
+    ifelse(score >= SCDBLFINDER_SCORE_THRESHOLD, "Doublet", "Singlet"),
+    colnames(seu)
+  )
+
+  # Diagnostic score-distribution histogram
+  tryCatch({
+    dblt_frac <- sum(calls == "Doublet") / n_cells
+    score_df  <- data.frame(score = score, call = calls)
+    p_score <- ggplot(score_df, aes(x = score, fill = call)) +
+      geom_histogram(bins = 60, color = "black", linewidth = 0.2) +
+      geom_vline(xintercept = SCDBLFINDER_SCORE_THRESHOLD,
+                 linetype = "dashed", color = "red", linewidth = 0.8) +
+      scale_fill_manual(values = c("Singlet" = "#4393C3", "Doublet" = "#D6604D")) +
+      labs(title    = paste0("scDblFinder Score Distribution: ", sample_id),
+           subtitle = paste0(round(dblt_frac * 100, 1),
+                             "% doublets | threshold = ", SCDBLFINDER_SCORE_THRESHOLD),
+           x = "Doublet Score", y = "Cell Count", fill = "Call") +
+      theme_minimal()
+    ggsave(file.path(diag_dir, paste0(sample_id, "_scDbl_score_distribution.png")),
+           plot = p_score, width = 7, height = 5, dpi = DPI_SETTING, bg = "white")
+    rm(p_score, score_df)
+  }, error = function(e) {
+    message(paste("      -> [WARNING] Score plot failed:", e$message))
+  })
+
+  rm(sce_tmp); gc()
+
+  list(
+    calls = calls,
+    score = score,
+    info  = list(method = "scDblFinder", pk = NA, pk_initial = NA,
+                 nExp = NA, nExp_adj = NA, rate_used = dbl_rate,
+                 homotypic_prop = NA,
+                 note = paste0("threshold=", SCDBLFINDER_SCORE_THRESHOLD))
+  )
+}
+
+# --- CONCORDANCE REPORTER (used only when DOUBLET_METHOD == "both") ----------
+# Writes a 2x2 confusion matrix comparing the two callers and returns summary
+# statistics (agreement rate, Cohen's kappa) for the master log.
+report_concordance <- function(df_calls, sc_calls, sample_id, diag_dir) {
+  common <- intersect(names(df_calls), names(sc_calls))
+  a <- factor(df_calls[common], levels = c("Singlet", "Doublet"))
+  b <- factor(sc_calls[common], levels = c("Singlet", "Doublet"))
+  tab <- table(DoubletFinder = a, scDblFinder = b)
+
+  n         <- length(common)
+  agree     <- sum(diag(tab)) / n
+  # Cohen's kappa: agreement corrected for chance.
+  p_exp     <- sum(rowSums(tab) * colSums(tab)) / (n^2)
+  kappa     <- if (p_exp < 1) (agree - p_exp) / (1 - p_exp) else NA_real_
+
+  tryCatch({
+    tab_df <- as.data.frame(tab)
+    p_conc <- ggplot(tab_df, aes(x = scDblFinder, y = DoubletFinder, fill = Freq)) +
+      geom_tile(color = "white", linewidth = 1) +
+      geom_text(aes(label = Freq), size = 6, fontface = "bold") +
+      scale_fill_gradient(low = "#F7F7F7", high = "#4393C3") +
+      labs(title    = paste0("Doublet Call Concordance: ", sample_id),
+           subtitle = paste0("Agreement = ", round(agree * 100, 1),
+                             "%  |  Cohen's kappa = ", round(kappa, 3),
+                             "  |  n = ", n, " cells"),
+           x = "scDblFinder call", y = "DoubletFinder call") +
+      theme_minimal() +
+      theme(plot.title = element_text(face = "bold"))
+    ggsave(file.path(diag_dir, paste0(sample_id, "_doublet_concordance.png")),
+           plot = p_conc, width = 6, height = 5, dpi = DPI_SETTING, bg = "white")
+    rm(p_conc)
+  }, error = function(e) {
+    message(paste("      -> [WARNING] Concordance plot failed:", e$message))
+  })
+
+  message(paste0("    -> Concordance: ", round(agree * 100, 1),
+                 "% agreement | kappa = ", round(kappa, 3)))
+
+  list(agreement = agree, kappa = kappa,
+       n_df_only = tab["Doublet", "Singlet"],
+       n_sc_only = tab["Singlet", "Doublet"],
+       n_both    = tab["Doublet", "Doublet"])
+}
+
 # =============================================================================
 # --- STEP 2.1a: Per-Sample Processing & Checkpoint Generation ---------------
 # =============================================================================
@@ -286,7 +829,7 @@ if (!dir.exists(SCEVAN_DIR)) { dir.create(SCEVAN_DIR, recursive = TRUE) }
 #     2. Create Seurat object and attach metadata
 #     3. SCEVAN (if enabled) — run on raw counts before any correction
 #     4. DecontX (if enabled) — ambient RNA correction, with optional rounding
-#     5. scDblFinder — per-sample doublet detection and removal
+#     5. Doublet detection — per-sample, via DOUBLET_METHOD, then removal
 #     6. Pre-merge QC (loose filters) — applied on corrected, singlet-only counts
 #     7. Save checkpoint and free memory
 #
@@ -299,24 +842,25 @@ if (!dir.exists(SCEVAN_DIR)) { dir.create(SCEVAN_DIR, recursive = TRUE) }
 #       computation is never repeated.
 #
 #     Checkpoint 2 (_decontx_dblt_processed.rds):
-#       Saved after DecontX + scDblFinder + Pre-QC. This is the FINAL
+#       Saved after DecontX + doublet removal + Pre-QC. This is the FINAL
 #       per-sample checkpoint and the file loaded for the merge step (2.1b).
 #       It contains clean, singlet-only, ambient-corrected cells.
 #
 #   At the start of each iteration the loop checks:
 #     (a) If Checkpoint 2 exists  → sample fully processed, SKIP entirely.
 #     (b) If only Checkpoint 1 exists → load it, SKIP SCEVAN, run DecontX
-#         + scDblFinder + Pre-QC, then save Checkpoint 2.
+#         + doublet detection + Pre-QC, then save Checkpoint 2.
 #     (c) If neither exists → run the entire pipeline from scratch.
 #
-#   This means that if a run crashes mid-way through DecontX or scDblFinder,
+#   This means that if a run crashes mid-way through DecontX or doublet detection,
 #   the next run will resume from the SCEVAN result rather than starting over.
 #
 # MEMORY STRATEGY:
 #   Each sample object is removed from RAM and garbage-collected immediately
 #   after its checkpoint is written. Only one sample occupies memory at a time.
 # =============================================================================
-message("=== STEP 2.1a: Per-Sample Processing (SCEVAN → DecontX → scDblFinder → Pre-QC → Checkpoint) ===")
+message(paste0("=== STEP 2.1a: Per-Sample Processing (SCEVAN → Pre-QC → DecontX → ",
+               DOUBLET_METHOD, " → Checkpoint) ==="))
 metadata <- read.xlsx(METADATA_FILE)
 
 # Initialize rollback log (filled during loop, saved after)
@@ -341,7 +885,7 @@ for (i in 1:nrow(metadata)) {
   scevan_checkpoint_loaded <- FALSE
   if (file.exists(checkpoint_file_1)) {
     message(paste("  [CHECKPOINT-1] Loading SCEVAN checkpoint for", sample_id,
-                  "- will run DecontX + scDblFinder + Pre-QC only."))
+                  "- will run DecontX + doublet detection only."))
     seurat_obj <- readRDS(checkpoint_file_1)
     scevan_checkpoint_loaded <- TRUE
   }
@@ -402,8 +946,37 @@ for (i in 1:nrow(metadata)) {
     # ---- 3. Create Seurat object and attach metadata -----------------------
     seurat_obj <- CreateSeuratObject(counts = counts_matrix, project = sample_id, min.cells = 5)
 
-    # Attach all metadata columns from the Excel file
+    # ---- Attach ALL metadata columns from the Excel file --------------------
+    # Every column of this sample's metadata row is broadcast to every cell
+    # from this sample. sample_info[[col_name]] is a length-1 value, so R
+    # recycles it across all cells. This is deliberate: any column you add to
+    # the .xlsx becomes available in Scripts 02-10 with no code changes.
+    #
+    # Two guards are applied before assignment:
+    #   1. Reserved names — a metadata column called e.g. "nCount_RNA" would
+    #      silently overwrite the QC metric Seurat computed, corrupting every
+    #      downstream filter. Such columns are skipped with a warning.
+    #   2. Non-syntactic names — a header like "Pool ID" becomes a metadata
+    #      column that needs backticks in R (data$`Pool ID`). Allowed, but
+    #      flagged once so it is a deliberate choice rather than a surprise.
+    reserved_names <- c("orig.ident", "nCount_RNA", "nFeature_RNA", "percent.mt",
+                        "Doublet_Status", "DF_score", "DF_class",
+                        "scDblFinder_score", "scDblFinder_class",
+                        "seurat_clusters", "CellType", "sub_cell_types")
+
     for (col_name in colnames(sample_info)) {
+      if (col_name %in% reserved_names) {
+        warning(paste0(
+          "  [METADATA] Column '", col_name, "' in the metadata file collides ",
+          "with a reserved pipeline/Seurat column and was SKIPPED for sample '",
+          sample_id, "'. Rename it in the .xlsx to keep its values."))
+        next
+      }
+      if (col_name != make.names(col_name)) {
+        message(paste0("      -> [NOTE] Metadata column '", col_name,
+                       "' is not a syntactic R name; refer to it with backticks",
+                       " downstream (e.g. data$`", col_name, "`)."))
+      }
       seurat_obj[[col_name]] <- sample_info[[col_name]]
     }
     # Auto-create combined group label (Condition_Sex) if both columns are present
@@ -462,7 +1035,7 @@ for (i in 1:nrow(metadata)) {
     }
 
     # ---- Save Checkpoint 1 (SCEVAN result) ---------------------------------
-    # Saved immediately after SCEVAN so that if DecontX or scDblFinder crash
+    # Saved immediately after SCEVAN so that if DecontX or doublet detection crash
     # later, the next run can resume from here and skip the expensive SCEVAN step.
     message("    -> Saving SCEVAN checkpoint (checkpoint 1)...")
     saveRDS(seurat_obj, file = checkpoint_file_1)
@@ -474,7 +1047,8 @@ for (i in 1:nrow(metadata)) {
   # ---- 5. Pre-merge QC: loose per-sample filters ---------------------------
   # Applied BEFORE DecontX and doublet detection so that empty droplets and
   # clearly dying cells are removed first, consistent with the recommendation
-  # in Germain et al. (scDblFinder): the object should not contain empty drops
+  # in Germain et al. (scDblFinder) and McGinnis et al. (DoubletFinder): the
+  # object should not contain empty drops
   # but should not otherwise have undergone very stringent filtering.
   seurat_obj[["percent.mt"]] <- PercentageFeatureSet(seurat_obj, pattern = "^MT-|^mt-")
   seurat_obj <- subset(seurat_obj,
@@ -483,8 +1057,8 @@ for (i in 1:nrow(metadata)) {
   message(paste0("      -> Pre-merge QC: ", ncol(seurat_obj), " cells retained."))
 
   # ---- 6. Optional: DecontX ambient RNA correction -------------------------
-  # DecontX is run per-sample BEFORE doublet detection so that scDblFinder
-  # operates on counts free of ambient RNA contamination.
+  # DecontX is run per-sample BEFORE doublet detection so that the doublet
+  # caller operates on counts free of ambient RNA contamination.
   if (RUN_DECONTX) {
     tryCatch({
       message(paste("    -> Running DecontX for ambient RNA correction on", sample_id, "..."))
@@ -520,85 +1094,78 @@ for (i in 1:nrow(metadata)) {
     })
   }
 
-  # ---- 7. scDblFinder: per-sample doublet detection and removal -------------
-  # scDblFinder (Germain et al. 2021, F1000Research doi:10.12688/f1000research.73600.2)
-  # operates directly on the raw SingleCellExperiment/Seurat counts — no manual
-  # pK tuning required. It generates between-cluster artificial doublets,
-  # builds a kNN graph, and trains an iterative gradient-boosted classifier.
+  # ---- 7. Doublet detection and removal (method set by DOUBLET_METHOD) ------
+  # Dispatches to run_doubletfinder() and/or run_scdblfinder(), both defined
+  # near the top of PART 2. Whichever runs, the result is normalised into a
+  # single Doublet_Status column so downstream scripts stay method-agnostic.
   #
-  # Key parameters used:
-  #   dbr       = DOUBLET_RATE         — expected doublet fraction (or NULL for auto)
-  #   clusters  = SCDBLFINDER_CLUSTERS — number of internal clusters (NULL = auto)
-  #   nIter     = SCDBLFINDER_ITER     — classifier training iterations (default 3)
-  #   score     = "xgb"                — gradient boosted trees (best accuracy)
-  #   artificialDoublets = NULL        — auto-calculated from cell count
-  #
-  # Per the paper: "the object should not contain empty drops, but should not
-  # otherwise have undergone very stringent filtering (which would bias the
-  # estimate of the doublet rate)." — consistent with our light pre-QC strategy.
-  message(paste("    -> Running scDblFinder for", sample_id, "..."))
+  # Runs AFTER DecontX so that doublet calling sees ambient-corrected counts,
+  # and after the loose pre-QC so that empty drops are gone - but no stringent
+  # filtering has occurred, which would bias the doublet-rate estimate.
+  message(paste0("    -> Running doublet detection (", DOUBLET_METHOD, ") for ", sample_id, "..."))
+
+  # Resolve THIS sample's expected doublet rate before anything else. Under
+  # DOUBLET_RATE = "auto" this is derived from the sample's own recovered cell
+  # count, so a shallow sample and a deep sample are no longer forced to share
+  # a single (and for one of them, wrong) quota.
+  rate_info <- resolve_doublet_rate(ncol(seurat_obj), sample_id)
+
   tryCatch({
-    # Convert to SingleCellExperiment for scDblFinder
-    sce_tmp <- as.SingleCellExperiment(seurat_obj)
 
-    # Run scDblFinder
-    # - dbr: expected doublet rate (NULL = auto-estimate from cell number)
-    # - clusters: NULL = auto-cluster internally (recommended)
-    # - nIter: 3 iterations gives best accuracy per benchmarking paper
-    # - score: "xgb" (gradient boosted trees on kNN features) outperforms
-    #          direct expression classification (prevents overfitting)
-    # - BPPARAM: SerialParam() ensures reproducibility (no parallel randomness)
-    sce_tmp <- scDblFinder(
-      sce_tmp,
-      dbr       = DOUBLET_RATE,
-      BPPARAM   = BiocParallel::SerialParam(RNGseed = 123),
-      verbose   = FALSE
-    )
+    df_res <- NULL   # DoubletFinder result
+    sc_res <- NULL   # scDblFinder result
+    conc   <- NULL   # concordance stats (only when method == "both")
 
-    # Extract doublet calls and scores into main Seurat object metadata
-    # scDblFinder adds two columns to colData:
-    #   scDblFinder.class — "singlet" or "doublet"
-    #   scDblFinder.score — continuous probability [0,1]; higher = more likely doublet
-    seurat_obj$scDblFinder_score  <- sce_tmp$scDblFinder.score
-    seurat_obj$scDblFinder_class  <- sce_tmp$scDblFinder.class
+    # ---- 7a. Run the requested detector(s) ---------------------------------
+    if (DOUBLET_METHOD %in% c("DoubletFinder", "both")) {
+      df_res <- run_doubletfinder(seurat_obj, sample_id, DOUBLET_DIAG_DIR, rate_info$rate)
+      seurat_obj$DF_score  <- df_res$score[colnames(seurat_obj)]
+      seurat_obj$DF_class  <- df_res$calls[colnames(seurat_obj)]
+    }
+    if (DOUBLET_METHOD %in% c("scDblFinder", "both")) {
+      sc_res <- run_scdblfinder(seurat_obj, sample_id, DOUBLET_DIAG_DIR, rate_info$rate)
+      seurat_obj$scDblFinder_score <- sc_res$score[colnames(seurat_obj)]
+      seurat_obj$scDblFinder_class <- sc_res$calls[colnames(seurat_obj)]
+    }
 
-    # Apply score threshold (allows fine-tuning beyond the default 0.5 binary call)
-    seurat_obj$Doublet_Status <- ifelse(
-      seurat_obj$scDblFinder_score >= SCDBLFINDER_SCORE_THRESHOLD,
-      "Doublet", "Singlet"
-    )
+    # ---- 7b. Resolve the final call ----------------------------------------
+    if (DOUBLET_METHOD == "DoubletFinder") {
+      final_calls  <- df_res$calls[colnames(seurat_obj)]
+      primary_info <- df_res$info
+      primary_score <- df_res$score[colnames(seurat_obj)]
+
+    } else if (DOUBLET_METHOD == "scDblFinder") {
+      final_calls  <- sc_res$calls[colnames(seurat_obj)]
+      primary_info <- sc_res$info
+      primary_score <- sc_res$score[colnames(seurat_obj)]
+
+    } else {  # "both" - compare, log, then apply the consensus rule
+      conc <- report_concordance(df_res$calls, sc_res$calls, sample_id, DOUBLET_DIAG_DIR)
+      a <- df_res$calls[colnames(seurat_obj)]
+      b <- sc_res$calls[colnames(seurat_obj)]
+      final_calls <- switch(
+        DOUBLET_CONSENSUS_RULE,
+        # union: flagged by either method (aggressive, highest recall)
+        "union"         = ifelse(a == "Doublet" | b == "Doublet", "Doublet", "Singlet"),
+        # intersect: flagged by both methods (conservative, highest precision)
+        "intersect"     = ifelse(a == "Doublet" & b == "Doublet", "Doublet", "Singlet"),
+        # one method decides; the other is still recorded in metadata
+        "DoubletFinder" = a,
+        "scDblFinder"   = b
+      )
+      names(final_calls) <- colnames(seurat_obj)
+      primary_info  <- df_res$info
+      primary_score <- df_res$score[colnames(seurat_obj)]
+    }
+
+    seurat_obj$Doublet_Status <- unname(final_calls)
 
     n_doublets       <- sum(seurat_obj$Doublet_Status == "Doublet")
     doublet_fraction <- n_doublets / ncol(seurat_obj)
 
-    # Diagnostic score distribution plot (replaces pK plot from DoubletFinder)
-    tryCatch({
-      score_df <- data.frame(
-        score = seurat_obj$scDblFinder_score,
-        call  = seurat_obj$Doublet_Status
-      )
-      p_score <- ggplot(score_df, aes(x = score, fill = call)) +
-        geom_histogram(bins = 60, color = "black", linewidth = 0.2) +
-        geom_vline(xintercept = SCDBLFINDER_SCORE_THRESHOLD,
-                   linetype = "dashed", color = "red", linewidth = 0.8) +
-        scale_fill_manual(values = c("Singlet" = "#4393C3", "Doublet" = "#D6604D")) +
-        labs(
-          title    = paste0("scDblFinder Score Distribution: ", sample_id),
-          subtitle = paste0(round(doublet_fraction * 100, 1),
-                            "% doublets | threshold = ", SCDBLFINDER_SCORE_THRESHOLD),
-          x = "Doublet Score", y = "Cell Count", fill = "Call"
-        ) +
-        theme_minimal()
-      ggsave(
-        file.path(sample_scevan_dir, paste0(sample_id, "_scDblFinder_score_distribution.png")),
-        plot = p_score, width = 7, height = 5, dpi = DPI_SETTING
-      )
-      rm(p_score, score_df)
-    }, error = function(e) {
-      message(paste("      -> [WARNING] Score plot failed:", e$message))
-    })
-
-    # Rollback check: guard against biologically implausible doublet fractions
+    # ---- 7c. Rollback check -------------------------------------------------
+    # Guard against biologically implausible doublet fractions, which almost
+    # always indicate a classification artifact rather than a real result.
     if (doublet_fraction > DOUBLET_ROLLBACK_THRESHOLD) {
       warning(paste0(
         "  [ROLLBACK] Sample '", sample_id, "': detected doublet fraction = ",
@@ -607,71 +1174,91 @@ for (i in 1:nrow(metadata)) {
         "Doublet removal SKIPPED for this sample (all cells treated as Singlets)."
       ))
       seurat_obj$Doublet_Status <- "Singlet"
-      rollback_log[[sample_id]] <- list(
-        fraction   = doublet_fraction,
-        n_doublets = n_doublets,
-        n_cells    = ncol(seurat_obj),
-        action     = "ROLLBACK_APPLIED"
-      )
+      action_taken <- "ROLLBACK_APPLIED"
     } else {
-      rollback_log[[sample_id]] <- list(
-        fraction   = doublet_fraction,
-        n_doublets = n_doublets,
-        n_cells    = ncol(seurat_obj),
-        action     = "DOUBLETS_REMOVED"
-      )
+      action_taken <- "DOUBLETS_REMOVED"
     }
 
-    message(paste0("      -> Doublet fraction: ",
-                   round(doublet_fraction * 100, 1), "% | Action: ",
-                   rollback_log[[sample_id]]$action))
+    rollback_log[[sample_id]] <- list(
+      method         = DOUBLET_METHOD,
+      consensus      = if (DOUBLET_METHOD == "both") DOUBLET_CONSENSUS_RULE else NA_character_,
+      rate_used      = rate_info$rate,
+      rate_source    = rate_info$source,
+      fraction       = doublet_fraction,
+      n_doublets     = n_doublets,
+      n_cells        = ncol(seurat_obj),
+      pk             = primary_info$pk,
+      pk_initial     = primary_info$pk_initial,
+      nExp           = primary_info$nExp,
+      nExp_adj       = primary_info$nExp_adj,
+      homotypic_prop = primary_info$homotypic_prop,
+      note           = primary_info$note,
+      agreement      = if (!is.null(conc)) conc$agreement else NA_real_,
+      kappa          = if (!is.null(conc)) conc$kappa     else NA_real_,
+      action         = action_taken
+    )
 
-    # Diagnostic UMAP: visualize doublet scores before removal
+    message(paste0("      -> Doublet fraction: ",
+                   round(doublet_fraction * 100, 1), "%",
+                   if (!is.na(primary_info$pk)) paste0(" | pK: ", primary_info$pk) else "",
+                   " | Action: ", action_taken))
+
+    # ---- 7d. Diagnostic UMAP: doublet scores before removal ----------------
     tryCatch({
       seu_tmp_umap <- seurat_obj
+      seu_tmp_umap$.dblt_score <- primary_score
+      n_pc_umap    <- min(30, ncol(seu_tmp_umap) - 1)
       seu_tmp_umap <- NormalizeData(seu_tmp_umap, verbose = FALSE) %>%
         FindVariableFeatures(verbose = FALSE) %>%
         ScaleData(verbose = FALSE) %>%
-        RunPCA(npcs = min(30, ncol(seu_tmp_umap) - 1), verbose = FALSE) %>%
-        RunUMAP(dims = 1:min(30, ncol(seu_tmp_umap) - 1), verbose = FALSE,
+        RunPCA(npcs = n_pc_umap, verbose = FALSE) %>%
+        RunUMAP(dims = 1:n_pc_umap, verbose = FALSE,
                 reduction.name = "umap_doublets")
-      p_dblt <- FeaturePlot(seu_tmp_umap, features = "scDblFinder_score",
-                             reduction = "umap_doublets") +
+
+      p_dblt <- FeaturePlot(seu_tmp_umap, features = ".dblt_score",
+                            reduction = "umap_doublets") +
         coord_fixed() +
-        ggtitle(paste0("scDblFinder Score: ", sample_id),
+        ggtitle(paste0("Doublet Score (", DOUBLET_METHOD, "): ", sample_id),
                 subtitle = paste0(round(doublet_fraction * 100, 1),
-                                  "% doublets | Action: ",
-                                  rollback_log[[sample_id]]$action))
-      ggsave(
-        file.path(sample_scevan_dir, paste0(sample_id, "_doublet_visualization.png")),
-        plot = p_dblt, width = 7, height = 6, dpi = DPI_SETTING, bg = "white"
-      )
+                                  "% doublets | Action: ", action_taken))
+      ggsave(file.path(DOUBLET_DIAG_DIR, paste0(sample_id, "_doublet_umap.png")),
+             plot = p_dblt, width = 7, height = 6, dpi = DPI_SETTING, bg = "white")
       rm(p_dblt, seu_tmp_umap)
     }, error = function(e) {
       message(paste("      -> [WARNING] Doublet UMAP failed for", sample_id, ":", e$message))
     })
 
-    # Remove doublets from main Seurat object
+    # ---- 7e. Remove doublets from the main object --------------------------
     cells_before_dblt <- ncol(seurat_obj)
     seurat_obj <- subset(seurat_obj, subset = Doublet_Status == "Singlet")
     message(paste0("      -> Cells: ", cells_before_dblt, " -> ", ncol(seurat_obj),
                    " (removed ", cells_before_dblt - ncol(seurat_obj), " doublets)"))
 
-    rm(sce_tmp, n_doublets, doublet_fraction, cells_before_dblt)
+    rm(df_res, sc_res, conc, n_doublets, doublet_fraction, cells_before_dblt)
     gc()
 
   }, error = function(e) {
-    message(paste("    -> [WARNING] scDblFinder failed for", sample_id,
+    message(paste("    -> [WARNING] Doublet detection failed for", sample_id,
                   "| Error:", e$message,
-                  "| Proceeding with no doublet removal for this sample."))
-    seurat_obj$Doublet_Status    <- "Singlet"
-    seurat_obj$scDblFinder_score <- NA_real_
-    seurat_obj$scDblFinder_class <- NA_character_
-    rollback_log[[sample_id]]    <- list(
-      fraction   = NA,
-      n_doublets = NA,
-      n_cells    = ncol(seurat_obj),
-      action     = "ERROR_SKIPPED"
+                  "| Proceeding with NO doublet removal for this sample."))
+    # NOTE: `<<-` is REQUIRED here, not `<-`.
+    # An error handler passed to tryCatch is a *function*, so it gets its own
+    # evaluation frame. A plain `<-` would create a local copy that is discarded
+    # the instant the handler returns, meaning the sample would be checkpointed
+    # with NO Doublet_Status column and NO entry in the log - a silent data
+    # integrity failure. `<<-` assigns to the enclosing (script) environment.
+    # (The success branch above does not need this: tryCatch evaluates its
+    # main expression in the caller's frame, not a new one.)
+    seurat_obj$Doublet_Status <<- "Singlet"
+    rollback_log[[sample_id]] <<- list(
+      method = DOUBLET_METHOD, consensus = NA_character_,
+      rate_used = rate_info$rate, rate_source = rate_info$source,
+      fraction = NA_real_, n_doublets = NA_integer_, n_cells = ncol(seurat_obj),
+      pk = NA_real_, pk_initial = NA_real_, nExp = NA_integer_,
+      nExp_adj = NA_integer_, homotypic_prop = NA_real_,
+      note = paste("ERROR:", e$message),
+      agreement = NA_real_, kappa = NA_real_,
+      action = "ERROR_SKIPPED"
     )
   })
 
@@ -679,30 +1266,80 @@ for (i in 1:nrow(metadata)) {
   # This is the FINAL per-sample checkpoint. It contains clean, singlet-only,
   # ambient-corrected cells and is the file that Step 2.1b will load for merging.
   # Saving here means a crash AFTER this point (e.g., during merge) will not
-  # require re-running DecontX or scDblFinder on the next attempt.
-  message("    -> Saving full checkpoint (decontX + scDblFinder + QC) and releasing memory...")
+  # require re-running DecontX or doublet detection on the next attempt.
+  message("    -> Saving full checkpoint (decontX + doublets + QC) and releasing memory...")
   saveRDS(seurat_obj, file = checkpoint_file_2)
   rm(seurat_obj)
   gc()
   message(paste("  [DONE]", sample_id, "- checkpoint 2 saved, memory freed."))
 }
 
-# --- Save scDblFinder rollback summary (covers all processed samples) --------
+# --- Save the master doublet log (covers all processed samples) --------------
+# One row per sample recording: which method ran, the pK actually used and
+# whether it had to be constrained, the homotypic adjustment, the resulting
+# doublet fraction, whether rollback fired, and (for method "both") the
+# agreement between the two callers. This file is the audit trail for the
+# doublet step and should be reviewed before trusting any downstream result.
 if (length(rollback_log) > 0) {
+  # Helper: pull a field, returning NA if it is missing or NULL, so that a
+  # partially-populated log entry (e.g. from an error path) cannot break rbind.
+  .fld <- function(s, f, default = NA) {
+    v <- rollback_log[[s]][[f]]
+    if (is.null(v) || length(v) == 0) default else v[1]
+  }
+
   rollback_df <- do.call(rbind, lapply(names(rollback_log), function(s) {
     data.frame(
       SampleID           = s,
-      N_Cells            = rollback_log[[s]]$n_cells,
-      N_Doublets_Flagged = rollback_log[[s]]$n_doublets,
-      Doublet_Fraction   = round(rollback_log[[s]]$fraction * 100, 2),
-      Threshold_Pct      = DOUBLET_ROLLBACK_THRESHOLD * 100,
-      Score_Threshold    = SCDBLFINDER_SCORE_THRESHOLD,
-      Action             = rollback_log[[s]]$action,
+      Method             = .fld(s, "method", NA_character_),
+      Consensus_Rule     = .fld(s, "consensus", NA_character_),
+      N_Cells            = .fld(s, "n_cells"),
+      N_Doublets_Flagged = .fld(s, "n_doublets"),
+      Doublet_Fraction   = round(as.numeric(.fld(s, "fraction")) * 100, 2),
+      Target_Rate_Pct    = round(as.numeric(.fld(s, "rate_used")) * 100, 2),
+      Rate_Source        = .fld(s, "rate_source", NA_character_),
+      Rollback_Thresh    = DOUBLET_ROLLBACK_THRESHOLD * 100,
+      pK_Used            = .fld(s, "pk"),
+      pK_Global_Peak     = .fld(s, "pk_initial"),
+      nExp_Raw           = .fld(s, "nExp"),
+      nExp_Homotypic_Adj = .fld(s, "nExp_adj"),
+      Homotypic_Prop     = round(as.numeric(.fld(s, "homotypic_prop")), 4),
+      Method_Agreement   = round(as.numeric(.fld(s, "agreement")) * 100, 2),
+      Cohens_Kappa       = round(as.numeric(.fld(s, "kappa")), 4),
+      Note               = as.character(.fld(s, "note", NA_character_)),
+      Action             = .fld(s, "action", NA_character_),
       stringsAsFactors   = FALSE
     )
   }))
-  write_xlsx(rollback_df, file.path(OUTPUT_DIR, "scDblFinder_rollback_log.xlsx"))
-  message("  Doublet summary saved to: scDblFinder_rollback_log.xlsx")
+  log_name <- paste0("doublet_detection_log_", DOUBLET_METHOD, ".xlsx")
+  write_xlsx(rollback_df, file.path(OUTPUT_DIR, log_name))
+  message(paste("  Doublet summary saved to:", log_name))
+
+  # Console summary so problems are visible without opening the Excel file.
+  n_rollback <- sum(rollback_df$Action == "ROLLBACK_APPLIED", na.rm = TRUE)
+  n_error    <- sum(rollback_df$Action == "ERROR_SKIPPED",    na.rm = TRUE)
+  n_fallback <- sum(rollback_df$Note %in% c("HARDCODED_FALLBACK"), na.rm = TRUE)
+  message(paste0("  Doublet step summary: ", nrow(rollback_df), " samples | ",
+                 n_rollback, " rollback(s) | ", n_error, " error(s) | ",
+                 n_fallback, " fallback pK"))
+  if (identical(DOUBLET_RATE, "auto")) {
+    rr <- suppressWarnings(as.numeric(rollback_df$Target_Rate_Pct))
+    rr <- rr[is.finite(rr)]
+    if (length(rr) > 0) {
+      message(paste0("  Auto doublet rate across samples: ",
+                     round(min(rr), 2), "% - ", round(max(rr), 2),
+                     "% (median ", round(stats::median(rr), 2), "%)"))
+    }
+    n_capped <- sum(rollback_df$Rate_Source == "AUTO_CAPPED", na.rm = TRUE)
+    if (n_capped > 0) {
+      message(paste0("  [ATTENTION] ", n_capped,
+                     " sample(s) hit the rate cap (DOUBLET_RATE_AUTO_MAX). ",
+                     "Check for overloaded lanes."))
+    }
+  }
+  if (n_rollback > 0 || n_error > 0) {
+    message("  [ATTENTION] Review the doublet log before trusting downstream results.")
+  }
 }
 
 # =============================================================================
@@ -726,17 +1363,17 @@ for (i in 1:nrow(metadata)) {
   checkpoint_file_1 <- file.path(sample_scevan_dir, paste0(sample_id, "_scevan_processed.rds"))
 
   if (file.exists(checkpoint_file_2)) {
-    # Normal case: full checkpoint (decontX + scDblFinder + QC) is present.
-    message(paste("  [LOAD]", sample_id, "(checkpoint 2 — decontX + scDblFinder + QC)"))
+    # Normal case: full checkpoint (decontX + doublets + QC) is present.
+    message(paste("  [LOAD]", sample_id, "(checkpoint 2 — decontX + doublets + QC)"))
     seurat_objects_list[[sample_id]] <- readRDS(checkpoint_file_2)
   } else if (file.exists(checkpoint_file_1)) {
     # Fallback: only the SCEVAN checkpoint exists (e.g., pipeline from a
     # previous version, or Step 2.1a crashed before saving checkpoint 2).
-    # NOTE: this object has NOT had DecontX or scDblFinder applied — re-run
+    # NOTE: this object has NOT had DecontX or doublet removal applied — re-run
     # Step 2.1a first to produce the complete checkpoint 2 before merging.
     warning(paste0(
       "  [FALLBACK] Sample '", sample_id, "': only SCEVAN checkpoint found. ",
-      "DecontX and scDblFinder may NOT have been applied. ",
+      "DecontX and doublet removal may NOT have been applied. ",
       "Re-run Step 2.1a to generate the full checkpoint before proceeding."
     ))
     seurat_objects_list[[sample_id]] <- readRDS(checkpoint_file_1)

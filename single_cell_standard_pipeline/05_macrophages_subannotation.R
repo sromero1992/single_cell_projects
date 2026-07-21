@@ -1,36 +1,39 @@
 # =============================================================================
-# scRNA-seq PIPELINE - SCRIPT 5: Macrophages CELL SUB-ANNOTATION
+# scRNA-seq PIPELINE - SCRIPT 5: MACROPHAGE SUB-ANNOTATION
 # Version: 1.0 (CSV-Driven, Seurat Wrappers, Harmony + Standard Clustering)
+# UNIFIED BUILD: part of unified_pipeline/. Consumes the object produced by
+#   01_process_data.R v11.0. Doublet calls arrive standardised in the
+#   'Doublet_Status' column regardless of which caller ran, so this script
+#   requires no changes when DOUBLET_METHOD is switched.
 #
 # PURPOSE:
 #   Loads the globally annotated Seurat object from Script 02 and performs
-#   high-resolution sub-clustering of the T cell compartment. Provides:
+#   high-resolution sub-clustering of the Macrophage/Myeloid compartment. Provides:
 #     1. Subset extraction with fresh HVG selection, PCA, Harmony, and UMAP.
 #        BOTH a Harmony-corrected and a standard (non-Harmony) embedding are
 #        produced for side-by-side comparison.
-#     2. Weighted pre-scoring against T cell sub-type markers (CSV-driven).
+#     2. Weighted pre-scoring against macrophage sub-type markers (CSV-driven).
 #        Both z-scored (standardized) and raw (non-standardized) variants run
 #        automatically — review the Top-5 report before manual annotation.
 #     3. Manual sub-annotation via SUB_ANNOTATION_MAP (Action 5).
-#     4. Compositional analysis (proportions by SampleID and group).
-#     5. Gene expression violin/bar plots.
+#     4. Doublet removal → re-UMAP → re-clustering → re-annotation pass.
+#     5. Compositional analysis (proportions by SampleID and group).
+#     6. Gene expression violin/bar plots + AUCell functional scoring.
 #
 # MARKER SYSTEM (cell_type_markers.csv):
-#   This script reads rows where tier == "sub" AND parent_cell_type == "T cells".
-#   The CSV should contain entries for:
-#     CD4+ T cells, CD8+ T cells, Tregs, NK cells, NKT cells,
-#     gamma-delta T cells, Exhausted T cells, etc.
-#   If no sub-rows exist for "T cells" in the CSV the script will warn and
-#   fall back to the DEFAULT_SUB_MARKERS defined below.
+#   This script reads rows where tier == "sub" AND parent_cell_type == "Macrophages".
+#   If no sub-rows exist the script will warn and fall back to DEFAULT_SUB_MARKERS.
 #
 # HOW TO USE:
 #   1. Set paths/parameters in Part 1.
 #   2. Run through Part 4 — review SUBCLUSTER_01 and SUBCLUSTER_02 PNGs.
-#   3. Fill in SUB_ANNOTATION_MAP in Part 5 (Action 5).
-#   4. Run the rest for final plots and save.
+#   3. Fill in SUB_ANNOTATION_MAP in Action 5.
+#   4. Run Part 6a QC block — review CLEANING_ PNGs and marker xlsx.
+#   5. Fill in SUB_ANNOTATION_MAP_CLEAN in Action 6.
+#   6. Run the rest for final plots and save.
 #
 # INPUT:  {PROJECT_NAME}_final_annotated.rds   (output of 02_global_annotation.R)
-# OUTPUT: {PROJECT_NAME}_T_cells_subclustered.rds
+# OUTPUT: {PROJECT_NAME}_Macrophages_subclustered.rds
 # =============================================================================
 
 # --- Load Required Libraries -------------------------------------------------
@@ -52,10 +55,12 @@ set.seed(123)
 
 # --- 1.1: Project Paths (must match Scripts 01 and 02) -----------------------
 PROJECT_NAME <- "Nr4a1_s17_ack"
-ROOT_PATH <- "/home/ssromerogon/2026_nr4a1_ack/r_process"
+#ROOT_PATH <- "/home/ssromerogon/2026_nr4a1_ack/r_process"
 #ROOT_PATH   <- "Z:/selim_working_dir/2026_nr4a1_ack/r_process"  # Windows
+ROOT_PATH <- "/home/ssromerogon/local_drive/optimus_drive/selim_working_dir/2026_nr4a1_ack/r_process"
 
 OUTPUT_DIR       <- file.path(ROOT_PATH, "seurat_output")
+MAC_DIR          <- file.path(OUTPUT_DIR, "macrophages_subannotation")  # <-- all macrophage plots go here
 MAIN_RDS         <- file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_final_annotated.rds"))
 MARKERS_CSV_FILE <- file.path(ROOT_PATH, "cell_type_markers.csv")
 
@@ -102,6 +107,9 @@ DPI_SETTING <- 300
 # --- PART 2: LOAD DATA & MARKERS --------------------------------------------
 # =============================================================================
 message("=== Loading globally annotated Seurat object ===")
+if (!dir.exists(OUTPUT_DIR)) dir.create(OUTPUT_DIR, recursive = TRUE)
+if (!dir.exists(MAC_DIR))    dir.create(MAC_DIR,    recursive = TRUE)
+message(paste("  Macrophage output folder:", MAC_DIR))
 data <- readRDS(MAIN_RDS)
 message(paste("  Loaded:", ncol(data), "cells"))
 
@@ -146,25 +154,28 @@ message(paste("  Sub-clustering resolution:", SUBCLUSTER_RESOLUTION_FINAL))
 # --- PART 3: UTILITY FUNCTIONS -----------------------------------------------
 # =============================================================================
 
+# Convenience negation of %in% (used in dirty-cluster removal)
+`%nin%` <- Negate(`%in%`)
+
 get_weighted_annotation <- function(seurat_obj, marker_genes, cluster_key,
                                     standardize_expression = TRUE) {
   all_obj_genes <- rownames(seurat_obj)
   marker_genes  <- lapply(marker_genes, function(gs) intersect(gs, all_obj_genes))
   marker_genes  <- marker_genes[sapply(marker_genes, length) > 0]
   if (length(marker_genes) == 0) stop("No valid marker genes found in dataset.")
-
+  
   all_marker_genes <- sort(unique(unlist(marker_genes)))
   cell_types       <- names(marker_genes)
-
+  
   W_binary <- matrix(0, nrow = length(all_marker_genes), ncol = length(cell_types),
                      dimnames = list(all_marker_genes, cell_types))
   for (ct in cell_types) W_binary[marker_genes[[ct]], ct] <- 1.0
-
+  
   gene_occurrence <- rowSums(W_binary)
   W_specificity   <- W_binary / gene_occurrence
   W_final         <- sweep(W_specificity, 2, colSums(W_specificity), "/")
   W_final[is.na(W_final)] <- 0
-
+  
   X_subset <- GetAssayData(seurat_obj, assay = "RNA", layer = "data")[all_marker_genes, ]
   if (standardize_expression) {
     X_subset <- t(scale(t(as.matrix(X_subset))))
@@ -172,14 +183,14 @@ get_weighted_annotation <- function(seurat_obj, marker_genes, cluster_key,
   } else {
     X_subset <- as.matrix(X_subset)
   }
-
+  
   W <- t(W_final)
   clusters   <- seurat_obj[[cluster_key, drop = TRUE]]
   unique_cls <- unique(clusters)
   annotation_vector <- character(length = ncol(seurat_obj))
   names(annotation_vector) <- colnames(seurat_obj)
   cluster_score_data <- list()
-
+  
   for (cluster_id in unique_cls) {
     cell_idx <- which(clusters == cluster_id)
     if (length(cell_idx) == 0) next
@@ -208,29 +219,29 @@ process_and_extract_cell_type <- function(data, cell_type_name,
   message(paste("  Subsetting and re-clustering:", cell_type_name))
   data_sub <- subset(data, subset = CellType == cell_type_name)
   data_sub@reductions <- list(); data_sub@graphs <- list()
-
+  
   data_sub <- FindVariableFeatures(data_sub, selection.method = "vst", nfeatures = num_hvg) %>%
     ScaleData(verbose = FALSE) %>%
     RunPCA(npcs = dims_pca, reduction.name = "pca", verbose = FALSE)
   gc()
-
+  
   # Track A: Standard PCA
   data_sub <- FindNeighbors(data_sub, dims = 1:dims_pca, reduction = "pca",
-                             k.param = kneigh, graph.name = "pca_nn", verbose = FALSE) %>%
+                            k.param = kneigh, graph.name = "pca_nn", verbose = FALSE) %>%
     FindClusters(resolution = resolution, graph.name = "pca_nn",
                  cluster.name = "clusters_none", verbose = FALSE) %>%
     RunUMAP(dims = 1:dims_pca, reduction = "pca", n.neighbors = kneigh,
             min.dist = min_dist, n.epochs = 500,
             reduction.name = "umap_none", verbose = FALSE)
   gc()
-
+  
   # Track B: Harmony
   message("  Running Harmony for sub-clustering...")
   data_sub <- RunHarmony(data_sub, group.by.vars = "SampleID",
-                          reduction = "pca", reduction.save = "harmony", verbose = FALSE)
+                         reduction = "pca", reduction.save = "harmony", verbose = FALSE)
   gc()
   data_sub <- FindNeighbors(data_sub, dims = 1:dims_pca, reduction = "harmony",
-                             k.param = kneigh, graph.name = "harmony_nn", verbose = FALSE) %>%
+                            k.param = kneigh, graph.name = "harmony_nn", verbose = FALSE) %>%
     FindClusters(resolution = resolution, graph.name = "harmony_nn",
                  cluster.name = "clusters_harmony", verbose = FALSE) %>%
     RunUMAP(dims = 1:dims_pca, reduction = "harmony", n.neighbors = kneigh,
@@ -238,6 +249,33 @@ process_and_extract_cell_type <- function(data, cell_type_name,
             reduction.name = "umap_harmony", verbose = FALSE)
   gc()
   return(data_sub)
+}
+
+run_pca_umap <- function(data,
+                         num_hvg  = 2000,
+                         dims_pca = 50,
+                         min_dist = 0.3,
+                         kneigh   = 15) {
+  message("  Running HVG selection, scaling, and PCA...")
+  data <- FindVariableFeatures(data, selection.method = "vst", nfeatures = num_hvg) %>%
+    ScaleData(verbose = FALSE) %>%
+    RunPCA(npcs = dims_pca, reduction.name = "pca", verbose = FALSE)
+  gc()
+  message("  Running UMAP on PCA...")
+  data <- RunUMAP(data, dims = 1:dims_pca, reduction = "pca", n.neighbors = kneigh,
+                  min.dist = min_dist, n.epochs = 500,
+                  reduction.name = "umap_none", verbose = FALSE)
+  gc()
+  message("  Running Harmony...")
+  data <- RunHarmony(data, group.by.vars = "SampleID",
+                     reduction = "pca", reduction.save = "harmony", verbose = FALSE)
+  gc()
+  message("  Running UMAP on Harmony...")
+  data <- RunUMAP(data, dims = 1:dims_pca, reduction = "harmony", n.neighbors = kneigh,
+                  min.dist = min_dist, n.epochs = 500,
+                  reduction.name = "umap_harmony", verbose = FALSE)
+  gc()
+  return(data)
 }
 
 # =============================================================================
@@ -288,26 +326,26 @@ p_harm_comp <- (
 ) + (
   DimPlot(data_sub, reduction = "umap_harmony", group.by = "SampleID") + ggtitle("Harmony Corrected")
 ) & theme(legend.position = "bottom")
-ggsave(file.path(OUTPUT_DIR, paste0("SUBCLUSTER_01_Harmony_comparison_Macrophages.png")),
+ggsave(file.path(MAC_DIR, "SUBCLUSTER_01_Harmony_comparison_Macrophages.png"),
        p_harm_comp, width = 16, height = 8, dpi = DPI_SETTING)
 
 # --- 4.2: Cluster UMAPs (annotate from these) ---
 p_clust_none <- DimPlot(data_sub, reduction = "umap_none",    group.by = "clusters_none",
-                         label = TRUE) + NoLegend() + ggtitle("Clusters: Standard PCA")
+                        label = TRUE) + NoLegend() + ggtitle("Clusters: Standard PCA")
 p_clust_harm <- DimPlot(data_sub, reduction = "umap_harmony", group.by = "clusters_harmony",
-                         label = TRUE) + NoLegend() + ggtitle("Clusters: Harmony")
+                        label = TRUE) + NoLegend() + ggtitle("Clusters: Harmony")
 p_clust_comp <- p_clust_none + p_clust_harm
-ggsave(file.path(OUTPUT_DIR, "SUBCLUSTER_02_COMPARE_UMAP_Macrophages.png"),
+ggsave(file.path(MAC_DIR, "SUBCLUSTER_02_COMPARE_UMAP_Macrophages.png"),
        p_clust_comp, width = 16, height = 8, dpi = DPI_SETTING)
-ggsave(file.path(OUTPUT_DIR, "SUBCLUSTER_02_ANNOTATE_THIS_UMAP_Macrophages.png"),
+ggsave(file.path(MAC_DIR, "SUBCLUSTER_02_ANNOTATE_THIS_UMAP_Macrophages.png"),
        p_clust_harm, width = 10, height = 8, dpi = DPI_SETTING)
 
 # --- 4.3: DotPlot for cluster characterization ---
 p_dot_sub <- DotPlot(data_sub, features = sub_dotplot_markers,
-                      group.by = "clusters_harmony", dot.min = 0.05, cols = "RdBu") +
+                     group.by = "clusters_harmony", dot.min = 0.05, cols = "RdBu") +
   theme(axis.text.x = element_text(angle = 55, hjust = 1, size = 11),  cluster.idents = T) +
   ggtitle(paste("Sub-Cluster Markers:", PARENT_CELL_TYPE))
-ggsave(file.path(OUTPUT_DIR, "SUBCLUSTER_02_ANNOTATE_USING_THIS_DOTPLOT_Macrophages.png"),
+ggsave(file.path(MAC_DIR, "SUBCLUSTER_02_ANNOTATE_USING_THIS_DOTPLOT_Macrophages.png"),
        p_dot_sub, width = 14, height = 9, dpi = DPI_SETTING, bg = "white")
 
 # =============================================================================
@@ -334,9 +372,9 @@ data_sub$sub_weighted_raw <- sub_results_raw$annotation_vector
 message("\n--- Sub-cluster Pre-scoring Top-5 Report (standardized) ---")
 print(sub_results_std$top5_report)
 write_xlsx(sub_results_std$top5_report,
-           file.path(OUTPUT_DIR, "SUBCLUSTER_PRESCORE_top5_Macrophages_std.xlsx"))
+           file.path(MAC_DIR, "SUBCLUSTER_PRESCORE_top5_Macrophages_std.xlsx"))
 write_xlsx(sub_results_raw$top5_report,
-           file.path(OUTPUT_DIR, "SUBCLUSTER_PRESCORE_top5_Macrophages_raw.xlsx"))
+           file.path(MAC_DIR, "SUBCLUSTER_PRESCORE_top5_Macrophages_raw.xlsx"))
 
 p_prescore <- (
   DimPlot(data_sub, reduction = "umap_harmony", group.by = "sub_weighted_std",
@@ -345,7 +383,7 @@ p_prescore <- (
   DimPlot(data_sub, reduction = "umap_harmony", group.by = "sub_weighted_raw",
           label = TRUE, repel = TRUE) + ggtitle("Sub Pre-Score: Raw")
 )
-ggsave(file.path(OUTPUT_DIR, "SUBCLUSTER_03_prescore_comparison_Macrophages.png"),
+ggsave(file.path(MAC_DIR, "SUBCLUSTER_03_prescore_comparison_Macrophages.png"),
        p_prescore, width = 18, height = 8, dpi = DPI_SETTING, bg = "white")
 
 # =============================================================================
@@ -361,188 +399,381 @@ ggsave(file.path(OUTPUT_DIR, "SUBCLUSTER_03_prescore_comparison_Macrophages.png"
 # Available sub-types from CSV (or defaults if CSV had no entries):
 #   "CD4+ T cells", "CD8+ T cells", "Tregs", "NK cells",
 #   "NKT cells", "gdT cells", "Exhausted T", "ILC2s"
-#FeaturePlot(data_sub, reduction = "umap_harmony", features = "scDblFinder_score")
+# Doublet score column depends on DOUBLET_METHOD used in Script 01:
+#   DoubletFinder -> "DF_score"   |   scDblFinder -> "scDblFinder_score"
+#FeaturePlot(data_sub, reduction = "umap_harmony", features = "DF_score")
 
 # 'cDCs', # Itgax+ Clec9a+ → cDCs (no Cd68)
 # 'TAM resident',#  Folr2+ Timd4+  C1q1/b+ and Retnla- Arg1-
 # 'Monocytes', # Cd14+ Ccr2+ Ly6c2+ → Monocytes (no Timd4 no Adgre1)
 # 'pDCs', # Siglech+ Bst2+  → pDCs (ignore everything else)
 SUB_ANNOTATION_MAP <- c(
-  '0'  = 'TAM resident',
-  '1'  = 'M0 Macrophages', # ?
-  '2'  = 'TAM resident',
-  '3'  = 'M0 Macrophages', # ?
-  '4'  = 'M0 Macrophages', # M1 macrophages
-  '5'  = 'TAM resident', # or M2 macrophage
-  '6'  = 'cDC1',
-  '7'  = 'cDC1',
-  '8'  = 'TAM resident',
-  '9'  = 'Cyc. cDC1',
-  '10' = 'M0 Macrophages',
-  '11' = 'cDC2',
-  '12' = 'Monocytes',
-  '13' = 'cDC2',
-  '14' = 'TAM SPP1', # or M1 macrophages or TAM inflammatory
-  '15' = 'mRegDCs',
-  '16' = 'Doublet', #?
-  '17' = 'Monocytes',
-  '18' = 'Doublet', #?
-  '19' = 'M1 Macrophages', # or TAM IFN
-  '20' = 'Cyc. Macrophages',
-  '21' = 'Doublet', # or TAM IFN
-  '22' = 'Monocytes',
-  '23' = 'Neutrophils',
-  '24' = 'Doublet',
-  '25' = 'M2 Macrophages', # or M0 macrophages
-  '26' = 'TAM resident',
-  '27' = 'Doublet', # or unlikely M0 macrophages or TAM SPP1? because Gpnmb+?
-  '28' = 'TAM IFN',
-  '29' = 'Doublet', # or M2 macrophages
-  '30' = 'pDCs',
-  '31' = 'Doublet' # Everything is weak here...
+  '0'  = 'M2 Macrophages',#
+  '1'  = 'M0 Macrophages',#
+  '2'  = 'M2 Macrophages',#
+  '3'  = 'M0 Macrophages',#
+  '4'  = 'M0 Macrophages',#
+  '5'  = 'M0 Macrophages',#
+  '6'  = 'cDC1',#
+  '7'  = 'cDC1',#
+  '8'  = 'M2 Macrophages',#
+  '9'  = 'Cyc. cDC1',#
+  '10' = 'M0 Macrophages',#
+  '11' = 'cDC2',#
+  '12' = 'Monocytes',#
+  '13' = 'cDC2',#
+  '14' = 'M1 Macrophages',#
+  '15' = 'mRegDCs',#
+  '16' = 'M0 Macrophages',#
+  '17' = 'Monocytes',#
+  '18' = 'M2 Macrophages',# 
+  '19' = 'M1 Macrophages',#
+  '20' = 'Cyc. Macrophages',#
+  '21' = 'Doublet', #
+  '22' = 'Monocytes',#
+  '23' = 'Neutrophils',#
+  '24' = 'Doublet',#
+  '25' = 'M2 Macrophages',#
+  '26' = 'M2 Macrophages',#
+  '27' = 'Doublet',#
+  '28' = 'M1 Macrophages',#
+  '29' = 'Doublet',#
+  '30' = 'pDCs', #
+  '31' = 'Doublet'#
 )
 
 # =============================================================================
-# --- PART 6: APPLY SUB-ANNOTATIONS & FINAL VISUALIZATIONS -------------------
+# --- PART 6: FIRST-PASS ANNOTATION & DIRTY-CLUSTER QC -----------------------
 # =============================================================================
-message("\n=== STEP 6: Applying Sub-Annotations ===")
-#data_sub_bak <- data_sub
-Idents(data_sub) <- "clusters_harmony"
+message("\n=== STEP 6a: First-Pass Sub-Annotation (pre-cleaning) ===")
 
-all_markers <- FindAllMarkers(
-  data_sub,
-  min.pct        = 0.05,
-  logfc.threshold = 0.25,
-  only.pos       = TRUE
-)
-
-# Top 30 per cluster by log2FC
-top30 <- all_markers %>%
-  group_by(cluster) %>%
-  arrange(desc(avg_log2FC)) %>%
-  slice_head(n = 100) %>%
-  ungroup()
-
-write_xlsx(top30, file.path(OUTPUT_DIR, "macrophage_top50_markers_per_cluster.xlsx"))
-message("Saved: macrophage_top30_markers_per_cluster.xlsx")
-
-
-# --- Contaminant marker FeaturePlots ---
-# 16 = Fibroblasts, 18 = SMCs, 21 = T cells, 24 = Mast cells
-# 25 = Plasma B cells, 27 = Neurons, 29 = VECs, 30 = T cells, 31 = B cells
-
-contaminant_markers <- c(
-  "Col1a1",  # 16 Fibroblasts
-  "Myh11",   # 18 SMCs
-  "Cd3e",    # 21 T cells
-  "Cpa3",    # 24 Mast cells
-  "Mzb1",    # 25 Plasma B cells
-  "Slc1a2",  # 27 Neurons
-  "Cldn5",   # 29 VECs
-  "Cd8b1",   # 30 T cells/lymphoid
-  "Cd19"     # 31 B cells
-)
-
-p2 <- FeaturePlot(data_sub, 
-                  features = contaminant_markers,
-                  reduction = "umap_harmony",
-                  ncol = 3) &
-  theme(plot.title = element_text(size = 10))
-p2
-ggsave(file.path(OUTPUT_DIR, "MAC_02_contaminant_markers_featureplot.png"),
-       p2, width = 12, height = 10, dpi = DPI_SETTING, bg = "white")
-
-message("Saved: MAC_01_annotation_umap.png")
-message("Saved: MAC_02_contaminant_markers_featureplot.png")
-
-p2<- FeaturePlot(data_sub,
-            features = c(
-              "Hexb",    # cluster 1  - TAM_resident/M2
-              "Cd209a",  # cluster 11 - cDC2
-              "Siglecg", # cluster 13 - pDC/regulatory
-              "Spp1",    # cluster 14 - TAM_inflammatory
-              "Ccr7",    # cluster 15 - Migratory cDCs
-              "Ccr2",    # cluster 17 - Monocytes
-              "Ccl3",    # cluster 19 - M1
-              "Bub1",    # cluster 20 - Cyc. Macrophages
-              "S100a8",  # cluster 23 - Neutrophils
-              "Tmem119",   # cluster 26 - TAM_resident
-              "Ifit1"    # cluster 28 - TAM_IFN
-            ),
-            reduction = "umap_harmony",
-            ncol = 4) &
-  theme(plot.title = element_text(size = 10))
-p2
-ggsave(file.path(OUTPUT_DIR, "MAC_02_new_markers_featureplot2.png"),
-       p2, width = 12, height = 10, dpi = DPI_SETTING, bg = "white")
-
-
-
-data_sub$sub_cell_types <- recode_factor(data_sub$clusters_harmony, !!!SUB_ANNOTATION_MAP)
+# Apply ACTION 5 annotation map.
+# Label anything uncertain as "Doublet" or "Unknown" — removed in 6b.
+data_sub$sub_cell_types  <- recode_factor(data_sub$clusters_harmony, !!!SUB_ANNOTATION_MAP)
 data_sub$CellType        <- data_sub$sub_cell_types
 data_sub$seurat_clusters <- data_sub$clusters_harmony
-#data_sub_bak <- data_sub
 
-# The find markers below and feature plots helped to determine the doublets of those cells
-data_sub <- subset(data_sub, subset = sub_cell_types != "Doublet")
+# --- 6a.1: Pre-cleaning overview UMAP ----------------------------------------
+p_dirty <- DimPlot(data_sub, reduction = "umap_harmony", group.by = "sub_cell_types",
+                   label = TRUE, repel = TRUE) +
+  ggtitle("Pre-Cleaning: All Clusters Labelled (including Doublet/Unknown)") +
+  theme(legend.text = element_text(size = 11))
+ggsave(file.path(MAC_DIR, "CLEANING_00_pre_removal_overview.png"),
+       p_dirty, width = 12, height = 8, dpi = DPI_SETTING, bg = "white")
 
-DimPlot(data_sub, reduction = "umap_harmony", group.by = "sub_cell_types",
-        label = TRUE, repel = TRUE)
+# --- 6a.2: QC FeaturePlots ---------------------------------------------------
+message("  Generating QC FeaturePlots for dirty cluster inspection...")
 
+# Broad myeloid identity markers
+p_qc1 <- FeaturePlot(data_sub, reduction = "umap_harmony",
+                     features = intersect(c("Cd68", "Adgre1", "Csf1r", "Itgam",
+                                            "Mki67", "Fcgr3", "nCount_RNA", "nFeature_RNA"),
+                                          rownames(data_sub)),
+                     ncol = 4) &
+  theme(plot.title = element_text(size = 13, face = "italic"), axis.title = element_blank())
+ggsave(file.path(MAC_DIR, "CLEANING_01_QC_broad_myeloid_markers.png"),
+       p_qc1, width = 16, height = 8, dpi = DPI_SETTING, bg = "white")
 
-# 
-# # Load the necessary libraries
-# library(RColorBrewer)
-# library(ggplot2)
-# library(patchwork)
-# 
-# # 1. Plot nCount_RNA (Total molecules)
-# p1 <- FeaturePlot(data_sub, features = "nCount_RNA", reduction = "umap_harmony",  pt.size = 0.5) +
-#   scale_colour_gradientn(colours = rev(brewer.pal(n = 11, name = "Spectral"))) +
-#   ggtitle("Total RNA Counts (nCount)")
-# 
-# # 2. Plot nFeature_RNA (Unique genes)
-# p2 <- FeaturePlot(data_sub, features = "nFeature_RNA", reduction = "umap_harmony", pt.size = 0.5) +
-#   scale_colour_gradientn(colours = rev(brewer.pal(n = 11, name = "Spectral"))) +
-#   ggtitle("Unique Genes (nFeature)")
-# 
-# # 3. View them side-by-side
-# p1 | p2
+# Contamination / non-myeloid markers
+# Non-myeloid contamination markers (defined here for use in p_qc2)
+contaminant_markers <- c(
+  "Col1a1",  # Fibroblasts
+  "Myh11",   # Smooth muscle cells
+  "Cd3e",    # T cells
+  "Cpa3",    # Mast cells
+  "Mzb1",    # Plasma B cells
+  "Slc1a2",  # Neurons/enteric glia
+  "Cldn5",   # Vascular endothelial cells
+  "Cd8b1",   # T cells / lymphoid
+  "Cd19"     # B cells
+)
+p_qc2 <- FeaturePlot(data_sub, reduction = "umap_harmony",
+                     features = intersect(contaminant_markers, rownames(data_sub)),
+                     ncol = 3) &
+  theme(plot.title = element_text(size = 13, face = "italic"), axis.title = element_blank())
+ggsave(file.path(MAC_DIR, "CLEANING_02_QC_contamination_markers.png"),
+       p_qc2, width = 14, height = 10, dpi = DPI_SETTING, bg = "white")
+
+# DC subtype disambiguation
+p_qc3 <- FeaturePlot(data_sub, reduction = "umap_harmony",
+                     features = intersect(c("Itgax", "Clec9a", "Xcr1", "Cd209a",
+                                            "Siglech", "Bst2", "Ccr7", "Ccl17"),
+                                          rownames(data_sub)),
+                     ncol = 4) &
+  theme(plot.title = element_text(size = 13, face = "italic"), axis.title = element_blank())
+ggsave(file.path(MAC_DIR, "CLEANING_03_DC_disambiguation.png"),
+       p_qc3, width = 16, height = 8, dpi = DPI_SETTING, bg = "white")
+
+# TAM / M1 / M2 state markers
+p_qc4 <- FeaturePlot(data_sub, reduction = "umap_harmony",
+                     features = intersect(c("Spp1", "Fn1", "Gpnmb", "Arg1", "Mrc1",
+                                            "Nos2", "Ifit1", "Isg15", "Folr2", "Timd4"),
+                                          rownames(data_sub)),
+                     ncol = 4) &
+  theme(plot.title = element_text(size = 13, face = "italic"), axis.title = element_blank())
+ggsave(file.path(MAC_DIR, "CLEANING_04_TAM_M1_M2_markers.png"),
+       p_qc4, width = 16, height = 10, dpi = DPI_SETTING, bg = "white")
+
+# Monocyte / Neutrophil markers
+p_qc5 <- FeaturePlot(data_sub, reduction = "umap_harmony",
+                     features = intersect(c("Ly6c2", "Ccr2", "Cd14", "S100a8",
+                                            "S100a9", "Csf3r", "Cxcr2"),
+                                          rownames(data_sub)),
+                     ncol = 4) &
+  theme(plot.title = element_text(size = 13, face = "italic"), axis.title = element_blank())
+ggsave(file.path(MAC_DIR, "CLEANING_05_monocyte_neutrophil_markers.png"),
+       p_qc5, width = 14, height = 8, dpi = DPI_SETTING, bg = "white")
+
+# --- 6a.3: FindAllMarkers for all first-pass clusters -------------------------
+Idents(data_sub) <- "clusters_harmony"
+message("  Running FindAllMarkers on all clusters...")
+all_cluster_markers <- FindAllMarkers(
+  data_sub,
+  only.pos        = TRUE,
+  min.pct         = 0.05,
+  logfc.threshold = 0.25,
+  verbose         = FALSE
+)
+
+top30_by_cluster <- all_cluster_markers %>%
+  dplyr::group_by(cluster) %>%
+  dplyr::slice_max(order_by = avg_log2FC, n = 30) %>%
+  dplyr::arrange(cluster, desc(avg_log2FC)) %>%
+  dplyr::ungroup()
+
+write_xlsx(
+  as.data.frame(top30_by_cluster),
+  file.path(MAC_DIR, "CLEANING_top30_per_cluster.xlsx")
+)
+message(paste("  Marker table saved —",
+              length(unique(all_cluster_markers$cluster)), "clusters,",
+              nrow(top30_by_cluster), "rows total."))
+
+# =============================================================================
+# --- PART 6b: REMOVE DIRTY CLUSTERS & RE-EMBED ------------------------------
+# =============================================================================
+message("\n=== STEP 6b: Removing dirty clusters and re-running UMAP ===")
+
+DIRTY_LABELS <- c("Doublet", "Unknown")   # <-- ACTION: edit if you used different labels
+
+n_before <- ncol(data_sub)
+data_sub  <- subset(data_sub, subset = sub_cell_types %nin% DIRTY_LABELS)
+n_after   <- ncol(data_sub)
+message(paste("  Removed", n_before - n_after, "dirty cells.",
+              n_after, "clean cells remain."))
+
+# Drop reductions so run_pca_umap starts fresh
+data_sub@reductions <- list()
+data_sub@graphs     <- list()
+
+message("  Re-running HVG / PCA / Harmony / UMAP on clean cells...")
+SUBCLUSTER_K_NEIGHBORS = 15
+SUBCLUSTER_N_PCS = 20
+data_sub <- run_pca_umap(
+  data     = data_sub,
+  num_hvg  = SUBCLUSTER_N_HVG,
+  dims_pca = SUBCLUSTER_N_PCS,
+  min_dist = SUBCLUSTER_MIN_DIST,
+  kneigh   = SUBCLUSTER_K_NEIGHBORS
+)
+gc()
+
+# Re-cluster on clean embedding
+message("  Re-clustering clean cells on harmony embedding...")
+SUBCLUSTER_RESOLUTION_FINAL = 1.5
+data_sub <- FindNeighbors(data_sub, dims = 1:SUBCLUSTER_N_PCS, reduction = "harmony",
+                          k.param = SUBCLUSTER_K_NEIGHBORS, graph.name = "harmony_nn",
+                          verbose = FALSE) %>%
+  FindClusters(resolution = SUBCLUSTER_RESOLUTION_FINAL, graph.name = "harmony_nn",
+               cluster.name = "clusters_harmony_clean", verbose = FALSE)
+Idents(data_sub) <- "clusters_harmony_clean"
+gc()
+
+# --- 6b.1: Save clean cluster UMAPs for re-annotation review ----------------
+p_clean_clust <- DimPlot(data_sub, reduction = "umap_harmony",
+                         group.by = "clusters_harmony_clean",
+                         label = TRUE, repel = TRUE) +
+  NoLegend() + ggtitle("CLEAN Clusters: Harmony (re-embedded)")
+ggsave(file.path(MAC_DIR, "CLEANING_06_clean_clusters_ANNOTATE_THIS.png"),
+       p_clean_clust, width = 10, height = 8, dpi = DPI_SETTING, bg = "white")
+
+p_clean_both <- (
+  DimPlot(data_sub, reduction = "umap_none",    group.by = "clusters_harmony_clean",
+          label = TRUE) + NoLegend() + ggtitle("Clean — Standard PCA")
+) + (
+  DimPlot(data_sub, reduction = "umap_harmony", group.by = "clusters_harmony_clean",
+          label = TRUE) + NoLegend() + ggtitle("Clean — Harmony")
+)
+ggsave(file.path(MAC_DIR, "CLEANING_07_clean_compare_both_embeddings.png"),
+       p_clean_both, width = 16, height = 8, dpi = DPI_SETTING)
+
+# --- 6b.2: Re-run weighted pre-scoring on clean clusters --------------------
+message("  Re-running weighted pre-scoring on clean clusters...")
+sub_results_clean_std <- get_weighted_annotation(
+  seurat_obj             = data_sub,
+  marker_genes           = SUB_MARKERS_LIST,
+  cluster_key            = "clusters_harmony_clean",
+  standardize_expression = TRUE
+)
+sub_results_clean_raw <- get_weighted_annotation(
+  seurat_obj             = data_sub,
+  marker_genes           = SUB_MARKERS_LIST,
+  cluster_key            = "clusters_harmony_clean",
+  standardize_expression = FALSE
+)
+data_sub$sub_weighted_std_clean <- sub_results_clean_std$annotation_vector
+data_sub$sub_weighted_raw_clean <- sub_results_clean_raw$annotation_vector
+
+message("\n--- Clean Sub-cluster Pre-scoring Top-5 Report (standardized) ---")
+print(sub_results_clean_std$top5_report)
+write_xlsx(sub_results_clean_std$top5_report,
+           file.path(MAC_DIR, "CLEANING_08_prescore_clean_std.xlsx"))
+write_xlsx(sub_results_clean_raw$top5_report,
+           file.path(MAC_DIR, "CLEANING_08_prescore_clean_raw.xlsx"))
+
+p_prescore_clean <- (
+  DimPlot(data_sub, reduction = "umap_harmony", group.by = "sub_weighted_std_clean",
+          label = TRUE, repel = TRUE) + ggtitle("Clean Pre-Score: Standardized")
+) | (
+  DimPlot(data_sub, reduction = "umap_harmony", group.by = "sub_weighted_raw_clean",
+          label = TRUE, repel = TRUE) + ggtitle("Clean Pre-Score: Raw")
+)
+ggsave(file.path(MAC_DIR, "CLEANING_09_prescore_clean_comparison.png"),
+       p_prescore_clean, width = 18, height = 8, dpi = DPI_SETTING, bg = "white")
+
+# --- 6b.3: DotPlot for clean cluster characterization -----------------------
+p_dot_clean <- DotPlot(data_sub, features = sub_dotplot_markers,
+                       group.by = "clusters_harmony_clean", dot.min = 0.05,
+                       cols = "RdBu") +
+  theme(axis.text.x = element_text(angle = 55, hjust = 1, size = 11)) +
+  ggtitle(paste("Clean Sub-Cluster Markers:", PARENT_CELL_TYPE))
+ggsave(file.path(MAC_DIR, "CLEANING_10_clean_ANNOTATE_USING_THIS_DOTPLOT.png"),
+       p_dot_clean, width = 14, height = 9, dpi = DPI_SETTING, bg = "white")
+
+# --- 6b.4: FindAllMarkers on clean clusters for final verification ----------
+message("  Running FindAllMarkers on clean clusters...")
+all_cluster_markers_clean <- FindAllMarkers(
+  data_sub,
+  only.pos        = TRUE,
+  min.pct         = 0.05,
+  logfc.threshold = 0.25,
+  verbose         = FALSE
+)
+
+top30_clean <- all_cluster_markers_clean %>%
+  dplyr::group_by(cluster) %>%
+  dplyr::slice_max(order_by = avg_log2FC, n = 30) %>%
+  dplyr::arrange(cluster, desc(avg_log2FC)) %>%
+  dplyr::ungroup()
+
+write_xlsx(
+  as.data.frame(top30_clean),
+  file.path(MAC_DIR, "CLEANING_top30_per_cluster_clean.xlsx")
+)
+message(paste("  Clean marker table saved —",
+              length(unique(all_cluster_markers_clean$cluster)), "clusters,",
+              nrow(top30_clean), "rows total."))
+
+# =============================================================================
+# --- ACTION 6: FILL IN CLEAN CLUSTER ANNOTATIONS HERE -----------------------
+# =============================================================================
+# Review (in MAC_DIR):
+#   CLEANING_06_clean_clusters_ANNOTATE_THIS.png      — new cluster layout
+#   CLEANING_10_clean_ANNOTATE_USING_THIS_DOTPLOT.png — marker expression
+#   CLEANING_08_prescore_clean_std.xlsx               — top-5 per clean cluster
+#   CLEANING_09_prescore_clean_comparison.png         — automated suggestions
+#   CLEANING_top30_per_cluster_clean.xlsx             — full top 30 DE genes
+#
+# Map each NEW cluster number (as a string) to a macrophage sub-type name.
+# These will differ from SUB_ANNOTATION_MAP because cells were re-embedded
+# and re-clustered after doublet removal.
+
+  SUB_ANNOTATION_MAP_CLEAN <- c(
+  '0'  = 'M2 Macrophages',#      
+  '1'  = 'M0 Macrophages',#
+  '2'  = 'M2 Macrophages',#
+  '3'  = 'cDC1',#
+  '4'  = 'M0 Macrophages',#
+  '5'  = 'M2 Macrophages',#
+  '6'  = 'cDC2',#
+  '7'  = 'M1 Macrophages',#
+  '8'  = 'M1 Macrophages',#
+  '9'  = 'Monocytes',#
+  '10' = 'M2 Macrophages',#
+  '11' = 'cDC2',#
+  '12' = 'Cyc. cDC1',#
+  '13' = 'cDC1',#
+  '14' = 'mRegDCs',#
+  '15' = 'M1 Macrophages',#
+  '16' = 'M2 Macrophages',#
+  '17' = 'Monocytes',#
+  '18' = 'Cyc. Macrophages',#
+  '19' = 'M2 Macrophages',#
+  '20' = 'Monocytes',#
+  '21' = 'Cyc. cDC2',#
+  '22' = 'Neutrophils',#
+  '23' = 'M2 Macrophages',#
+  '24' = 'cDC2',#
+  '25' = 'M1 Macrophages',#
+  '26' = 'pDCs' #
+)
+
+# =============================================================================
+# --- PART 6c: APPLY CLEAN ANNOTATIONS & FINAL VISUALIZATIONS ----------------
+# =============================================================================
+message("\n=== STEP 6c: Applying clean sub-annotations ===")
+
+data_sub$sub_cell_types  <- recode_factor(data_sub$clusters_harmony_clean, !!!SUB_ANNOTATION_MAP_CLEAN)
+data_sub$CellType        <- data_sub$sub_cell_types
+data_sub$seurat_clusters <- data_sub$clusters_harmony_clean
+
+# Remove any remaining dirty clusters before finalizing levels
+DIRTY_LABELS_CLEAN <- c("Doublet", "Unknown")   # <-- edit if you used different labels
+n_before <- ncol(data_sub)
+data_sub <- subset(data_sub, subset = sub_cell_types %nin% DIRTY_LABELS_CLEAN)
+message(paste("  Removed", n_before - ncol(data_sub), "additional dirty cells.",
+              ncol(data_sub), "final clean cells."))
 
 sub_type_levels_macrophages <- c(
   "pDCs",
-  "cDC2",
-  "mRegDCs",
-  "cDC1", 
-  "Cyc. cDC1",
+  "cDC1", "Cyc. cDC1", "cDC2", "Cyc. cDC2", "mRegDCs",
   "Monocytes",
-  "Cyc. Macrophages",
-  "M0 Macrophages",
-  "TAM SPP1",
-  "M2 Macrophages",
-  "TAM resident",
-  "M1 Macrophages",
-  "TAM IFN",
+  "M0 Macrophages", "M1 Macrophages", "M2 Macrophages", "Cyc. Macrophages",
   "Neutrophils"
 )
-
 data_sub$sub_cell_types <- factor(data_sub$sub_cell_types, levels = sub_type_levels_macrophages)
 
-# --- Final UMAP: manual annotation ---
+# Drop reductions and re-embed without the removed cells
+data_sub@reductions <- list()
+data_sub@graphs     <- list()
+
+message("  Re-running UMAP after final clean subset...")
+data_sub <- run_pca_umap(
+  data     = data_sub,
+  num_hvg  = SUBCLUSTER_N_HVG,
+  dims_pca = SUBCLUSTER_N_PCS,
+  min_dist = SUBCLUSTER_MIN_DIST,
+  kneigh   = SUBCLUSTER_K_NEIGHBORS
+)
+gc()
+
+# --- Final UMAP: clean manual annotation ------------------------------------
 p_final <- DimPlot(data_sub, reduction = "umap_harmony", group.by = "sub_cell_types",
                    label = TRUE, repel = TRUE) +
-  ggtitle(paste("Sub-Cell Types:", PARENT_CELL_TYPE)) +
+  ggtitle(paste("Sub-Cell Types:", PARENT_CELL_TYPE, "(Clean)")) +
   theme(legend.text  = element_text(size = 12),
         legend.title = element_text(size = 14, face = "bold")) +
   guides(color = guide_legend(override.aes = list(size = 4)))
-ggsave(file.path(OUTPUT_DIR, "FINAL_SUBCLUSTER_UMAP_Macrophages.png"),
-       p_final, width = 10, height = 8, dpi = DPI_SETTING, bg = "white")
+ggsave(file.path(MAC_DIR, "FINAL_SUBCLUSTER_UMAP_Macrophages.png"),
+       p_final, width = 12, height = 8, dpi = DPI_SETTING, bg = "white")
 
-# --- Comparison: manual vs weighted ---
+# --- Comparison: manual vs automated pre-scores (on clean embedding) --------
 p_compare <- DimPlot(data_sub, reduction = "umap_harmony",
-                     group.by = c("sub_cell_types", "sub_weighted_std", "sub_weighted_raw"),
+                     group.by = c("sub_cell_types",
+                                  "sub_weighted_std_clean",
+                                  "sub_weighted_raw_clean"),
                      label = FALSE, repel = TRUE)
-ggsave(file.path(OUTPUT_DIR, "FINAL_SUBCLUSTER_comparison_Macrophages.png"),
+ggsave(file.path(MAC_DIR, "FINAL_SUBCLUSTER_comparison_Macrophages.png"),
        p_compare, width = 26, height = 8, dpi = DPI_SETTING, bg = "white")
 
 
@@ -556,16 +787,14 @@ sub_type_levels2 <- sub_type_levels_macrophages
 name_mapping <- c(
   "pDCs"             = "pDCs",
   "cDC1"             = "cDC1",
-  "Cyc. cDC1"        = "cDC1",
+  "Cyc. cDC1"        = "cDC1",       # maps to cDC1 markers
   "cDC2"             = "cDC2",
+  "Cyc. cDC2"        = "cDC2",       # maps to cDC2 markers
   "mRegDCs"          = "mRegDCs",
   "Monocytes"        = "Monocytes",
   "M0 Macrophages"   = "M0 macrophages",
-  "M2 Macrophages"   = "M2 macrophages",
-  "TAM resident"     = "TAM_resident",
   "M1 Macrophages"   = "M1 macrophages",
-  "TAM IFN"          = "TAM_IFN",
-  "TAM SPP1"         = "TAM_SPP1",
+  "M2 Macrophages"   = "M2 macrophages",
   "Cyc. Macrophages" = "Cyc. Macrophages",
   "Neutrophils"      = "Neutrophils"
 )
@@ -611,12 +840,12 @@ final_gene_list <- intersect(final_gene_list, rownames(data_sub))
 
 # --- Final DotPlot ---
 p_final_dot <- DotPlot(data_sub, features = final_gene_list,
-                        group.by = "sub_cell_types", dot.min = 0.05,
-                        cols = "RdBu", scale = TRUE) + coord_flip() +
+                       group.by = "sub_cell_types", dot.min = 0.05,
+                       cols = "RdBu", scale = TRUE) + coord_flip() +
   theme(axis.text.x = element_text(angle = 55, hjust = 1, size = 11))
 
 p_final_dot
-ggsave(file.path(OUTPUT_DIR, "FINAL_DotPlot_sub_macrophages.png"),
+ggsave(file.path(MAC_DIR, "FINAL_DotPlot_sub_macrophages.png"),
        p_final_dot, width = 8, height = 12, dpi = DPI_SETTING, bg = "white")
 
 # Faceted UMAP
@@ -631,26 +860,25 @@ if (length(ADDITIONAL_GROUPS_TO_PLOT) > 0 &&
           legend.text = element_text(size = 14),
           legend.title = element_text(size = 14, face = "bold")) +
     guides(color = guide_legend(override.aes = list(size = 4))) 
-  ggsave(file.path(OUTPUT_DIR, paste0("FINAL_sub_UMAP_faceted_Macrophages_by_", pgrp, ".png")),
+  ggsave(file.path(MAC_DIR, paste0("FINAL_sub_UMAP_faceted_Macrophages_by_", pgrp, ".png")),
          p_facet, width = 5 * ceiling(n_levels / 2), height = 10, dpi = DPI_SETTING, bg = "white")
 }
 
 # =============================================================================
 # --- PART 7: SAVE ------------------------------------------------------------
 # =============================================================================
-message("\n=== STEP 7: Saving T Cell Sub-Cluster Object ===")
-saveRDS(data_sub, file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_Macrophages_subclustered.rds")))
+message("\n=== STEP 7: Saving Macrophage Sub-Cluster Object ===")
+saveRDS(data_sub, file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_macrophages_subclustered.rds")))
 message(paste0(
-  "\n=== T CELL SUB-ANNOTATION COMPLETE ===\n",
-  "  Saved: ", PROJECT_NAME, "_Macrophages_subclustered.rds\n",
+  "\n=== MACROPHAGE SUB-ANNOTATION COMPLETE ===\n",
+  "  Saved: ", PROJECT_NAME, "_macrophages_subclustered.rds\n",
   "  Sub-types found: ", paste(levels(data_sub$sub_cell_types), collapse = ", "), "\n",
   "\nNext steps:\n",
-  "  - Script 04: Colonocyte sub-annotation (04_colonocyte_subannotation.R)\n",
-  "  - Script 05: DE + Two-Way ANOVA (05_DE_and_two_way_ANOVA.R)\n"
+  "  - Script 06: DE + Two-Way ANOVA (06_DE_and_two_way_ANOVA.R)\n"
 ))
 
 
-data_sub <- readRDS(file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_Macrophages_subclustered.rds")))
+data_sub <- readRDS(file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_macrophages_subclustered.rds")))
 
 # =============================================================================
 # --- PART 8: COMPOSITIONAL ANALYSIS ------------------------------------------
@@ -710,10 +938,13 @@ p_stats
 
 # --- Step 3: Save ---
 #dir.create("proportion_analysis", showWarnings = FALSE)
-savef <- paste0(OUTPUT_DIR, "/macrophages_stats_cell_props.png")
+savef <- paste0(MAC_DIR, "/macrophages_stats_cell_props.png")
 ggsave(savef,p_stats, width = 12, height = 10, dpi=DPI_SETTING)
-savef <- paste0(OUTPUT_DIR, "/macrophages_cell_props_long_data.xlsx")
+savef <- paste0(MAC_DIR, "/macrophages_cell_props_long_data.xlsx")
 write_xlsx(df_pct, savef)
+
+
+
 
 
 
@@ -877,7 +1108,7 @@ plot_results <- plot_expression_custom(
   facet_ncol    = 4,               # Arrange in 4 columns
   p_width     = 12,  # Force 12 inches wide
   p_height    = 8,  # Force 10 inches tall for multiple rows,
-  save_path     = file.path(OUTPUT_DIR, "Nr4a1_stats_plot_macrophages.png"),
+  save_path     = file.path(MAC_DIR, "Nr4a1_stats_plot_macrophages.png"),
   dpi           = DPI_SETTING
 )
 
@@ -895,7 +1126,7 @@ plot_results <- plot_expression_custom(
   facet_ncol    = 4,               # Arrange in 4 columns
   p_width     = 12,  # Force 12 inches wide
   p_height    = 8,  # Force 10 inches tall for multiple rows,
-  save_path     = file.path(OUTPUT_DIR, "Nr4a1_custom_stats_plot_macrophages.png"),
+  save_path     = file.path(MAC_DIR, "Nr4a1_custom_stats_plot_macrophages.png"),
   dpi           = DPI_SETTING
 )
 
@@ -911,7 +1142,7 @@ plot_results <- plot_expression_custom(
   facet_ncol    = 4,               # Arrange in 4 columns
   p_width     = 12,  # Force 12 inches wide
   p_height    = 8,  # Force 10 inches tall for multiple rows,
-  save_path     = file.path(OUTPUT_DIR, "Nr4a2_stats_plot_macrophages.png"),
+  save_path     = file.path(MAC_DIR, "Nr4a2_stats_plot_macrophages.png"),
   dpi           = DPI_SETTING
 )
 
@@ -927,7 +1158,7 @@ plot_results <- plot_expression_custom(
   facet_ncol    = 4,               # Arrange in 4 columns
   p_width     = 12,  # Force 12 inches wide
   p_height    = 8,  # Force 10 inches tall for multiple rows,
-  save_path     = file.path(OUTPUT_DIR, "Nr4a3_stats_plot_macrophages.png"),
+  save_path     = file.path(MAC_DIR, "Nr4a3_stats_plot_macrophages.png"),
   dpi           = DPI_SETTING
 )
 
@@ -941,7 +1172,7 @@ library(dplyr)
 library(tidyr)
 
 message("\n##### Starting Targeted Macrophage Functional Scoring #####")
-data_sub <- readRDS(file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_Macrophages_subclustered.rds")))
+data_sub <- readRDS(file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_macrophages_subclustered.rds")))
 
 # =============================================================================
 # ENVIRONMENT PATHS
@@ -955,9 +1186,10 @@ if(!dir.exists(OUTPUT_DIR)) dir.create(OUTPUT_DIR, recursive = TRUE)
 # =============================================================================
 # 1. SUBSETTING (Isolating Macrophage Continuum from Myeloid Object)
 # =============================================================================
-mac_lineages <- c("Monocytes", "Cyc. Macrophages", "M0 Macrophages", 
-                  "TAM SPP1", "M2 Macrophages", "TAM resident", 
-                  "M1 Macrophages", "TAM IFN")
+mac_lineages <- c(
+  "Monocytes", "Cyc. Macrophages",
+  "M0 Macrophages", "M1 Macrophages", "M2 Macrophages"
+)
 
 data_mac <- subset(data_sub, subset = sub_cell_types %in% mac_lineages)
 
@@ -965,10 +1197,25 @@ data_mac <- subset(data_sub, subset = sub_cell_types %in% mac_lineages)
 # 2. DEFINE MACROPHAGE FUNCTIONAL GENE SETS
 # =============================================================================
 mac_gene_sets <- list(
-  M1_ProInflammatory   = c("Stat1", "Irf1", "Nos2", "Irf5", "Il6", "Cxcl10", "Cxcl9", "Tnf", "Il1b"),
-  M2_Immunosuppressive = c("Arg1", "Mrc1", "Cd163", "Chil3", "Retnla", "C1qa", "C1qb", "C1qc"),
-  TAM_SPP1_Remodeling  = c("Spp1", "Fn1", "Vcan", "Gpnmb", "Lgals3", "Apoc1")
+  M1_ProInflammatory   = c("Stat1", "Irf1", "Nos2", "Irf5", "Il6",
+                           "Cxcl10", "Cxcl9", "Tnf", "Il1b"),
+  M2_Immunosuppressive = c("Arg1", "Chil3", "Retnla", "Mrc1", "Il10",
+                           "Tgfb1", "Ccl17", "Ccl22", "Cd200r1", "Socs1",
+                           "C1qa", "C1qb", "C1qc"),
+  IFN_Response         = c("Ifit1", "Ifit2", "Ifit3", "Isg15", "Mx1",
+                           "Oas1a", "Irf7", "Stat1", "Cxcl10", "Isg20"),
+  # --- NEW: Estrogen-NR4a1 axis ---
+  Estrogen_Signaling        = c("Esr1", "Esr2", "Gper1",
+                                "Foxa1", "Gata3",
+                                "Tff1", "Cav1", "Cited1"),
+  NR4a1_Activity            = c("Nr4a1", "Nr4a2", "Nr4a3",
+                                "Sik1", "Dusp1", "Dusp6",
+                                "Thbd", "Ccl2", "Il6"),
+  Estrogen_AntiInflammatory = c("Il10", "Tgfb1", "Foxp3",
+                                "Socs1", "Socs3",
+                                "Ncoa1", "Ncoa2", "Nfkbia")
 )
+
 
 # =============================================================================
 # 3. AUCell PIPELINE (Seurat v5 Layer & 10% Threshold)
@@ -1007,7 +1254,10 @@ COMPARISON_PAIRS <- list(
   c("WT_Male",         "Polyp_Male")
 )
 
-scores_to_plot <- c("M1_ProInflammatory", "M2_Immunosuppressive", "TAM_SPP1_Remodeling")
+scores_to_plot <- c("M1_ProInflammatory", "M2_Immunosuppressive",
+                    "IFN_Response",
+                    "Estrogen_Signaling", "NR4a1_Activity",
+                    "Estrogen_AntiInflammatory")
 
 for (score_col in scores_to_plot) {
   message("Generating plot for: ", score_col)
@@ -1036,7 +1286,7 @@ for (score_col in scores_to_plot) {
     ) +
     
     # Grid layout grouped by your specific macrophage UMAP clusters
-    facet_wrap(~ sub_cell_types, scales = "free_y", ncol = 2) +
+    facet_wrap(~ sub_cell_types, scales = "free_y", ncol = 3) +
     
     labs(
       title = display_title,
@@ -1056,12 +1306,12 @@ for (score_col in scores_to_plot) {
   output_filename <- paste0("Macrophage_", score_col, "_Explicit_Groups.png")
   
   ggsave(
-    filename = file.path(OUTPUT_DIR, output_filename), 
+    filename = file.path(MAC_DIR, output_filename), 
     plot = violin_p, 
     device = "png",
     dpi = 300,
-    height = 14,    # Increased height slightly to accommodate the 8 faceted clusters cleanly
-    width = 12, 
+    height = 10,    # Increased height slightly to accommodate the 8 faceted clusters cleanly
+    width = 14, 
     units = "in"
   )
   
@@ -1088,8 +1338,8 @@ COMPARISON_PAIRS <- list(
   c("WT_Male",         "Polyp_Male")
 )
 
-scores_to_plot <- c("M1_ProInflammatory", "M2_Immunosuppressive", "TAM_SPP1_Remodeling")
-
+scores_to_plot <- c("M1_ProInflammatory", "M2_Immunosuppressive", 
+                    "IFN_Response", "TAM_SPP1", "TAM_Resident")
 for (score_col in scores_to_plot) {
   message("Generating global plot for: ", score_col)
   
@@ -1135,7 +1385,7 @@ for (score_col in scores_to_plot) {
   output_filename <- paste0("Global_Macrophage_", score_col, "_Overview.png")
   
   ggsave(
-    filename = file.path(OUTPUT_DIR, output_filename), 
+    filename = file.path(MAC_DIR, output_filename), 
     plot = global_p, 
     device = "png",
     dpi = 300,
@@ -1146,3 +1396,4 @@ for (score_col in scores_to_plot) {
   
   print(global_p)
 }
+

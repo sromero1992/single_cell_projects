@@ -1,10 +1,6 @@
 # =============================================================================
 # scRNA-seq PIPELINE - SCRIPT 2: GLOBAL ANNOTATION
 # Version: 3.1 (CSV-Driven, Weighted Pre-Scoring, Broad Cell Types Only)
-# UNIFIED BUILD: part of unified_pipeline/. Consumes the object produced by
-#   01_process_data.R v11.0. Doublet calls arrive standardised in the
-#   'Doublet_Status' column regardless of which caller ran, so this script
-#   requires no changes when DOUBLET_METHOD is switched.
 #
 # PURPOSE:
 #   This script is the broad/global annotation hub. It loads the processed

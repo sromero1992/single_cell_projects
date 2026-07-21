@@ -1,10 +1,6 @@
 # =============================================================================
 # scRNA-seq PIPELINE - SCRIPT 4: COLONOCYTE SUB-ANNOTATION
 # Version: 1.0 (CSV-Driven, Seurat Wrappers, Harmony + Standard Clustering)
-# UNIFIED BUILD: part of unified_pipeline/. Consumes the object produced by
-#   01_process_data.R v11.0. Doublet calls arrive standardised in the
-#   'Doublet_Status' column regardless of which caller ran, so this script
-#   requires no changes when DOUBLET_METHOD is switched.
 #
 # PURPOSE:
 #   Loads the globally annotated Seurat object from Script 02 and performs
@@ -16,11 +12,8 @@
 #        Both z-scored (standardized) and raw (non-standardized) variants run
 #        automatically — review the Top-5 report before manual annotation.
 #     3. Manual sub-annotation via SUB_ANNOTATION_MAP (Action 5).
-#     4. QC FeaturePlots + FindAllMarkers to verify cluster identity.
-#        No doublets or unknown clusters were identified in this dataset —
-#        the first-pass annotation is used directly as the final annotation.
-#     5. Compositional analysis (proportions by SampleID and group).
-#     6. Gene expression violin/bar plots.
+#     4. Compositional analysis (proportions by SampleID and group).
+#     5. Gene expression violin/bar plots.
 #
 # MARKER SYSTEM (cell_type_markers.csv):
 #   This script reads rows where tier == "sub" AND parent_cell_type == "Colonocytes".
@@ -31,11 +24,8 @@
 # HOW TO USE:
 #   1. Set paths/parameters in Part 1.
 #   2. Run through Part 4 — review SUBCLUSTER_01 and SUBCLUSTER_02 PNGs.
-#   3. Fill in SUB_ANNOTATION_MAP in Action 5.
-#   4. Run Part 6a QC block — review CLEANING_ PNGs and marker xlsx.
-#      If no doublets found, Part 6b is skipped automatically.
-#   5. SUB_ANNOTATION_MAP_CLEAN mirrors SUB_ANNOTATION_MAP — edit if needed.
-#   6. Run the rest for final plots and save.
+#   3. Fill in SUB_ANNOTATION_MAP in Part 5 (Action 5).
+#   4. Run the rest for final plots and save.
 #
 # INPUT:  {PROJECT_NAME}_final_annotated.rds   (output of 02_global_annotation.R)
 # OUTPUT: {PROJECT_NAME}_Colonocytes_subclustered.rds
@@ -62,10 +52,8 @@ set.seed(123)
 PROJECT_NAME <- "Nr4a1_s17_ack"
 ROOT_PATH <- "/home/ssromerogon/2026_nr4a1_ack/r_process"
 #ROOT_PATH   <- "Z:/selim_working_dir/2026_nr4a1_ack/r_process"  # Windows
-ROOT_PATH <- "/home/ssromerogon/local_drive/optimus_drive/selim_working_dir/2026_nr4a1_ack/r_process"
 
 OUTPUT_DIR       <- file.path(ROOT_PATH, "seurat_output")
-COLON_DIR        <- file.path(OUTPUT_DIR, "colonocytes_subannotation")  # <-- all colonocyte plots go here
 MAIN_RDS         <- file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_final_annotated.rds"))
 MARKERS_CSV_FILE <- file.path(ROOT_PATH, "cell_type_markers.csv")
 
@@ -75,8 +63,8 @@ PARENT_CELL_TYPE <- "Colonocytes"
 
 # --- 1.3: Sub-Clustering Parameters ------------------------------------------
 SUBCLUSTER_N_HVG       <- 2000   # HVGs for sub-clustering PCA
-SUBCLUSTER_N_PCS       <- 20     # PCs used for kNN graph
-SUBCLUSTER_K_NEIGHBORS <- 15     # k for kNN
+SUBCLUSTER_N_PCS       <- 50     # PCs used for kNN graph
+SUBCLUSTER_K_NEIGHBORS <- 30     # k for kNN
 SUBCLUSTER_MIN_DIST    <- 0.2    # UMAP min.dist
 # Resolution: set to NULL to read from CSV (subcluster_resolution column),
 # or override with a number here (e.g., 3.0 for fine-grained colonocyte clusters).
@@ -113,9 +101,6 @@ DPI_SETTING <- 300
 # --- PART 2: LOAD DATA & MARKERS --------------------------------------------
 # =============================================================================
 message("=== Loading globally annotated Seurat object ===")
-if (!dir.exists(OUTPUT_DIR)) dir.create(OUTPUT_DIR, recursive = TRUE)
-if (!dir.exists(COLON_DIR))  dir.create(COLON_DIR,  recursive = TRUE)
-message(paste("  Colonocyte output folder:", COLON_DIR))
 data <- readRDS(MAIN_RDS)
 message(paste("  Loaded:", ncol(data), "cells"))
 
@@ -132,7 +117,7 @@ DEFAULT_SUB_MARKERS <- list(
   "Tuft cells"       = c("Dclk1", "Trpm5", "Avil", "Sh2d6", "Plcg2"),
   "TA cells"         = c("Mki67", "Top2a", "Birc5", "Pcna", "Stmn1"),
   "Stem cells"       = c("Lgr5", "Lrig1", "Ascl2", "Slc12a2", "Smoc2",
-                         "Kcnq1", "Gpx2", "Ephb2", "Bmpr1a", "Hopx", "Sox9")
+                          "Kcnq1", "Gpx2", "Ephb2", "Bmpr1a", "Hopx", "Sox9")
 )
 
 SUB_MARKERS_LIST    <- DEFAULT_SUB_MARKERS
@@ -169,28 +154,25 @@ message(paste("  Sub-clustering resolution:", SUBCLUSTER_RESOLUTION_FINAL))
 # --- PART 3: UTILITY FUNCTIONS -----------------------------------------------
 # =============================================================================
 
-# Convenience negation of %in% (used in dirty-cluster removal)
-`%nin%` <- Negate(`%in%`)
-
 get_weighted_annotation <- function(seurat_obj, marker_genes, cluster_key,
                                     standardize_expression = TRUE) {
   all_obj_genes <- rownames(seurat_obj)
   marker_genes  <- lapply(marker_genes, function(gs) intersect(gs, all_obj_genes))
   marker_genes  <- marker_genes[sapply(marker_genes, length) > 0]
   if (length(marker_genes) == 0) stop("No valid marker genes found in dataset.")
-  
+
   all_marker_genes <- sort(unique(unlist(marker_genes)))
   cell_types       <- names(marker_genes)
-  
+
   W_binary <- matrix(0, nrow = length(all_marker_genes), ncol = length(cell_types),
                      dimnames = list(all_marker_genes, cell_types))
   for (ct in cell_types) W_binary[marker_genes[[ct]], ct] <- 1.0
-  
+
   gene_occurrence <- rowSums(W_binary)
   W_specificity   <- W_binary / gene_occurrence
   W_final         <- sweep(W_specificity, 2, colSums(W_specificity), "/")
   W_final[is.na(W_final)] <- 0
-  
+
   X_subset <- GetAssayData(seurat_obj, assay = "RNA", layer = "data")[all_marker_genes, ]
   if (standardize_expression) {
     X_subset <- t(scale(t(as.matrix(X_subset))))
@@ -198,14 +180,14 @@ get_weighted_annotation <- function(seurat_obj, marker_genes, cluster_key,
   } else {
     X_subset <- as.matrix(X_subset)
   }
-  
+
   W          <- t(W_final)
   clusters   <- seurat_obj[[cluster_key, drop = TRUE]]
   unique_cls <- unique(clusters)
   annotation_vector <- character(length = ncol(seurat_obj))
   names(annotation_vector) <- colnames(seurat_obj)
   cluster_score_data <- list()
-  
+
   for (cluster_id in unique_cls) {
     cell_idx <- which(clusters == cluster_id)
     if (length(cell_idx) == 0) next
@@ -235,29 +217,29 @@ process_and_extract_cell_type <- function(data, cell_type_name,
   message(paste("  Subsetting and re-clustering:", cell_type_name))
   data_sub <- subset(data, subset = CellType == cell_type_name)
   data_sub@reductions <- list(); data_sub@graphs <- list()
-  
+
   data_sub <- FindVariableFeatures(data_sub, selection.method = "vst", nfeatures = num_hvg) %>%
     ScaleData(verbose = FALSE) %>%
     RunPCA(npcs = dims_pca, reduction.name = "pca", verbose = FALSE)
   gc()
-  
+
   # Track A: Standard PCA
   data_sub <- FindNeighbors(data_sub, dims = 1:dims_pca, reduction = "pca",
-                            k.param = kneigh, graph.name = "pca_nn", verbose = FALSE) %>%
+                             k.param = kneigh, graph.name = "pca_nn", verbose = FALSE) %>%
     FindClusters(resolution = resolution, graph.name = "pca_nn",
                  cluster.name = "clusters_none", verbose = FALSE) %>%
     RunUMAP(dims = 1:dims_pca, reduction = "pca", n.neighbors = kneigh,
             min.dist = min_dist, n.epochs = 500,
             reduction.name = "umap_none", verbose = FALSE)
   gc()
-  
+
   # Track B: Harmony
   message("  Running Harmony for sub-clustering...")
   data_sub <- RunHarmony(data_sub, group.by.vars = "SampleID",
-                         reduction = "pca", reduction.save = "harmony", verbose = FALSE)
+                          reduction = "pca", reduction.save = "harmony", verbose = FALSE)
   gc()
   data_sub <- FindNeighbors(data_sub, dims = 1:dims_pca, reduction = "harmony",
-                            k.param = kneigh, graph.name = "harmony_nn", verbose = FALSE) %>%
+                             k.param = kneigh, graph.name = "harmony_nn", verbose = FALSE) %>%
     FindClusters(resolution = resolution, graph.name = "harmony_nn",
                  cluster.name = "clusters_harmony", verbose = FALSE) %>%
     RunUMAP(dims = 1:dims_pca, reduction = "harmony", n.neighbors = kneigh,
@@ -267,42 +249,15 @@ process_and_extract_cell_type <- function(data, cell_type_name,
   return(data_sub)
 }
 
-run_pca_umap <- function(data,
-                         num_hvg  = 2000,
-                         dims_pca = 50,
-                         min_dist = 0.3,
-                         kneigh   = 15) {
-  message("  Running HVG selection, scaling, and PCA...")
-  data <- FindVariableFeatures(data, selection.method = "vst", nfeatures = num_hvg) %>%
-    ScaleData(verbose = FALSE) %>%
-    RunPCA(npcs = dims_pca, reduction.name = "pca", verbose = FALSE)
-  gc()
-  message("  Running UMAP on PCA...")
-  data <- RunUMAP(data, dims = 1:dims_pca, reduction = "pca", n.neighbors = kneigh,
-                  min.dist = min_dist, n.epochs = 500,
-                  reduction.name = "umap_none", verbose = FALSE)
-  gc()
-  message("  Running Harmony...")
-  data <- RunHarmony(data, group.by.vars = "SampleID",
-                     reduction = "pca", reduction.save = "harmony", verbose = FALSE)
-  gc()
-  message("  Running UMAP on Harmony...")
-  data <- RunUMAP(data, dims = 1:dims_pca, reduction = "harmony", n.neighbors = kneigh,
-                  min.dist = min_dist, n.epochs = 500,
-                  reduction.name = "umap_harmony", verbose = FALSE)
-  gc()
-  return(data)
-}
-
 generate_gene_comparison_plots <- function(seurat_obj, score_col, group_by, x_axis,
                                            comparisons, plot_type = "violin",
                                            output_prefix = "", plot_title = score_col,
                                            y_label = "Expression",
                                            fig_width = 16, fig_height = 7,
-                                           output_dir = COLON_DIR) {
+                                           output_dir = OUTPUT_DIR) {
   df_plot <- FetchData(seurat_obj, vars = c(score_col, group_by, x_axis)) %>%
     dplyr::rename(Expression = 1) %>% drop_na()
-  
+
   cust_theme <- theme_classic() + theme(
     plot.title = element_text(hjust = 0.5, size = 18, face = "bold"),
     strip.text = element_text(size = 14, face = "bold"),
@@ -329,7 +284,7 @@ generate_gene_comparison_plots <- function(seurat_obj, score_col, group_by, x_ax
     scale_y_continuous(expand = expansion(mult = c(0, 0.22))) +
     coord_cartesian(clip = "off") +
     labs(title = plot_title, y = y_label) + scale_fill_brewer(palette = "Set1") + cust_theme
-  
+
   plot_file <- file.path(output_dir, paste0(output_prefix, score_col, ".png"))
   ggsave(plot_file, p, width = fig_width, height = fig_height, dpi = DPI_SETTING, bg = "white")
   return(p)
@@ -350,10 +305,9 @@ if (!"CellType" %in% colnames(data@meta.data)) {
 
 n_parent <- sum(data@meta.data$CellType == PARENT_CELL_TYPE, na.rm = TRUE)
 if (n_parent < 50) stop(paste("[ERROR] Only", n_parent, PARENT_CELL_TYPE,
-                              "cells found. Check PARENT_CELL_TYPE matches exactly."))
+                               "cells found. Check PARENT_CELL_TYPE matches exactly."))
 message(paste("  Found", n_parent, PARENT_CELL_TYPE, "cells for sub-clustering."))
 
-SUBCLUSTER_RESOLUTION_FINAL = 1.5
 data_sub <- process_and_extract_cell_type(
   data           = data,
   cell_type_name = PARENT_CELL_TYPE,
@@ -370,25 +324,25 @@ p_harm_comp <- (
 ) + (
   DimPlot(data_sub, reduction = "umap_harmony", group.by = "SampleID") + ggtitle("Harmony Corrected")
 ) & theme(legend.position = "bottom")
-ggsave(file.path(COLON_DIR, "SUBCLUSTER_01_Harmony_comparison_Colonocytes.png"),
+ggsave(file.path(OUTPUT_DIR, "SUBCLUSTER_01_Harmony_comparison_Colonocytes.png"),
        p_harm_comp, width = 16, height = 8, dpi = DPI_SETTING)
 
 # --- 4.2: Cluster UMAPs ---
 p_clust_none <- DimPlot(data_sub, reduction = "umap_none",    group.by = "clusters_none",
-                        label = TRUE) + NoLegend() + ggtitle("Clusters: Standard PCA")
+                         label = TRUE) + NoLegend() + ggtitle("Clusters: Standard PCA")
 p_clust_harm <- DimPlot(data_sub, reduction = "umap_harmony", group.by = "clusters_harmony",
-                        label = TRUE) + NoLegend() + ggtitle("Clusters: Harmony")
-ggsave(file.path(COLON_DIR, "SUBCLUSTER_02_COMPARE_UMAP_Colonocytes.png"),
+                         label = TRUE) + NoLegend() + ggtitle("Clusters: Harmony")
+ggsave(file.path(OUTPUT_DIR, "SUBCLUSTER_02_COMPARE_UMAP_Colonocytes.png"),
        p_clust_none + p_clust_harm, width = 16, height = 8, dpi = DPI_SETTING)
-ggsave(file.path(COLON_DIR, "SUBCLUSTER_02_ANNOTATE_THIS_UMAP_Colonocytes.png"),
+ggsave(file.path(OUTPUT_DIR, "SUBCLUSTER_02_ANNOTATE_THIS_UMAP_Colonocytes.png"),
        p_clust_harm, width = 12, height = 8, dpi = DPI_SETTING)
 
 # --- 4.3: DotPlot ---
 p_dot_sub <- DotPlot(data_sub, features = sub_dotplot_markers, scale = T,
-                     group.by = "clusters_harmony", dot.min = 0.05, cols = "RdBu", cluster.idents = T) +
+                      group.by = "clusters_harmony", dot.min = 0.05, cols = "RdBu", cluster.idents = T) +
   theme(axis.text.x = element_text(angle = 55, hjust = 1, size = 11)) +
   ggtitle(paste("Sub-Cluster Markers:", PARENT_CELL_TYPE))
-ggsave(file.path(COLON_DIR, "SUBCLUSTER_02_ANNOTATE_USING_THIS_DOTPLOT_Colonocytes.png"),
+ggsave(file.path(OUTPUT_DIR, "SUBCLUSTER_02_ANNOTATE_USING_THIS_DOTPLOT_Colonocytes.png"),
        p_dot_sub, width = 14, height = 20, dpi = DPI_SETTING, bg = "white")
 
 # not scaled
@@ -397,7 +351,7 @@ p_dot_sub <- DotPlot(data_sub, features = sub_dotplot_markers, scale = F,
                      group.by = "clusters_harmony", dot.min = 0.05, cluster.idents = T) +
   theme(axis.text.x = element_text(angle = 55, hjust = 1, size = 11)) +
   ggtitle(paste("Sub-Cluster Markers:", PARENT_CELL_TYPE))
-ggsave(file.path(COLON_DIR, "SUBCLUSTER_02_ANNOTATE_USING_THIS_DOTPLOT_NOT_SCALED_Colonocytes.png"),
+ggsave(file.path(OUTPUT_DIR, "SUBCLUSTER_02_ANNOTATE_USING_THIS_DOTPLOT_NOT_SCALED_Colonocytes.png"),
        p_dot_sub, width = 14, height = 20, dpi = DPI_SETTING, bg = "white")
 
 # =============================================================================
@@ -420,9 +374,9 @@ data_sub$sub_weighted_raw <- sub_results_raw$annotation_vector
 message("\n--- Sub-cluster Pre-scoring Top-5 Report (standardized) ---")
 print(sub_results_std$top5_report)
 write_xlsx(sub_results_std$top5_report,
-           file.path(COLON_DIR, "SUBCLUSTER_PRESCORE_top5_Colonocytes_std.xlsx"))
+           file.path(OUTPUT_DIR, "SUBCLUSTER_PRESCORE_top5_Colonocytes_std.xlsx"))
 write_xlsx(sub_results_raw$top5_report,
-           file.path(COLON_DIR, "SUBCLUSTER_PRESCORE_top5_Colonocytes_raw.xlsx"))
+           file.path(OUTPUT_DIR, "SUBCLUSTER_PRESCORE_top5_Colonocytes_raw.xlsx"))
 
 p_prescore <- (
   DimPlot(data_sub, reduction = "umap_harmony", group.by = "sub_weighted_std",
@@ -431,7 +385,7 @@ p_prescore <- (
   DimPlot(data_sub, reduction = "umap_harmony", group.by = "sub_weighted_raw",
           label = TRUE, repel = TRUE) + ggtitle("Sub Pre-Score: Raw")
 )
-ggsave(file.path(COLON_DIR, "SUBCLUSTER_03_prescore_comparison_Colonocytes.png"),
+ggsave(file.path(OUTPUT_DIR, "SUBCLUSTER_03_prescore_comparison_Colonocytes.png"),
        p_prescore, width = 18, height = 8, dpi = DPI_SETTING, bg = "white")
 
 # =============================================================================
@@ -445,299 +399,123 @@ ggsave(file.path(COLON_DIR, "SUBCLUSTER_03_prescore_comparison_Colonocytes.png")
 #
 # Available sub-types (defaults or from CSV):
 #   "Abs. colonocytes", "Goblet cells", "EECs", "Tuft cells", "TA cells", "Stem cells"
-
 SUB_ANNOTATION_MAP <- c(
-  '0'  = 'Abs. colonocytes',# 
-  '1'  = 'Abs. colonocytes',#
-  '2'  = 'Abs. colonocytes',#
-  '3'  = 'Goblet cells',#
-  '4'  = 'Stem cells', #
-  '5'  = 'Abs. colonocytes',#
-  '6'  = 'TA cells',#
-  '7'  = 'Goblet cells',#
-  '8'  = 'Abs. colonocytes',#
-  '9'  = 'Abs. colonocytes',#
-  '10' = 'Goblet cells', # could be prol goblet
-  '11' = 'Abs. colonocytes',#
-  '12' = 'Goblet cells',#
-  '13' = 'Prol. goblet cells',#
-  '14' = 'Abs. colonocytes',#
-  '15' = 'Tumor epithelium',#
-  '16' = 'Abs. colonocytes',#
-  '17' = 'TA cells',#
-  '18' = 'Tumor epithelium',#
-  '19' = 'Abs. colonocytes',#
-  '20' = 'Goblet cells',#
-  '21' = 'Abs. colonocytes',#
-  '22' = 'Abs. colonocytes',#
-  '23' = 'Abs. colonocytes',#
-  '24' = 'Abs. colonocytes',# Differentiated stem cells to abs
-  '25' = 'Abs. colonocytes',#
-  '26' = 'Abs. colonocytes',#
-  '27' = "Goblet cells",#
-  '28' = 'Tumor epithelium',#
-  '29' = 'Abs. colonocytes',#
-  '30' = 'Abs. colonocytes',#
-  '31' = 'Abs. colonocytes',#
-  '32' = 'Prol. goblet cells',#
-  '33' = 'Goblet cells',#
-  '34' = 'EECs',#
-  '35' = 'Abs. colonocytes',#
-  '36' = 'Abs. colonocytes',#
-  '37' = 'Tuft cells',#
-  '38' = 'EECs',#
-  '39' = 'Tumor epithelium',#
-  '40' = 'TA cells',#
-  '41' = 'Goblet cells',#
-  '42' = 'Abs. colonocytes',#
-  '43' = 'Goblet cells',#
-  '44' = 'Goblet cells',#
-  '45' = 'Abs. colonocytes',#
-  '46' = 'Abs. colonocytes',#
-  '47' = 'Goblet cells',#
-  '48' = 'Abs. colonocytes',#
-  '49' = 'Abs. colonocytes',#
-  '50' = 'Goblet cells',#
-  '51' = 'Goblet cells',#
-  '52' = 'TA cells',#
-  '53' = 'Abs. colonocytes',# 
-  '54' = 'Abs. colonocytes',# or stem cells because Lgr5+
-  '55' = 'Abs. colonocytes'#
+  '0'  = 'Stem cells',  
+  '1'  = 'Stem cells',
+  '2'  = 'Abs. colonocytes',
+  '3'  = 'Goblet cells',
+  '4'  = 'Goblet cells',
+  '5'  = 'Abs. colonocytes',
+  '6'  = 'Abs. colonocytes',
+  '7'  = 'Abs. colonocytes',
+  '8'  = 'Abs. colonocytes',
+  '9'  = 'Abs. colonocytes',
+  '10' = 'Abs. colonocytes',
+  '11' = 'Abs. colonocytes',
+  '12' = 'TA cells',
+  '13' = 'Stem cells', # Great stem signature
+  '14' = 'Abs. colonocytes',
+  '15' = 'Prol. Goblet cells', # but looks like TA/Stem signature
+  '16' = 'Stem cells',
+  '17' = 'Abs. colonocytes',
+  '18' = 'Abs. colonocytes',
+  '19' = 'Goblet cells',
+  '20' = 'Abs. colonocytes',
+  '21' = 'Prol. Goblet cells',# but looks like TA/Stem signature
+  '22' = 'Abs. colonocytes',
+  '23' = 'Abs. colonocytes',
+  '24' = 'Abs. colonocytes',
+  '25' = 'Abs. colonocytes',
+  '26' = 'Abs. colonocytes',
+  '27' = 'TA cells',
+  '28' = 'Goblet cells',
+  '29' = 'Goblet cells',
+  '30' = 'TA cells',
+  '31' = 'Abs. colonocytes',
+  '32' = 'Abs. colonocytes',
+  '33' = 'Abs. colonocytes',
+  '34' = 'Abs. colonocytes',
+  '35' = 'Abs. colonocytes',
+  '36' = 'Abs. colonocytes',
+  '37' = 'Goblet cells',
+  '38' = 'Abs. colonocytes',
+  '39' = 'Abs. colonocytes', # or Stem cells
+  '40' = 'Prol. Goblet cells', # but looks like TA/Stem signature
+  '41' = 'Goblet cells',
+  '42' = 'TA cells', # or Stem cells
+  '43' = 'TA cells', # or Stem cells
+  '44' = 'TA cells',
+  '45' = 'Abs. colonocytes',
+  '46' = 'Abs. colonocytes',
+  '47' = 'EECs',
+  '48' = 'Goblet cells',
+  '49' = 'Goblet cells',
+  '50' = 'Tuft cells',
+  '51' = 'EECs',
+  '52' = 'TA cells',
+  '53' = 'Prol. Goblet cells', # This may be cancer derived
+  '54' = 'Abs. colonocytes',
+  '55' = 'Prol. Goblet cells', # but looks like TA/Stem signature
+  '56' = 'Stem cells',
+  '57' = 'Abs. colonocytes'
+  # Add/remove entries matching your actual cluster count
 )
 
 # =============================================================================
-# --- PART 6: FIRST-PASS ANNOTATION & DIRTY-CLUSTER QC -----------------------
+# --- PART 6: APPLY SUB-ANNOTATIONS & FINAL VISUALIZATIONS -------------------
 # =============================================================================
-message("\n=== STEP 6a: First-Pass Sub-Annotation (pre-cleaning) ===")
+message("\n=== STEP 6: Applying Sub-Annotations ===")
 
 data_sub$sub_cell_types  <- recode_factor(data_sub$clusters_harmony, !!!SUB_ANNOTATION_MAP)
 data_sub$CellType        <- data_sub$sub_cell_types
 data_sub$seurat_clusters <- data_sub$clusters_harmony
 
-prop.table(table(data_sub$Genotype_sex, data_sub$sub_cell_types), margin = 1) * 100
-# --- 6a.1: Pre-cleaning overview UMAP ----------------------------------------
-p_dirty <- DimPlot(data_sub, reduction = "umap_harmony", group.by = "sub_cell_types",
-                   label = TRUE, repel = TRUE) +
-  ggtitle("Pre-Cleaning: All Clusters Labelled (including Doublet/Unknown)") +
-  theme(legend.text = element_text(size = 11))
-p_dirty
-ggsave(file.path(COLON_DIR, "CLEANING_00_pre_removal_overview.png"),
-       p_dirty, width = 12, height = 8, dpi = DPI_SETTING, bg = "white")
+DimPlot(data_sub, reduction = "umap_harmony", group.by = "sub_cell_types",
+        label = TRUE, repel = TRUE)
 
-# --- 6a.2: QC FeaturePlots ---------------------------------------------------
-message("  Generating QC FeaturePlots for dirty cluster inspection...")
+DimPlot(data_sub, reduction = "umap_harmony", group.by = "sub_cell_types",
+        label = TRUE, repel = TRUE, split.by = "Genotype_sex")
 
-# Broad epithelial identity
-p_qc1 <- FeaturePlot(data_sub, reduction = "umap_harmony",
-                     features = intersect(c("Epcam", "Krt20", "Krt19", "Cdh1",
-                                            "Mki67", "nCount_RNA", "nFeature_RNA"),
-                                          rownames(data_sub)),
-                     ncol = 4) &
-  theme(plot.title = element_text(size = 13, face = "italic"), axis.title = element_blank())
-ggsave(file.path(COLON_DIR, "CLEANING_01_QC_broad_epithelial_markers.png"),
-       p_qc1, width = 16, height = 8, dpi = DPI_SETTING, bg = "white")
+cell_table <- data_sub@meta.data %>%
+  group_by(Genotype_sex, sub_cell_types) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(Genotype_sex) %>%
+  mutate(pct = n / sum(n) * 100) %>%
+  select(-n) %>%
+  pivot_wider(names_from = Genotype_sex, values_from = pct, values_fill = 0)
 
+print(cell_table)
 
-# Broad epithelial identity
-feats <- c("Lgr5", "Krt20", "Muc2", "Reg4", "Itln1", "Wnt3", "Axin2", "Clu", "Mmp7","Lyz1")
-p_qc1 <- FeaturePlot(data_sub, reduction = "umap_harmony",
-                     features = intersect(feats,
-                                          rownames(data_sub)),
-                     ncol = 4) &
-  theme(plot.title = element_text(size = 13, face = "italic"), axis.title = element_blank())
-ggsave(file.path(COLON_DIR, "CANCER_epithelial_markers.png"),
-       p_qc1, width = 16, height = 8, dpi = DPI_SETTING, bg = "white")
+# sub_type_levels <- names(SUB_MARKERS_LIST)
+# sub_type_levels <- intersect(sub_type_levels,
+#                               as.character(unique(data_sub$sub_cell_types)))
+# data_sub$sub_cell_types   <- factor(data_sub$sub_cell_types,   levels = sub_type_levels)
+# data_sub$sub_weighted_std <- factor(data_sub$sub_weighted_std, levels = sub_type_levels)
+# data_sub$sub_weighted_raw <- factor(data_sub$sub_weighted_raw, levels = sub_type_levels)
 
 
-# Non-epithelial contamination markers
-contaminant_markers_colon <- c(
-  "Cd3e",    # T cells
-  "Cd68",    # Macrophages
-  "Col1a1",  # Fibroblasts
-  "Pecam1",  # Endothelial
-  "Ptprc",   # Immune (Cd45)
-  "Ms4a1",   # B cells
-  "Acta2"    # Smooth muscle
-)
-p_qc2 <- FeaturePlot(data_sub, reduction = "umap_harmony",
-                     features = intersect(contaminant_markers_colon, rownames(data_sub)),
-                     ncol = 4) &
-  theme(plot.title = element_text(size = 13, face = "italic"), axis.title = element_blank())
-ggsave(file.path(COLON_DIR, "CLEANING_02_QC_contamination_markers.png"),
-       p_qc2, width = 16, height = 8, dpi = DPI_SETTING, bg = "white")
+sub_type_levels2 <- c("EECs", "Tuft cells", "Goblet cells", "Prol. Goblet cells",
+                      "TA cells", "Stem cells", "Abs. colonocytes")
+data_sub$sub_cell_types   <- factor(data_sub$sub_cell_types,   levels = sub_type_levels2)
 
-# Stem / TA / proliferating markers
-p_qc3 <- FeaturePlot(data_sub, reduction = "umap_harmony",
-                     features = intersect(c("Lgr5", "Ascl2", "Mki67", "Top2a",
-                                            "Pcna", "Stmn1", "Birc5", "Smoc2"),
-                                          rownames(data_sub)),
-                     ncol = 4) &
-  theme(plot.title = element_text(size = 13, face = "italic"), axis.title = element_blank())
-ggsave(file.path(COLON_DIR, "CLEANING_03_stem_TA_markers.png"),
-       p_qc3, width = 16, height = 8, dpi = DPI_SETTING, bg = "white")
 
-# Secretory lineage markers
-p_qc4 <- FeaturePlot(data_sub, reduction = "umap_harmony",
-                     features = intersect(c("Muc2", "Tff3", "Spink4", "Agr2",
-                                            "Chga", "Chgb", "Tph1", "Dclk1", "Trpm5"),
-                                          rownames(data_sub)),
-                     ncol = 4) &
-  theme(plot.title = element_text(size = 13, face = "italic"), axis.title = element_blank())
-ggsave(file.path(COLON_DIR, "CLEANING_04_secretory_lineage_markers.png"),
-       p_qc4, width = 16, height = 8, dpi = DPI_SETTING, bg = "white")
-
-# Absorptive colonocyte markers
-p_qc5 <- FeaturePlot(data_sub, reduction = "umap_harmony",
-                     features = intersect(c("Alpi", "Ces2c", "Slc26a2",
-                                            "Ceacam1", "Aqp8", "Vil1"),
-                                          rownames(data_sub)),
-                     ncol = 3) &
-  theme(plot.title = element_text(size = 13, face = "italic"), axis.title = element_blank())
-ggsave(file.path(COLON_DIR, "CLEANING_05_absorptive_colonocyte_markers.png"),
-       p_qc5, width = 14, height = 8, dpi = DPI_SETTING, bg = "white")
-
-# --- 6a.3: FindAllMarkers for all first-pass clusters ------------------------
-Idents(data_sub) <- "clusters_harmony"
-message("  Running FindAllMarkers on all clusters...")
-all_cluster_markers <- FindAllMarkers(
-  data_sub,
-  only.pos        = TRUE,
-  min.pct         = 0.05,
-  logfc.threshold = 0.25,
-  verbose         = FALSE
-)
-
-top30_by_cluster <- all_cluster_markers %>%
-  dplyr::group_by(cluster) %>%
-  dplyr::slice_max(order_by = avg_log2FC, n = 30) %>%
-  dplyr::arrange(cluster, desc(avg_log2FC)) %>%
-  dplyr::ungroup()
-
-write_xlsx(
-  as.data.frame(top30_by_cluster),
-  file.path(COLON_DIR, "CLEANING_top30_per_cluster.xlsx")
-)
-message(paste("  Marker table saved —",
-              length(unique(all_cluster_markers$cluster)), "clusters,",
-              nrow(top30_by_cluster), "rows total."))
-
-# =============================================================================
-# --- PART 6b: SKIPPED — No doublets or unknown clusters identified -----------
-# =============================================================================
-# No dirty clusters were found in this dataset. The first-pass annotation
-# (SUB_ANNOTATION_MAP) is used directly as the final annotation.
-# The QC FeaturePlots above (CLEANING_01 through CLEANING_05) and the
-# FindAllMarkers top-30 xlsx confirm clean epithelial identity across all clusters.
-message("\n=== STEP 6b: Skipped — no dirty clusters to remove ===")
-
-# =============================================================================
-# --- ACTION 6: FILL IN CLEAN CLUSTER ANNOTATIONS HERE -----------------------
-# =============================================================================
-# Since no re-clustering was performed, SUB_ANNOTATION_MAP_CLEAN mirrors
-# SUB_ANNOTATION_MAP exactly. Cluster numbers are identical.
-SUB_ANNOTATION_MAP_CLEAN <-c(
-  '0'  = 'Abs. colonocytes',# 
-  '1'  = 'Abs. colonocytes',#
-  '2'  = 'Abs. colonocytes',#
-  '3'  = 'Goblet cells',#
-  '4'  = 'Stem cells', #
-  '5'  = 'Abs. colonocytes',#
-  '6'  = 'TA cells',#
-  '7'  = 'Goblet cells',#
-  '8'  = 'Abs. colonocytes',#
-  '9'  = 'Abs. colonocytes',#
-  '10' = 'Goblet cells', # could be prol goblet
-  '11' = 'Abs. colonocytes',#
-  '12' = 'Goblet cells',#
-  '13' = 'Prol. goblet cells',#
-  '14' = 'Abs. colonocytes',#
-  '15' = 'Tumor epithelium',#
-  '16' = 'Abs. colonocytes',#
-  '17' = 'TA cells',#
-  '18' = 'Tumor epithelium',#
-  '19' = 'Abs. colonocytes',#
-  '20' = 'Goblet cells',#
-  '21' = 'Abs. colonocytes',#
-  '22' = 'Abs. colonocytes',#
-  '23' = 'Abs. colonocytes',#
-  '24' = 'Abs. colonocytes',# Differentiated stem cells to abs
-  '25' = 'Abs. colonocytes',#
-  '26' = 'Abs. colonocytes',#
-  '27' = "Goblet cells",#
-  '28' = 'Tumor epithelium',#
-  '29' = 'Abs. colonocytes',#
-  '30' = 'Abs. colonocytes',#
-  '31' = 'Abs. colonocytes',#
-  '32' = 'Prol. goblet cells',#
-  '33' = 'Goblet cells',#
-  '34' = 'EECs',#
-  '35' = 'Abs. colonocytes',#
-  '36' = 'Abs. colonocytes',#
-  '37' = 'Tuft cells',#
-  '38' = 'EECs',#
-  '39' = 'Tumor epithelium',#
-  '40' = 'TA cells',#
-  '41' = 'Goblet cells',#
-  '42' = 'Abs. colonocytes',#
-  '43' = 'Goblet cells',#
-  '44' = 'Goblet cells',#
-  '45' = 'Abs. colonocytes',#
-  '46' = 'Abs. colonocytes',#
-  '47' = 'Goblet cells',#
-  '48' = 'Abs. colonocytes',#
-  '49' = 'Abs. colonocytes',#
-  '50' = 'Goblet cells',#
-  '51' = 'Goblet cells',#
-  '52' = 'TA cells',#
-  '53' = 'Abs. colonocytes',# 
-  '54' = 'Abs. colonocytes',# or stem cells because Lgr5+
-  '55' = 'Abs. colonocytes'#
-)
-
-# =============================================================================
-# --- PART 6c: APPLY CLEAN ANNOTATIONS & FINAL VISUALIZATIONS ----------------
-# =============================================================================
-message("\n=== STEP 6c: Applying clean sub-annotations ===")
-data_sub$clusters_harmony_clean <- data_sub$clusters_harmony  # alias — no re-clustering done
-data_sub$sub_cell_types  <- recode_factor(data_sub$clusters_harmony_clean, !!!SUB_ANNOTATION_MAP_CLEAN)
-data_sub$CellType        <- data_sub$sub_cell_types
-data_sub$seurat_clusters <- data_sub$clusters_harmony_clean
-
-# No dirty clusters to remove — subset is a no-op but kept for pipeline consistency
-DIRTY_LABELS_CLEAN <- c("Doublet", "Unknown")
-n_before <- ncol(data_sub)
-data_sub <- subset(data_sub, subset = sub_cell_types %nin% DIRTY_LABELS_CLEAN)
-message(paste("  Removed", n_before - ncol(data_sub), "additional dirty cells.",
-              ncol(data_sub), "final clean cells."))
-
-sub_type_levels2 <- c(
-  "Tumor epithelium",
-  "EECs", "Tuft cells", "Goblet cells", "Prol. goblet cells",
-  "TA cells", "Stem cells", "Abs. colonocytes"
-)
-
-data_sub$sub_cell_types <- factor(data_sub$sub_cell_types, levels = sub_type_levels2)
-
-# No re-UMAP needed — embedding is unchanged since no cells were removed
-message("  Skipping re-UMAP — no cells removed, existing embedding is valid.")
-
-# --- Final UMAP: clean manual annotation ------------------------------------
+# Final UMAP
 p_final <- DimPlot(data_sub, reduction = "umap_harmony", group.by = "sub_cell_types",
                    label = FALSE, repel = TRUE) +
-  ggtitle(paste("Sub-Cell Types:", PARENT_CELL_TYPE, "(Clean)")) +
-  theme(legend.text  = element_text(size = 12),
-        legend.title = element_text(size = 14, face = "bold")) +
+  ggtitle(paste("Sub-Cell Types:", PARENT_CELL_TYPE)) +
+  theme(legend.text = element_text(size = 12)) +
   guides(color = guide_legend(override.aes = list(size = 4)))
-p_final
-ggsave(file.path(COLON_DIR, "FINAL_SUBCLUSTER_UMAP_Colonocytes.png"),
-       p_final, width = 12, height = 8, dpi = DPI_SETTING, bg = "white")
+ggsave(file.path(OUTPUT_DIR, "FINAL_SUBCLUSTER_UMAP_Colonocytes.png"),
+       p_final, width = 10, height = 8, dpi = DPI_SETTING, bg = "white")
 
-# --- Comparison: manual vs first-pass pre-scores ----------------------------
+# Comparison: manual vs weighted
 p_compare <- DimPlot(data_sub, reduction = "umap_harmony",
                      group.by = c("sub_cell_types", "sub_weighted_std", "sub_weighted_raw"),
                      label = FALSE, repel = TRUE)
-ggsave(file.path(COLON_DIR, "FINAL_SUBCLUSTER_comparison_Colonocytes.png"),
+ggsave(file.path(OUTPUT_DIR, "FINAL_SUBCLUSTER_comparison_Colonocytes.png"),
        p_compare, width = 26, height = 8, dpi = DPI_SETTING, bg = "white")
+
+
 
 
 
@@ -745,57 +523,40 @@ ggsave(file.path(COLON_DIR, "FINAL_SUBCLUSTER_comparison_Colonocytes.png"),
 # 1. DEFINE LEVELS AND MAPPING OF DOTPLOT
 # =============================================================================
 # This is the order you want for your plot axes/legend
-sub_type_levels2 <- c(
-  "Tumor epithelium",
-  "EECs", "Tuft cells", "Goblet cells", "Prol. goblet cells",
-  "TA cells", "Stem cells", "Abs. colonocytes"
-)
-
+sub_type_levels2 <- c("EECs", "Tuft cells", "Goblet cells", "Prol. Goblet cells",
+                      "TA cells", "Stem cells", "Abs. colonocytes")
+# This maps your Factor Levels (left) to the SUB_MARKERS_LIST names (right)
+# This handles the "Cyc. CD4+ T cells" -> "Cyc. T cells" mismatch
 name_mapping <- c(
-  "Tumor epithelium"   = "Tumor epithelium",
-  "EECs"               = "EECs",
-  "Tuft cells"         = "Tuft cells",
-  "Goblet cells"       = "Goblet cells",
-  "Prol. goblet cells" = "Goblet cells",
-  "TA cells"           = "TA cells",
-  "Stem cells"         = "Stem cells",
-  "Abs. colonocytes"   = "Abs. colonocytes"
+  "EECs"   =  "EECs", 
+  "Tuft cells" = "Tuft cells", 
+  "Goblet cells" = "Goblet cells", 
+  "Prol. Goblet cells" = "Goblet cells",
+  "TA cells" = "TA cells", 
+  "Stem cells" = "Stem cells", 
+  "Abs. colonocytes" = "Abs. colonocytes"
+  )
+
+
+# Apply levels to the Seurat object
+data_sub$sub_cell_types <- factor(
+  data_sub$sub_cell_types, 
+  levels = sub_type_levels2
 )
-
-
-data_sub$sub_cell_types <- factor(data_sub$sub_cell_types, levels = sub_type_levels2)
-
-prop.table(table(data_sub$Genotype_sex, data_sub$sub_cell_types), margin = 1) * 100
-prop.table(table(data_sub$SampleID, data_sub$sub_cell_types), margin = 1) * 100
 
 # =============================================================================
 # 2. EXTRACT AND ORCHESTRATE GENE LIST
 # =============================================================================
 
-# Key DE markers per tumor population — confirmed from FindAllMarkers
-tumor_de_markers <- c(
-  "Aldh1a3",  # cancer stem cell marker, CRC validated
-  "Mmp7",     # matrix metalloprotease, top CRC marker
-  "Lyz1",     # Paneth-like tumor signature, DE confirmed
-  "Krt14",    # basal/squamous tumor identity, highly specific
-  "Ptgs2",    # Cox2, well-validated CRC oncogene
-  "Tacstd2",  # Trop2, CRC tumor epithelium surface marker
-  "Ly6a",     # Sca1, tumor stem/revival epithelium marker
-  "Clu",      # clusterin, fetal/regenerative tumor program
-  "Cd44"      # cancer stem cell marker, CRC validated
-)
-# Add to verification_markers — expression levels, not mutation status
-verification_markers <- c("Axin2")
-
-# =============================================================================
-# 3. EXTRACT AND ORCHESTRATE GENE LIST
-# =============================================================================
-
+# A. Set the mandatory lead genes
 lead_genes <- c("Epcam")
 
-# Standard markers from CSV/defaults, following level order
+# B. Extract markers based on the ordered factor levels and the mapping
+# We use lapply to ensure we follow 'sub_type_levels2' order exactly
 ordered_markers <- unlist(lapply(sub_type_levels2, function(lvl) {
   marker_key <- name_mapping[lvl]
+  
+  # Check if the key exists in your marker list to avoid errors
   if (!is.na(marker_key) && marker_key %in% names(SUB_MARKERS_LIST)) {
     return(SUB_MARKERS_LIST[[marker_key]])
   } else {
@@ -803,18 +564,20 @@ ordered_markers <- unlist(lapply(sub_type_levels2, function(lvl) {
   }
 }))
 
-# Combine: lead → tumor DE markers → verification → standard markers
-final_gene_list <- c(lead_genes, tumor_de_markers, verification_markers, ordered_markers)
+# C. Combine, remove duplicates, and verify existence in the dataset
+# unique() ensures Cd3e/g stay at the top and don't repeat later
+final_gene_list <- c(lead_genes, ordered_markers)
 final_gene_list <- unique(final_gene_list)
+
+# D. Final check against the Seurat object's actual genes
 final_gene_list <- intersect(final_gene_list, rownames(data_sub))
 
 # --- Final DotPlot ---
 p_final_dot <- DotPlot(data_sub, features = final_gene_list,
-                       group.by = "sub_cell_types", dot.min = 0.05,
-                       cols = "RdBu", scale = TRUE) + coord_flip() +
+                        group.by = "sub_cell_types", dot.min = 0.05,
+                        cols = "RdBu", scale = TRUE) + coord_flip() +
   theme(axis.text.x = element_text(angle = 55, hjust = 1, size = 11))
-p_final_dot
-ggsave(file.path(COLON_DIR, "FINAL_DotPlot_sub_Colonocytes.png"),
+ggsave(file.path(OUTPUT_DIR, "FINAL_DotPlot_sub_Colonocytes.png"),
        p_final_dot, width = 8, height = 12, dpi = DPI_SETTING, bg = "white")
 
 
@@ -830,42 +593,17 @@ if (length(ADDITIONAL_GROUPS_TO_PLOT) > 0 &&
           legend.text = element_text(size = 14),
           legend.title = element_text(size = 14, face = "bold")) +
     guides(color = guide_legend(override.aes = list(size = 4))) 
-  ggsave(file.path(COLON_DIR, paste0("FINAL_sub_UMAP_faceted_Colonocytes_by_", pgrp, ".png")),
+  ggsave(file.path(OUTPUT_DIR, paste0("FINAL_sub_UMAP_faceted_Colonocytes_by_", pgrp, ".png")),
          p_facet, width = 5 * ceiling(n_levels / 2), height = 10, dpi = DPI_SETTING, bg = "white")
 }
 
 
-Idents(data_sub) <- "sub_cell_types"
-message("  Running FindAllMarkers on final annotated colonocyte sub-types...")
-
-all_subtype_markers <- FindAllMarkers(
-  data_sub,
-  only.pos        = TRUE,
-  min.pct         = 0.05,
-  logfc.threshold = 0.25,
-  verbose         = FALSE
-)
-
-top30_subtypes <- all_subtype_markers %>%
-  dplyr::group_by(cluster) %>%
-  dplyr::slice_max(order_by = avg_log2FC, n = 30) %>%
-  dplyr::arrange(cluster, desc(avg_log2FC)) %>%
-  dplyr::ungroup()
-
-write_xlsx(
-  as.data.frame(top30_subtypes),
-  file.path(COLON_DIR, "FINAL_top30_per_subtype.xlsx")
-)
-
-message(paste("  Final subtype marker table saved —",
-              length(unique(all_subtype_markers$cluster)), "subtypes,",
-              nrow(top30_subtypes), "rows total."))
 
 # =============================================================================
 # --- PART 7: SAVE ------------------------------------------------------------
 # =============================================================================
 message("\n=== STEP 7: Saving Colonocyte Sub-Cluster Object ===")
-saveRDS(data_sub, file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_colonocytes_subclustered.rds")))
+saveRDS(data_sub, file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_Colonocytes_subclustered.rds")))
 message(paste0(
   "\n=== COLONOCYTE SUB-ANNOTATION COMPLETE ===\n",
   "  Saved: ", PROJECT_NAME, "_Colonocytes_subclustered.rds\n",
@@ -931,9 +669,9 @@ p_stats
 
 # --- Step 3: Save ---
 #dir.create("proportion_analysis", showWarnings = FALSE)
-savef <- paste0(COLON_DIR, "/colonocytes_stats_cell_props.png")
+savef <- paste0(OUTPUT_DIR, "/colonocytes_stats_cell_props.png")
 ggsave(savef,p_stats, width = 10, height = 10, dpi=DPI_SETTING)
-savef <- paste0(COLON_DIR, "/colonocytes_cell_props_long_data.xlsx")
+savef <- paste0(OUTPUT_DIR, "/colonocytes_cell_props_long_data.xlsx")
 write_xlsx(df_pct, savef)
 
 
@@ -1098,7 +836,7 @@ plot_results <- plot_expression_custom(
   facet_ncol    = 4,               # Arrange in 4 columns
   p_width     = 12,  # Force 12 inches wide
   p_height    = 8,  # Force 10 inches tall for multiple rows,
-  save_path     = file.path(COLON_DIR, "Nr4a1_stats_plot_colonocytes.png"),
+  save_path     = file.path(OUTPUT_DIR, "Nr4a1_stats_plot_colonocytes.png"),
   dpi           = DPI_SETTING
 )
 
@@ -1116,7 +854,7 @@ plot_results <- plot_expression_custom(
   facet_ncol    = 4,               # Arrange in 4 columns
   p_width     = 12,  # Force 12 inches wide
   p_height    = 8,  # Force 10 inches tall for multiple rows,
-  save_path     = file.path(COLON_DIR, "Nr4a1_custom_stats_plot_colonocytes.png"),
+  save_path     = file.path(OUTPUT_DIR, "Nr4a1_custom_stats_plot_colonocytes.png"),
   dpi           = DPI_SETTING
 )
 
@@ -1132,7 +870,7 @@ plot_results <- plot_expression_custom(
   facet_ncol    = 4,               # Arrange in 4 columns
   p_width     = 12,  # Force 12 inches wide
   p_height    = 8,  # Force 10 inches tall for multiple rows,
-  save_path     = file.path(COLON_DIR, "Nr4a2_stats_plot_colonocytes.png"),
+  save_path     = file.path(OUTPUT_DIR, "Nr4a2_stats_plot_colonocytes.png"),
   dpi           = DPI_SETTING
 )
 
@@ -1148,6 +886,8 @@ plot_results <- plot_expression_custom(
   facet_ncol    = 4,               # Arrange in 4 columns
   p_width     = 12,  # Force 12 inches wide
   p_height    = 8,  # Force 10 inches tall for multiple rows,
-  save_path     = file.path(COLON_DIR, "Nr4a3_stats_plot_colonocytes.png"),
+  save_path     = file.path(OUTPUT_DIR, "Nr4a3_stats_plot_colonocytes.png"),
   dpi           = DPI_SETTING
 )
+
+
