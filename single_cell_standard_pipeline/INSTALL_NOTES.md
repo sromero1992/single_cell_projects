@@ -80,6 +80,141 @@ sudo apt install libnetcdf-dev libgsl-dev
 | Killed / OOM during prediction | Too many parallel workers | Lower `CT2_NCORES` to 1–2 in Script 09 |
 | `is.atomic(y) is not TRUE` | Input not a plain matrix/Seurat | Script 09 passes a Seurat object with `is_seurat = TRUE`; check your object isn't wrapped |
 
+### `'configure' exists but is not executable` (ncdf4 → HiClimR → CytoTRACE2)
+
+CytoTRACE 2 depends on `HiClimR`, which depends on `ncdf4`, which builds from source. On HPC systems `ncdf4` commonly fails with:
+
+```
+ERROR: 'configure' exists but is not executable
+   -- see the 'R Installation and Administration Manual'
+```
+
+The package is fine. The `configure` script lost its executable bit when the tarball was unpacked, which happens when `TMPDIR` sits on a filesystem mounted **`noexec`**, or on NFS that strips permission bits. A tell-tale sign in the same log:
+
+```
+Warning: invalid uid value replaced by that for user 'nobody'
+```
+
+That is NFS ownership squashing — strong evidence `TMPDIR` is on a network home directory.
+
+> ⚠️ `00_rlibs_installation.R` sets `TMPDIR` to `$HOME/Rtemp`. If `$HOME` is NFS-mounted, that setting *causes* this failure. Override it for the install.
+
+**First, find out where R is actually building.** This matters because two common assumptions are wrong:
+
+```r
+tempdir()                       # where the build REALLY happens
+Sys.getenv("TMPDIR")
+```
+
+> ⚠️ **`Sys.setenv(TMPDIR = ...)` inside a running R session does NOT move the build directory.** R fixes `tempdir()` once, at startup. Changing `TMPDIR` afterwards has no effect on the current session — you will see the build still running under the original `/tmp/Rtmp<xxxx>` path. To change it, set `TMPDIR` in `~/.Renviron` (or export it in the shell) and **restart R**.
+
+**Step 1 — is the build directory mounted `noexec`?** This is the usual cause, and hardened HPC systems very often mount `/tmp` that way:
+
+```bash
+findmnt -no TARGET,OPTIONS -T /tmp
+findmnt -no TARGET,OPTIONS -T $HOME
+findmnt -no TARGET,OPTIONS -T /var/tmp
+```
+
+Any of them containing `noexec` cannot run `configure`, no matter what the file permissions say.
+
+**Step 2 — point R at a directory that permits execution.** Pick one from above that is *not* `noexec`, then set it before R starts. In `~/.Renviron`:
+
+```
+TMPDIR=/var/tmp
+```
+
+Restart R, confirm with `tempdir()`, then `install.packages("ncdf4")`.
+
+**Step 3 — if every candidate is `noexec`, build somewhere you control:**
+
+```bash
+mkdir -p ~/rbuild && cd ~/rbuild
+wget https://cran.r-project.org/src/contrib/ncdf4_1.24.tar.gz
+tar xzf ncdf4_1.24.tar.gz
+chmod +x ncdf4/configure
+TMPDIR=~/rbuild R CMD INSTALL ncdf4
+```
+
+**Fix — unpack and restore the bit manually:**
+
+```bash
+cd /tmp
+wget https://cran.r-project.org/src/contrib/ncdf4_1.24.tar.gz
+tar xzf ncdf4_1.24.tar.gz
+chmod +x ncdf4/configure
+R CMD INSTALL ncdf4
+```
+
+> 💡 **`/tmp` mounted `noexec` breaks every source package with a `configure` script**, not just `ncdf4`. If `findmnt` shows `noexec` on `/tmp`, fix it once and permanently by putting an exec-capable directory in `~/.Renviron`:
+> ```
+> TMPDIR=/var/tmp
+> ```
+> Restart R and confirm with `tempdir()`. This prevents the whole class of failure.
+
+### `nc-config not found` (the next error after the exec fix)
+
+Once `configure` actually runs, it fails differently if the NetCDF library itself is absent:
+
+```
+Error, nc-config not found or not executable.
+```
+
+`nc-config` ships with the NetCDF development package. Check what you already have before installing anything:
+
+```bash
+which nc-config
+rpm -q netcdf netcdf-devel     # RHEL / Rocky
+module avail netcdf            # HPC module systems often provide it
+```
+
+**Option A — system package (needs root):**
+
+```bash
+sudo dnf install netcdf-devel        # RHEL / Rocky
+sudo apt install libnetcdf-dev       # Debian / Ubuntu
+```
+
+**Option B — HPC module (no root needed):**
+
+```bash
+module load netcdf
+which nc-config                      # confirm it is now on PATH
+R CMD INSTALL ncdf4
+```
+
+**Option C — conda (no root needed).** Works, but read the caveat:
+
+```bash
+conda install -n scanpy_env_311 -c conda-forge libnetcdf
+NC=$HOME/miniconda3/envs/scanpy_env_311/bin/nc-config
+cd ~/rbuild
+R CMD INSTALL --configure-args="--with-nc-config=$NC" ncdf4
+```
+
+> ⚠️ **Caveat:** linking an R package against conda's NetCDF means the compiled `ncdf4.so` needs conda's libraries at **run time**, reintroducing the same library-path fragility as the llvmlite/libstdc++ issue in section 5. If `library(ncdf4)` later fails with a missing `.so`, that is why. Prefer Options A or B when available.
+
+**Option D — skip it.** This whole chain exists only for CytoTRACE 2. Set `RUN_CYTOTRACE2 <- FALSE` in Script 09; the entropy metrics have no dependencies and still produce a potency readout. This is a perfectly reasonable place to stop.
+
+Then continue up the chain:
+
+```r
+install.packages("HiClimR")
+devtools::install_github("digitalcytometry/cytotrace2", subdir = "cytotrace2_r")
+```
+
+**Fix 3 — conda-forge binaries, no compilation at all:**
+
+```bash
+conda install -c conda-forge r-ncdf4 r-hiclimr
+```
+
+Only useful if your R *is* the conda R. Check with `R.home()`; if it points inside `miniconda3`, this works.
+
+**If none of it works:** set `RUN_CYTOTRACE2 <- FALSE` in Script 09. The entropy metrics have no dependencies and still run, so you keep a potency readout.
+
+> **Note on the update prompt.** When `install_github` asks which packages to update, answering `3: None` (as is usually right) is fine — the `ncdf4` failure is unrelated to those updates.
+
 ### Conda alternative
 
 If dependency resolution is fighting you, the authors ship an environment file:
@@ -234,31 +369,60 @@ remotes::install_github("cole-trapnell-lab/monocle3")
 
 CellRank and scanpy are Python-only. Script 10 drives them from R through `reticulate`.
 
-### 5.1 Create the environment
+### 5.0 CPU only — no GPU, no PyTorch
 
-Do this **once**, from a terminal — not from inside R, and not from inside an analysis script:
+Nothing in this pipeline uses a GPU, and **PyTorch is not a dependency**:
+
+| Component | Backend | GPU? |
+|---|---|---|
+| CellRank `CytoTRACEKernel` (Script 10) | pyGPCCA / scipy | No |
+| scanpy / scvelo preprocessing | numpy / scipy | No |
+| CytoTRACE 2 (Script 09) | **R package**, `.rds` model matrices | No |
+
+Script 09's CytoTRACE 2 is the *R* package and needs no Python at all. Only Script 10 does.
+
+### 5.1 Automated setup (recommended)
+
+Use `setup_python_env.sh`, which installs into an existing conda env, snapshots it first for rollback, verifies every import, and prints the reticulate lines for R:
 
 ```bash
-# mamba is much faster than conda for this solve; either works
-conda create -n cellrank_env python=3.11 -y
-conda activate cellrank_env
-
-pip install "cellrank>=2.0" scanpy scvelo anndata igraph leidenalg
+chmod +x setup_python_env.sh
+./setup_python_env.sh --check      # verify only, install nothing
+./setup_python_env.sh              # install into scanpy_env_311
+./setup_python_env.sh --optional   # also install cellmapper
+./setup_python_env.sh --env my_env # target a different environment
 ```
 
-Optional, for the newer imputation route (`CT_IMPUTE_METHOD <- "cellmapper"`):
+Edit `ENV_NAME` at the top of the script to change the default target. It is safe to re-run — pip skips anything already satisfied.
+
+### 5.2 Manual equivalent
+
+```bash
+conda activate scanpy_env_311
+pip install "cellrank>=2.0" scvelo
+python -c "import cellrank, scanpy, scvelo; print(cellrank.__version__, scanpy.__version__)"
+```
+
+Optional, only if you set `CT_IMPUTE_METHOD <- "cellmapper"`:
 
 ```bash
 pip install cellmapper
 ```
 
-Verify before touching R:
+Verify in the shell before touching R — debugging import failures through the reticulate layer is considerably worse.
+
+> **Adding to a working env carries some risk.** pip can pull a numpy/scipy version that conflicts with what scanpy already has. The setup script writes a `pip freeze` snapshot first so you can restore. To avoid the risk entirely, clone first:
+> ```bash
+> conda create -n scanpy_cellrank --clone scanpy_env_311
+> ```
+
+### 5.3 Building a fresh environment instead
 
 ```bash
-python -c "import cellrank, scanpy, scvelo; print(cellrank.__version__, scanpy.__version__)"
+conda create -n cellrank_env python=3.11 -y
+conda activate cellrank_env
+pip install "cellrank>=2.0" scanpy scvelo anndata igraph leidenalg
 ```
-
-If that line errors, fix it here. Debugging Python import failures through the reticulate layer is considerably worse.
 
 ### 5.2 Install reticulate in R
 
@@ -285,6 +449,127 @@ use_condaenv("cellrank_env", required = TRUE)
 py_config()                          # confirm the path is the env you built
 py_module_available("cellrank")      # must be TRUE
 ```
+
+### 5.4b `py_config()` looks right but `py_module_available()` is FALSE
+
+This is the single most common conda + reticulate failure on RHEL/Rocky, and it looks nothing like a missing package:
+
+```r
+py_config()                        # correct interpreter, correct numpy
+py_module_available("cellrank")    # FALSE
+```
+
+**`py_module_available()` returns FALSE when the import RAISES**, not only when the module is absent. It swallows the exception. The module is installed; importing it inside R is what fails.
+
+**Step 1 — see the actual error. Do not skip this.**
+
+```r
+reticulate::py_run_string("import cellrank")
+```
+
+**Step 2 — read the message.**
+
+| Error contains | Cause |
+|---|---|
+| `GLIBCXX_3.4.xx not found` / `libstdc++.so.6` | R and conda disagree on libstdc++ (most common) |
+| `numpy.core.multiarray failed to import` | numpy ABI mismatch |
+| `undefined symbol` | compiled-extension mismatch, same family |
+
+**The confirmed real-world error looks like this:**
+
+```
+OSError: /lib64/libstdc++.so.6: version `GLIBCXX_3.4.30' not found
+  (required by .../site-packages/llvmlite/binding/../../../../libLLVM-14.so)
+```
+
+Chain: `cellrank → scanpy → numba → llvmlite → libLLVM-14.so → libstdc++`. The system `/lib64/libstdc++.so.6` is older than what conda's `libLLVM` needs. Nothing is missing; the wrong copy of one library is being loaded.
+
+**Step 3a — the surgical fix (preferred): `LD_PRELOAD` just libstdc++.**
+
+Replacing only that one library is safer than reordering the whole path, because R itself was compiled against the system libraries:
+
+```bash
+export LD_PRELOAD=/home/ssromerogon/miniconda3/envs/scanpy_env_311/lib/libstdc++.so.6
+R
+```
+
+Persist it in `~/.Renviron`:
+
+```
+LD_PRELOAD=/home/ssromerogon/miniconda3/envs/scanpy_env_311/lib/libstdc++.so.6
+RETICULATE_PYTHON=/home/ssromerogon/miniconda3/envs/scanpy_env_311/bin/python
+```
+
+First confirm conda's copy actually has the required version:
+
+```bash
+strings /home/ssromerogon/miniconda3/envs/scanpy_env_311/lib/libstdc++.so.6 \
+  | grep GLIBCXX_3.4.30
+```
+
+Empty output means conda's is also too old — install a newer one:
+
+```bash
+conda install -n scanpy_env_311 -c conda-forge libstdcxx-ng
+```
+
+**Step 3b — the broader fix: `LD_LIBRARY_PATH`.**
+
+System R on RHEL loads the OS `libstdc++`, which is older than the one conda's compiled extensions (numba, llvmlite, scipy) were built against. The conda `lib` directory must come **first** on the library path.
+
+> ⚠️ **Check this first if you have run `00_rlibs_installation.R` in the same session.** That script's "FORCE protocol" sets
+> ```r
+> Sys.setenv(LD_LIBRARY_PATH = "/usr/lib64")
+> ```
+> which pins the linker to system libraries — exactly the condition that breaks conda extensions. Verify with `Sys.getenv("LD_LIBRARY_PATH")`. If it reads `/usr/lib64`, that is very likely your problem. Use a **fresh R session** that has not sourced Script 00.
+
+`LD_LIBRARY_PATH` is read by the dynamic linker when the **process starts**, so `Sys.setenv()` inside a running R session is unreliable. Set it before R launches. Put this in `~/.Renviron`:
+
+```
+LD_LIBRARY_PATH=/home/ssromerogon/miniconda3/envs/scanpy_env_311/lib:/usr/lib64
+RETICULATE_PYTHON=/home/ssromerogon/miniconda3/envs/scanpy_env_311/bin/python
+```
+
+Then **fully restart R** (not just `use_condaenv` again — reticulate binds once per session).
+
+Equivalent, from a shell:
+
+```bash
+export LD_LIBRARY_PATH=/home/ssromerogon/miniconda3/envs/scanpy_env_311/lib:$LD_LIBRARY_PATH
+export RETICULATE_PYTHON=/home/ssromerogon/miniconda3/envs/scanpy_env_311/bin/python
+R
+```
+
+**Step 4 — if that is not enough**, give conda a newer libstdc++:
+
+```bash
+conda install -n scanpy_env_311 -c conda-forge libstdcxx-ng
+```
+
+**Step 5 — last resort**, use a virtualenv instead of conda. Virtualenvs use the system Python and therefore the system libstdc++, so the mismatch cannot arise:
+
+```bash
+python3 -m venv ~/cellrank_venv
+source ~/cellrank_venv/bin/activate
+pip install "cellrank>=2.0" scanpy scvelo anndata igraph leidenalg
+```
+
+```r
+PYTHON_ENV_TYPE <- "virtualenv"
+PYTHON_ENV      <- "~/cellrank_venv"
+```
+
+**Confirming the fix:**
+
+```r
+library(reticulate)
+use_condaenv("scanpy_env_311", required = TRUE)
+cr <- import("cellrank")
+cr$`__version__`                      # "2.0.7"
+py_module_available("cellrank")       # TRUE
+```
+
+Note `import()` is the better test than `py_module_available()` — it shows you the error instead of hiding it behind FALSE.
 
 ### 5.5 Known failure modes
 

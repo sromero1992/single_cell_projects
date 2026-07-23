@@ -73,8 +73,9 @@ set.seed(123)
 #   "auto"       — let reticulate decide (least reproducible; use as fallback)
 PYTHON_ENV_TYPE <- "conda"
 
-# Name of the environment created per INSTALL_NOTES.md section 5.
-PYTHON_ENV <- "cellrank_env"
+# Name of the environment. Point this at an existing conda env that has
+# scanpy + cellrank installed. See INSTALL_NOTES.md section 5.
+PYTHON_ENV <- "scanpy_env_311"
 
 # For PYTHON_ENV_TYPE = "python", set the full binary path instead, e.g.:
 # PYTHON_BIN <- "/home/ssromerogon/miniconda3/envs/cellrank_env/bin/python"

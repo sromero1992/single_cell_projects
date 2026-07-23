@@ -77,7 +77,7 @@
 # ============================================================================
 #
 # CHECKPOINT SYSTEM (dual-checkpoint per sample):
-#   Each sample produces two checkpoint .rds files inside SCEVAN_DIR/<SampleID>/:
+#   Each sample produces two checkpoint .rds files inside PROCESSED_DIR/<SampleID>/:
 #     _scevan_processed.rds       — saved right after SCEVAN (Checkpoint 1)
 #     _decontx_dblt_processed.rds — saved after DecontX + doublet removal + Pre-QC
 #                                   (Checkpoint 2 — the file used for merging)
@@ -93,8 +93,8 @@
 # OUTPUT:
 #   - <PROJECT_NAME>_processed_for_annotation.rds  (main output for Script 02)
 #   - Diagnostic QC violin plots (before/after filtering)
-#   - Doublet score distribution plots per sample (in SCEVAN_DIR/<SampleID>/)
-#   - Doublet UMAP visualization per sample (in SCEVAN_DIR/<SampleID>/)
+#   - pK sweep plots, doublet score histograms and doublet UMAPs per sample
+#     (all in OUTPUT_DIR/doublet_diagnostics/)
 #   - Doublet rollback summary Excel file
 #   - Harmony vs. No-Harmony UMAP comparison plots
 #
@@ -203,8 +203,11 @@ H5_DIR        <- file.path(ROOT_PATH, "h5_files")
 # OUTPUT_DIR: All processed objects and plots are saved here.
 OUTPUT_DIR    <- file.path(ROOT_PATH, "seurat_output")
 
-# SCEVAN_DIR: Dedicated directory for SCEVAN outputs and per-sample checkpoints.
-SCEVAN_DIR    <- file.path(OUTPUT_DIR, "scevan_per_sample_results")
+# PROCESSED_DIR: Per-sample working directory. Holds the resume checkpoints
+#   for every sample, and (when RUN_SCEVAN = TRUE) that sample's SCEVAN output
+#   in its own scevan/ subfolder. Named generically because it is used whether
+#   or not SCEVAN runs - the checkpoints are always written here.
+PROCESSED_DIR <- file.path(OUTPUT_DIR, "processed_samples")
 
 # --- 1.2: Pre-Merge QC Parameters (Loose / Per-Sample) ---
 # Applied BEFORE merging samples. These are intentionally lenient to catch only
@@ -243,56 +246,76 @@ DOUBLET_METHOD <- "DoubletFinder"
 #   "scDblFinder"   — scDblFinder decides; DoubletFinder is logged only
 DOUBLET_CONSENSUS_RULE <- "intersect"
 
-# --- 1.4.1: Shared Parameters (apply to BOTH methods) ------------------------
+# --- 1.4.1: Expected doublet rate (applies to BOTH methods) ------------------
 #
-# DOUBLET_RATE: Expected fraction of doublets in each sample.
+# *** THIS IS THE MOST CONSEQUENTIAL SETTING IN THE DOUBLET STEP. ***
+# Under DoubletFinder the rate sets nExp directly (nExp = n_cells * rate),
+# which is a HARD QUOTA, not a ceiling: it will call approximately that many
+# doublets whether or not they exist. Too high silently deletes real cells.
 #
-#   *** THIS IS THE MOST CONSEQUENTIAL PARAMETER IN THE DOUBLET STEP. ***
-#   For DoubletFinder it directly sets nExp (nExp = n_cells * DOUBLET_RATE),
-#   which is a HARD QUOTA, not a ceiling: DoubletFinder will call approximately
-#   that many doublets whether or not they exist. Setting it too high silently
-#   deletes real cells. For scDblFinder it is a softer prior (dbr).
+# You only ever need to answer ONE question here:
+#   "How many cells did each lane recover?"
+# The 10x multiplet rate follows from that (~0.8% per 1,000 cells recovered):
 #
-#   ACCEPTED VALUES:
-#     "auto"   — (RECOMMENDED) compute the rate PER SAMPLE from that sample's
-#                own recovered cell count, using the 10x multiplet rule below.
-#                This is the correct behaviour when samples differ in depth,
-#                which they almost always do.
-#     <number> — a fixed rate applied to every sample (e.g. 0.08). Use only
-#                when you have a specific reason to override the estimate.
+#        5,000 cells ->  4%        16,000 cells -> 12.8%
+#       10,000 cells ->  8%        20,000 cells -> 16.0%
 #
+# EXPECTED_CELLS_PER_SAMPLE — how to answer that question:
+#   NULL      (RECOMMENDED) use each sample's OWN cell count, measured after
+#             the loose pre-QC. Adapts automatically when lanes differ, which
+#             they almost always do.
+#   <number>  assume every lane targeted this many cells, e.g. 20000.
+#             Use when you know the loading target and would rather state it
+#             than have it inferred. NOTE this gives every sample the SAME
+#             rate, so a lane that under-recovered will be over-corrected.
+EXPECTED_CELLS_PER_SAMPLE <- NULL
+
+# -----------------------------------------------------------------------------
+# MULTIPLEXED RUNS (10x Flex / CellPlex / hashing) - IMPORTANT
+# -----------------------------------------------------------------------------
+# If several samples shared one GEM well, do NOT feed the GEM-well total here.
+# Leave EXPECTED_CELLS_PER_SAMPLE = NULL and let each sample use its own count.
+#
+# Why that is the correct answer rather than an approximation:
+#   Cell Ranger demultiplexes by probe barcode and ALREADY removes multiplets
+#   whose cells came from different samples. What survives into each per-sample
+#   H5 is only the UNDETECTED multiplets - those where both cells happened to
+#   carry the same barcode. For k equally sized barcodes that is a fraction
+#   1/k of all multiplets. So:
+#
+#       undetected rate  =  (rate on the whole GEM well) / k
+#                        =  (c * n_total) / k          [c = slope per cell]
+#                        =  c * (n_total / k)
+#                        =  the plain rule applied to ONE sample's own count
+#
+#   The model is linear, so dividing the cells by k and dividing the rate by k
+#   land on the same number. Using each sample's measured count is exact here,
+#   not a shortcut.
+#
+#   Worked example (this project): a 4-plex Flex GEM well holding ~80,000 cells
+#   yields ~20,000 cells per probe barcode.
+#       whole well : 0.008 * 80  = 64%,  /4 barcodes = 16%
+#       per sample : 0.008 * 20  = 16%          <- identical
+#
+# CAVEAT: 10x caps Flex at 20,000 cells per probe barcode and recommends 4,000
+#   as a starting point, noting the undetected multiplet rate rises as you
+#   approach the cap. At ~20k per barcode a ~16% rate is expected and real, not
+#   an artifact - but the doublet step is then removing a large number of cells,
+#   so read the Action and Target_Rate_Pct columns of the doublet log carefully.
+# -----------------------------------------------------------------------------
+
+# DOUBLET_RATE — normally leave as "auto".
+#   "auto"    derive the rate from EXPECTED_CELLS_PER_SAMPLE above.
+#   <number>  bypass the model entirely and force a fixed fraction (e.g. 0.16)
+#             for every sample. Only if you have a specific reason.
 DOUBLET_RATE <- "auto"
 
-# --- 10x multiplet-rate model (used only when DOUBLET_RATE == "auto") --------
-# 10x Genomics publishes an approximately LINEAR relationship between the
-# number of cells recovered and the multiplet rate for 3' GEM chemistry:
-#
-#     multiplet rate  ~=  0.8% per 1,000 cells recovered
-#
-#   Cells recovered   Expected multiplet rate
-#   ---------------   -----------------------
-#        1,000                 0.8%
-#        5,000                 4.0%
-#       10,000                 8.0%     <- common target
-#       16,000                12.8%
-#       20,000                16.0%     <- high-load target
-#
-# So a 10,000-cell target gives ~0.08 and a 20,000-cell target gives ~0.16.
-# The previous hardcoded 0.16 was therefore only correct for samples that
-# actually recovered ~20,000 cells; applied to a 6,000-cell sample it would
-# have destroyed roughly 10% of that sample's real cells.
-#
-# The rate is computed from each sample's cell count AFTER the loose pre-merge
-# QC and DecontX, i.e. the actual number of cells going into doublet calling.
-DOUBLET_RATE_PER_1K <- 0.008   # 0.8% per 1,000 cells recovered
-
-# Guard rails on the automatic estimate:
-#   MIN — below this the estimate is noise; very small samples still carry
-#         some multiplet burden, so do not let it collapse to ~0.
-#   MAX — above this the linear model is no longer trustworthy (10x's own
-#         curve flattens, and super-loaded lanes should be handled manually).
-DOUBLET_RATE_AUTO_MIN <- 0.008   # floor:  0.8%
-DOUBLET_RATE_AUTO_MAX <- 0.20    # ceiling: 20%
+# --- Internals of the 10x model (rarely touched) -----------------------------
+# Slope of the published linear multiplet curve, and sanity clamps on the
+# result. The clamps only stop absurd values; they are not tuning knobs.
+MULTIPLET_RATE_PER_1K <- 0.008   # 0.8% per 1,000 cells recovered
+DOUBLET_RATE_FLOOR    <- 0.005   # never below 0.5%
+DOUBLET_RATE_CEILING  <- 0.20    # never above 20% (must stay < rollback below)
 
 # DOUBLET_ROLLBACK_THRESHOLD: Safety mechanism (applies to BOTH methods).
 #   If the chosen method classifies MORE than this fraction of cells as
@@ -304,7 +327,7 @@ DOUBLET_RATE_AUTO_MAX <- 0.20    # ceiling: 20%
 #   every sample under DoubletFinder (since nExp is a hard target). Keep
 #   DOUBLET_ROLLBACK_THRESHOLD comfortably above DOUBLET_RATE. With
 #   DOUBLET_RATE = "auto" this is enforced automatically, since the automatic
-#   estimate is capped at DOUBLET_RATE_AUTO_MAX.
+#   estimate is capped at DOUBLET_RATE_CEILING.
 DOUBLET_ROLLBACK_THRESHOLD <- 0.25
 
 # --- 1.4.2: DoubletFinder-Specific Parameters --------------------------------
@@ -320,7 +343,7 @@ DF_PN <- 0.25
 #   the highest peak WITHIN the window. Range [0.01, 0.15] covers the values
 #   reported as optimal across the published DoubletFinder validation datasets.
 DF_PK_RANGE_MIN <- 0.01
-DF_PK_RANGE_MAX <- 0.15
+DF_PK_RANGE_MAX <- 0.25
 
 # DF_PK_FALLBACK: Used only if NO peak exists inside the safe zone at all.
 #   0.09 is the median optimal pK across the DoubletFinder validation sets and
@@ -345,6 +368,28 @@ DF_CLUSTER_RES <- 0.5
 # DF_SCT: Set TRUE only if the per-sample object was normalised with SCTransform.
 #   This pipeline uses standard LogNormalize per sample, so keep FALSE.
 DF_SCT <- FALSE
+
+# --- 1.4.4: What to DO with the doublets once they are called ----------------
+# REMOVE_DOUBLETS: whether Script 01 deletes them, or only labels them.
+#
+#   FALSE  (DEFAULT) LABEL ONLY. Every cell is kept and carries a
+#          Doublet_Status of "Singlet" or "Doublet". Nothing is deleted at any
+#          point in Script 01. You filter when YOU choose - typically after
+#          annotation in Script 02, once you can see whether the flagged cells
+#          form a sensible scatter or land on a real biological cluster.
+#          Filter with:
+#              data <- subset(data, subset = Doublet_Status == "Singlet")
+#
+#   TRUE   Delete them immediately, per sample, before the merge. Every
+#          downstream object is singlet-only and the decision is irreversible
+#          without re-running from the checkpoints.
+#
+# Keeping them (FALSE) is the safer default: a doublet call is a prediction,
+# not a measurement, and this way a bad pK or an over-aggressive rate costs you
+# nothing permanent. The trade is that doublets are present during clustering
+# and annotation, where they can form their own small hybrid clusters - which
+# is often informative in itself.
+REMOVE_DOUBLETS <- FALSE
 
 # --- 1.4.3: scDblFinder-Specific Parameters ----------------------------------
 # SCDBLFINDER_SCORE_THRESHOLD: Minimum doublet score to call a cell a doublet.
@@ -386,7 +431,7 @@ USE_BPCELLS            <- FALSE  # Use BPCells on-disk matrix handling (write_ma
                                  # package is not available; standard in-memory JoinLayers() is
                                  # used as fallback. Requires hdf5r and BPCells to be installed.
 
-RUN_SCEVAN             <- TRUE  # Run SCEVAN copy-number variation analysis.
+RUN_SCEVAN             <- FALSE # Run SCEVAN copy-number variation analysis.
                                  # Enable if ANY sample in the cohort is cancer/tumor — run on ALL
                                  # samples including normals, as normals serve as the CNA reference
                                  # baseline. Set FALSE only if the entire study uses normal tissue.
@@ -395,7 +440,7 @@ DPI_SETTING            <- 300   # DPI for all saved diagnostic plots.
 # --- 1.7: Probe / KO Gene Integration Parameters ---
 # Enable this if your 10x run included a probe-based capture assay (e.g., for
 # tracking KO efficiency at the probe level). Set to FALSE to skip entirely.
-ADD_PROBE_DATA <- TRUE
+ADD_PROBE_DATA <- FALSE
 
 # PROBE_MAPPING: Named list mapping probe IDs (as they appear in the H5 file)
 # to human-readable labels. These labels become metadata column names.
@@ -422,7 +467,7 @@ SCEVAN_PLOTTREE  <- FALSE    # Plot phylogenetic tree of subclones (slow; set TR
 
 # --- Create output directories if they do not exist -------------------------
 if (!dir.exists(OUTPUT_DIR)) { dir.create(OUTPUT_DIR, recursive = TRUE) }
-if (!dir.exists(SCEVAN_DIR)) { dir.create(SCEVAN_DIR, recursive = TRUE) }
+if (!dir.exists(PROCESSED_DIR)) { dir.create(PROCESSED_DIR, recursive = TRUE) }
 
 # DOUBLET_DIAG_DIR: all doublet diagnostics (pK plots, score histograms,
 # concordance matrices) are collected here in one place for easy review.
@@ -437,6 +482,10 @@ if (!dir.exists(DOUBLET_DIAG_DIR)) { dir.create(DOUBLET_DIAG_DIR, recursive = TR
 validate_config <- function() {
   errs <- character(0)
 
+  if (!is.logical(REMOVE_DOUBLETS) || length(REMOVE_DOUBLETS) != 1 ||
+      is.na(REMOVE_DOUBLETS)) {
+    errs <- c(errs, "REMOVE_DOUBLETS must be TRUE or FALSE.")
+  }
   if (!DOUBLET_METHOD %in% c("DoubletFinder", "scDblFinder", "both")) {
     errs <- c(errs, paste0("DOUBLET_METHOD must be one of 'DoubletFinder', ",
                            "'scDblFinder', or 'both'. Got: '", DOUBLET_METHOD, "'"))
@@ -465,14 +514,30 @@ validate_config <- function() {
       errs <- c(errs, "DF_PN must be strictly between 0 and 1 (published default: 0.25).")
     }
   }
-  # Auto-mode sanity: the guard rails must themselves be coherent.
+  # Auto-mode sanity.
   if (rate_is_auto) {
-    if (DOUBLET_RATE_AUTO_MIN >= DOUBLET_RATE_AUTO_MAX) {
-      errs <- c(errs, "DOUBLET_RATE_AUTO_MIN must be less than DOUBLET_RATE_AUTO_MAX.")
+    if (!is.null(EXPECTED_CELLS_PER_SAMPLE)) {
+      if (!is.numeric(EXPECTED_CELLS_PER_SAMPLE) || EXPECTED_CELLS_PER_SAMPLE <= 0) {
+        errs <- c(errs, paste0(
+          "EXPECTED_CELLS_PER_SAMPLE must be NULL or a positive number of ",
+          "cells (e.g. 20000). Got: ",
+          paste(deparse(EXPECTED_CELLS_PER_SAMPLE), collapse = "")))
+      } else if (EXPECTED_CELLS_PER_SAMPLE < 100) {
+        # Catches the classic mistake of entering a RATE (0.16) where a CELL
+        # COUNT (20000) is expected.
+        errs <- c(errs, paste0(
+          "EXPECTED_CELLS_PER_SAMPLE is ", EXPECTED_CELLS_PER_SAMPLE,
+          ", which looks like a rate rather than a cell count. It expects a ",
+          "NUMBER OF CELLS, e.g. 20000 for a 20k-cell lane. To set a fixed ",
+          "rate instead, use DOUBLET_RATE <- 0.16."))
+      }
     }
-    if (DOUBLET_RATE_AUTO_MAX >= DOUBLET_ROLLBACK_THRESHOLD) {
+    if (DOUBLET_RATE_FLOOR >= DOUBLET_RATE_CEILING) {
+      errs <- c(errs, "DOUBLET_RATE_FLOOR must be less than DOUBLET_RATE_CEILING.")
+    }
+    if (DOUBLET_RATE_CEILING >= DOUBLET_ROLLBACK_THRESHOLD) {
       errs <- c(errs, paste0(
-        "DOUBLET_RATE_AUTO_MAX (", DOUBLET_RATE_AUTO_MAX,
+        "DOUBLET_RATE_CEILING (", DOUBLET_RATE_CEILING,
         ") must be LESS than DOUBLET_ROLLBACK_THRESHOLD (",
         DOUBLET_ROLLBACK_THRESHOLD, "), otherwise a densely loaded sample ",
         "would hit its own rollback and lose all doublet removal."))
@@ -497,6 +562,12 @@ message(paste0("=== Doublet detection method: ", DOUBLET_METHOD,
                if (DOUBLET_METHOD == "both")
                  paste0(" (consensus rule: ", DOUBLET_CONSENSUS_RULE, ")") else "",
                " ==="))
+if (REMOVE_DOUBLETS) {
+  message("    Doublets will be REMOVED per sample. Downstream objects are singlet-only.")
+} else {
+  message("    Doublets will be LABELLED ONLY - no cells are deleted in Script 01.")
+  message("    Filter later with: subset(data, subset = Doublet_Status == \"Singlet\")")
+}
 
 # =============================================================================
 # --- DOUBLET RATE RESOLVER ---------------------------------------------------
@@ -505,44 +576,60 @@ message(paste0("=== Doublet detection method: ", DOUBLET_METHOD,
 #
 #   DOUBLET_RATE == "auto"  -> estimate from this sample's own recovered cell
 #                              count using the 10x linear multiplet model,
-#                              clamped to [DOUBLET_RATE_AUTO_MIN, ..._MAX].
+#                              clamped to [DOUBLET_RATE_FLOOR, ..._CEILING].
 #   DOUBLET_RATE == number  -> that fixed number, for every sample.
 #
 # Called once per sample, immediately before doublet detection, using the cell
 # count at that moment (post pre-QC, post-DecontX) - which is the best
 # available proxy for "cells recovered" from the 10x lane.
 resolve_doublet_rate <- function(n_cells, sample_id = "") {
+
+  # Path 1: user forced a fixed fraction - use it verbatim.
   if (!identical(DOUBLET_RATE, "auto")) {
-    return(list(rate = DOUBLET_RATE, source = "FIXED", raw = DOUBLET_RATE))
+    message(paste0("    -> Doublet rate (fixed): ", round(DOUBLET_RATE * 100, 2),
+                   "%  (expected ~", round(n_cells * DOUBLET_RATE), " doublets)"))
+    return(list(rate = DOUBLET_RATE, source = "FIXED", raw = DOUBLET_RATE,
+                basis_cells = n_cells))
   }
 
-  raw_rate <- (n_cells / 1000) * DOUBLET_RATE_PER_1K
-  rate     <- min(max(raw_rate, DOUBLET_RATE_AUTO_MIN), DOUBLET_RATE_AUTO_MAX)
+  # Path 2: "auto". Decide WHICH cell count feeds the 10x model.
+  #   EXPECTED_CELLS_PER_SAMPLE = NULL   -> this sample's measured count
+  #   EXPECTED_CELLS_PER_SAMPLE = number -> the stated loading target
+  if (is.null(EXPECTED_CELLS_PER_SAMPLE)) {
+    basis_cells <- n_cells
+    basis_label <- "measured"
+  } else {
+    basis_cells <- EXPECTED_CELLS_PER_SAMPLE
+    basis_label <- "user-stated target"
+  }
 
-  source <- if (raw_rate < DOUBLET_RATE_AUTO_MIN) {
+  raw_rate <- (basis_cells / 1000) * MULTIPLET_RATE_PER_1K
+  rate     <- min(max(raw_rate, DOUBLET_RATE_FLOOR), DOUBLET_RATE_CEILING)
+
+  source <- if (raw_rate < DOUBLET_RATE_FLOOR) {
     "AUTO_FLOORED"
-  } else if (raw_rate > DOUBLET_RATE_AUTO_MAX) {
+  } else if (raw_rate > DOUBLET_RATE_CEILING) {
     "AUTO_CAPPED"
   } else {
     "AUTO"
   }
 
-  message(paste0("    -> Doublet rate (auto): ", n_cells, " cells recovered -> ",
-                 round(rate * 100, 2), "%",
+  message(paste0("    -> Doublet rate (auto): ", basis_cells, " cells (",
+                 basis_label, ") -> ", round(rate * 100, 2), "%",
                  if (source != "AUTO")
-                   paste0("  [", source, "; uncapped estimate was ",
+                   paste0("  [", source, "; unclamped estimate was ",
                           round(raw_rate * 100, 2), "%]") else "",
                  "  (expected ~", round(n_cells * rate), " doublets)"))
 
   if (source == "AUTO_CAPPED") {
-    warning(paste0("  [RATE CAP] Sample '", sample_id, "' recovered ", n_cells,
-                   " cells, implying a ", round(raw_rate * 100, 1),
-                   "% multiplet rate. Capped at ",
-                   round(DOUBLET_RATE_AUTO_MAX * 100, 1),
+    warning(paste0("  [RATE CAP] Sample '", sample_id, "': ", basis_cells,
+                   " cells implies a ", round(raw_rate * 100, 1),
+                   "% multiplet rate. Clamped to ",
+                   round(DOUBLET_RATE_CEILING * 100, 1),
                    "%. Verify this lane was not overloaded."))
   }
 
-  list(rate = rate, source = source, raw = raw_rate)
+  list(rate = rate, source = source, raw = raw_rate, basis_cells = basis_cells)
 }
 
 # =============================================================================
@@ -834,7 +921,7 @@ report_concordance <- function(df_calls, sc_calls, sample_id, diag_dir) {
 #     7. Save checkpoint and free memory
 #
 # DUAL-CHECKPOINT SYSTEM (three-tier resume logic):
-#   Each sample produces TWO checkpoint files inside SCEVAN_DIR/<SampleID>/:
+#   Each sample produces TWO checkpoint files inside PROCESSED_DIR/<SampleID>/:
 #
 #     Checkpoint 1 (_scevan_processed.rds):
 #       Saved after SCEVAN runs. Contains raw Seurat object + SCEVAN metadata.
@@ -863,15 +950,80 @@ message(paste0("=== STEP 2.1a: Per-Sample Processing (SCEVAN → Pre-QC → Deco
                DOUBLET_METHOD, " → Checkpoint) ==="))
 metadata <- read.xlsx(METADATA_FILE)
 
+# --- Clean up header artifacts -----------------------------------------------
+# Excel/openxlsx headers frequently arrive dirty:
+#   - read.xlsx() converts spaces to dots  ("Sample ID" -> "Sample.ID")
+#   - headers pasted from web sources carry XML/HTML fragments
+#     ('xml:space="preserve">Probes', 'Tissue.Type.&amp;.species')
+# Strip those artifacts so column matching is not defeated by cosmetics.
+clean_header <- function(x) {
+  x <- gsub('xml:space="preserve">', "", x, fixed = TRUE)  # leaked XML attr
+  x <- gsub("&amp;", "and", x, fixed = TRUE)               # HTML ampersand
+  x <- gsub("&[a-z]+;", "", x)                             # any other entity
+  x <- gsub("[.]+", " ", x)                                # dots back to spaces
+  x <- trimws(gsub("\\s+", " ", x))                        # collapse whitespace
+  x
+}
+colnames(metadata) <- clean_header(colnames(metadata))
+
+# --- Resolve the SampleID column, tolerantly ---------------------------------
+# Accept common spellings/casings (SampleID, Sample ID, Sample_ID, sampleid ...)
+# by comparing on a normalised key: lowercase, alphanumerics only.
+norm_key <- function(x) tolower(gsub("[^a-z0-9]", "", tolower(x)))
+sid_hits <- which(norm_key(colnames(metadata)) == "sampleid")
+
+if (length(sid_hits) == 0) {
+  stop(paste0(
+    "\n\nNo SampleID column found in the metadata file.\n",
+    "  File   : ", METADATA_FILE, "\n",
+    "  Columns: ", paste(colnames(metadata), collapse = " | "), "\n",
+    "Name the sample-identifier column 'SampleID' (or 'Sample ID' / ",
+    "'Sample_ID' - the pipeline normalises those) and re-run."), call. = FALSE)
+}
+if (length(sid_hits) > 1) {
+  stop(paste0("\n\nMultiple columns look like SampleID: ",
+              paste(colnames(metadata)[sid_hits], collapse = ", "),
+              ".\nKeep only one and re-run."), call. = FALSE)
+}
+if (colnames(metadata)[sid_hits] != "SampleID") {
+  message(paste0("  [METADATA] Using column '", colnames(metadata)[sid_hits],
+                 "' as SampleID."))
+  colnames(metadata)[sid_hits] <- "SampleID"
+}
+
+metadata$SampleID <- trimws(as.character(metadata$SampleID))
+
+bad_ids <- is.na(metadata$SampleID) | metadata$SampleID == "" | metadata$SampleID == "NA"
+if (any(bad_ids)) {
+  stop(paste0("\n\nThe SampleID column has ", sum(bad_ids),
+              " empty/NA value(s) in row(s): ",
+              paste(which(bad_ids), collapse = ", "),
+              ".\nEvery row needs a SampleID that matches its H5 subfolder."),
+       call. = FALSE)
+}
+
+# Confirm each SampleID has a matching H5 folder before doing any work.
+missing_dirs <- metadata$SampleID[!dir.exists(file.path(H5_DIR, metadata$SampleID))]
+if (length(missing_dirs) > 0) {
+  message(paste0("  [WARNING] ", length(missing_dirs),
+                 " SampleID(s) have no folder inside H5_DIR:"))
+  message(paste0("    ", paste(missing_dirs, collapse = ", ")))
+  message(paste0("  H5_DIR contains: ",
+                 paste(head(list.dirs(H5_DIR, recursive = FALSE, full.names = FALSE), 20),
+                       collapse = ", ")))
+  message("  These samples will fail to load. Fix SampleID <-> folder-name mismatches.")
+}
+message(paste0("  Metadata OK: ", nrow(metadata), " samples, SampleID column present."))
+
 # Initialize rollback log (filled during loop, saved after)
 rollback_log <- list()
 
 for (i in 1:nrow(metadata)) {
   sample_info       <- metadata[i, ]
   sample_id         <- as.character(sample_info$SampleID)
-  sample_scevan_dir <- file.path(SCEVAN_DIR, sample_id)
-  checkpoint_file_1 <- file.path(sample_scevan_dir, paste0(sample_id, "_scevan_processed.rds"))
-  checkpoint_file_2 <- file.path(sample_scevan_dir, paste0(sample_id, "_decontx_dblt_processed.rds"))
+  sample_dir <- file.path(PROCESSED_DIR, sample_id)
+  checkpoint_file_1 <- file.path(sample_dir, paste0(sample_id, "_scevan_processed.rds"))
+  checkpoint_file_2 <- file.path(sample_dir, paste0(sample_id, "_decontx_dblt_processed.rds"))
 
   # --- Three-tier checkpoint logic -------------------------------------------
   # (a) Full checkpoint exists: sample is completely done, skip.
@@ -894,7 +1046,7 @@ for (i in 1:nrow(metadata)) {
   message(paste("  [PROCESSING] Starting", sample_id,
                 if (scevan_checkpoint_loaded) "(resuming from SCEVAN checkpoint)" else "(full run)",
                 "..."))
-  if (!dir.exists(sample_scevan_dir)) { dir.create(sample_scevan_dir, recursive = TRUE) }
+  if (!dir.exists(sample_dir)) { dir.create(sample_dir, recursive = TRUE) }
 
   # ---- Steps 1–4: Load data, build Seurat object, run SCEVAN ---------------
   # These steps are SKIPPED when resuming from a SCEVAN checkpoint (case b above).
@@ -1013,7 +1165,17 @@ for (i in 1:nrow(metadata)) {
     # accurate CNA signal. Running per-sample prevents RAM exhaustion in large
     # cohorts.
     if (RUN_SCEVAN) {
+      # SCEVAN writes several files under a FIXED "output" folder relative to
+      # the current working directory, and does not fully honour output_dir.
+      # Left alone it scatters those files into whatever directory R happens to
+      # be in, and successive samples overwrite each other. We therefore run it
+      # with the working directory temporarily set to this sample's own scevan/
+      # subfolder, and restore the original afterwards no matter what happens.
+      scevan_dir <- file.path(sample_dir, "scevan")
+      if (!dir.exists(scevan_dir)) dir.create(scevan_dir, recursive = TRUE)
+      .old_wd <- getwd()
       tryCatch({
+        setwd(scevan_dir)
         message("    -> Running SCEVAN for CNA detection...")
         scevan_res_df <- pipelineCNA(
           as.matrix(GetAssayData(seurat_obj, layer = "counts")),
@@ -1021,7 +1183,7 @@ for (i in 1:nrow(metadata)) {
           SUBCLONES  = SCEVAN_SUBCLONES,
           plotTree   = SCEVAN_PLOTTREE,
           organism   = SCEVAN_ORGANISM,
-          output_dir = sample_scevan_dir
+          output_dir = scevan_dir
         )
         if (!is.null(scevan_res_df)) {
           seurat_obj <- AddMetaData(seurat_obj, metadata = scevan_res_df)
@@ -1030,6 +1192,10 @@ for (i in 1:nrow(metadata)) {
         }
       }, error = function(e) {
         message(paste("    -> [WARNING] SCEVAN failed for", sample_id, "| Error:", e$message))
+      }, finally = {
+        # ALWAYS restore the working directory - a stranded setwd() would send
+        # every later output of this run into the sample's scevan folder.
+        setwd(.old_wd)
       })
       gc()  # SCEVAN allocates heavily internally; reclaim memory immediately
     }
@@ -1182,6 +1348,7 @@ for (i in 1:nrow(metadata)) {
     rollback_log[[sample_id]] <- list(
       method         = DOUBLET_METHOD,
       consensus      = if (DOUBLET_METHOD == "both") DOUBLET_CONSENSUS_RULE else NA_character_,
+      disposition    = if (REMOVE_DOUBLETS) "REMOVED" else "LABELLED_ONLY",
       rate_used      = rate_info$rate,
       rate_source    = rate_info$source,
       fraction       = doublet_fraction,
@@ -1228,11 +1395,25 @@ for (i in 1:nrow(metadata)) {
       message(paste("      -> [WARNING] Doublet UMAP failed for", sample_id, ":", e$message))
     })
 
-    # ---- 7e. Remove doublets from the main object --------------------------
+    # ---- 7e. Remove doublets, or keep them labelled ------------------------
+    # Controlled by REMOVE_DOUBLETS (Section 1.4.4).
+    #   TRUE  - drop them here; every downstream object is singlet-only
+    #   FALSE - keep every cell and only LABEL it. Nothing is deleted; you
+    #           decide when (and whether) to filter, e.g. after annotation so
+    #           you can first see where the flagged cells actually sit.
     cells_before_dblt <- ncol(seurat_obj)
-    seurat_obj <- subset(seurat_obj, subset = Doublet_Status == "Singlet")
-    message(paste0("      -> Cells: ", cells_before_dblt, " -> ", ncol(seurat_obj),
-                   " (removed ", cells_before_dblt - ncol(seurat_obj), " doublets)"))
+    if (REMOVE_DOUBLETS) {
+      seurat_obj <- subset(seurat_obj, subset = Doublet_Status == "Singlet")
+      message(paste0("      -> Cells: ", cells_before_dblt, " -> ", ncol(seurat_obj),
+                     " (REMOVED ", cells_before_dblt - ncol(seurat_obj), " doublets)"))
+    } else {
+      n_flagged <- sum(seurat_obj$Doublet_Status == "Doublet")
+      message(paste0("      -> Cells: ", cells_before_dblt, " retained (",
+                     n_flagged, " LABELLED as doublets, none removed)."))
+      message("         REMOVE_DOUBLETS = FALSE - filter later with:")
+      message("           data <- subset(data, subset = Doublet_Status == \"Singlet\")")
+      rm(n_flagged)
+    }
 
     rm(df_res, sc_res, conc, n_doublets, doublet_fraction, cells_before_dblt)
     gc()
@@ -1263,8 +1444,9 @@ for (i in 1:nrow(metadata)) {
   })
 
   # ---- 8. Save Checkpoint 2 (decontX + doublets + QC) and free memory ------
-  # This is the FINAL per-sample checkpoint. It contains clean, singlet-only,
-  # ambient-corrected cells and is the file that Step 2.1b will load for merging.
+  # This is the FINAL per-sample checkpoint and the file Step 2.1b loads for
+  # merging. Its contents depend on REMOVE_DOUBLETS: singlet-only when TRUE,
+  # or all cells with a Doublet_Status label when FALSE.
   # Saving here means a crash AFTER this point (e.g., during merge) will not
   # require re-running DecontX or doublet detection on the next attempt.
   message("    -> Saving full checkpoint (decontX + doublets + QC) and releasing memory...")
@@ -1292,6 +1474,7 @@ if (length(rollback_log) > 0) {
     data.frame(
       SampleID           = s,
       Method             = .fld(s, "method", NA_character_),
+      Disposition        = .fld(s, "disposition", NA_character_),
       Consensus_Rule     = .fld(s, "consensus", NA_character_),
       N_Cells            = .fld(s, "n_cells"),
       N_Doublets_Flagged = .fld(s, "n_doublets"),
@@ -1333,7 +1516,7 @@ if (length(rollback_log) > 0) {
     n_capped <- sum(rollback_df$Rate_Source == "AUTO_CAPPED", na.rm = TRUE)
     if (n_capped > 0) {
       message(paste0("  [ATTENTION] ", n_capped,
-                     " sample(s) hit the rate cap (DOUBLET_RATE_AUTO_MAX). ",
+                     " sample(s) hit the rate cap (DOUBLET_RATE_CEILING). ",
                      "Check for overloaded lanes."))
     }
   }
@@ -1358,9 +1541,9 @@ seurat_objects_list <- list()
 
 for (i in 1:nrow(metadata)) {
   sample_id         <- as.character(metadata$SampleID[i])
-  sample_scevan_dir <- file.path(SCEVAN_DIR, sample_id)
-  checkpoint_file_2 <- file.path(sample_scevan_dir, paste0(sample_id, "_decontx_dblt_processed.rds"))
-  checkpoint_file_1 <- file.path(sample_scevan_dir, paste0(sample_id, "_scevan_processed.rds"))
+  sample_dir <- file.path(PROCESSED_DIR, sample_id)
+  checkpoint_file_2 <- file.path(sample_dir, paste0(sample_id, "_decontx_dblt_processed.rds"))
+  checkpoint_file_1 <- file.path(sample_dir, paste0(sample_id, "_scevan_processed.rds"))
 
   if (file.exists(checkpoint_file_2)) {
     # Normal case: full checkpoint (decontX + doublets + QC) is present.
