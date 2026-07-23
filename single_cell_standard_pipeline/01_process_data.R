@@ -128,13 +128,13 @@ set.seed(123) # Set global random seed for full reproducibility
 
 # --- 1.1: Project Identity & Paths ---
 # PROJECT_NAME: A short alphanumeric tag for this study. Used to name output files.
-PROJECT_NAME <- "Nr4a1_s17_ack"
+PROJECT_NAME <- "Wu_Diet_project2"
 
 # ROOT_PATH: The top-level working directory for this project.
 # All other paths below are derived from this one.
 #ROOT_PATH <- "Z:/selim_working_dir/2026_nr4a1_ack/r_process"   # Windows (RStudio local)
 #ROOT_PATH <- "/mnt/SCDC/Optimus/selim_working_dir/2026_nr4a1_ack/r_process"  # Linux/HPC
-ROOT_PATH <- "/home/ssromerogon/2026_nr4a1_ack/r_process"
+ROOT_PATH <- "/home/ssromerogon/local_drive/optimus_drive/selim_working_dir/2026_wu_project2/r_process"
 
 # METADATA_FILE: Excel (.xlsx) file describing your samples.
 #
@@ -192,7 +192,7 @@ ROOT_PATH <- "/home/ssromerogon/2026_nr4a1_ack/r_process"
 #   GROUP_1 <- "KO"
 #   GROUP_2 <- "WT"
 # =============================================================================
-METADATA_FILE <- file.path(ROOT_PATH, "Nr4a1_s17_metadata.xlsx")
+METADATA_FILE <- file.path(ROOT_PATH, "Wu_p2_metadata.xlsx")
 
 # H5_DIR: Directory containing one subfolder per sample, each holding
 #   the 10x H5 output files. Expected structure:
@@ -424,6 +424,30 @@ ROUND_DECONTX_COUNTS   <- TRUE # Round decontX corrected counts to nearest integ
                                  # Set TRUE if downstream tools require integer count matrices.
                                  # See decontX vignette for details.
 
+# INTEGRATION_METHOD: how Harmony batch correction is run. Same maths either
+# way (Harmony grouping on SampleID, producing a 'harmony' reduction), but the
+# object handling differs sharply in cost:
+#
+#   "RunHarmony"      (DEFAULT) The classic harmony::RunHarmony() call on the
+#                     JOINED object. Normalization, HVGs, scaling and PCA run
+#                     once on the whole matrix, then RunHarmony() corrects the
+#                     PCA. No layer splitting at any point. Cheaper in both time
+#                     and memory, and makes USE_BPCELLS largely unnecessary.
+#                     This is the original wu_project1 behaviour.
+#
+#   "IntegrateLayers" The Seurat v5 layered workflow: split the RNA assay into
+#                     one layer per sample, process per layer, then
+#                     IntegrateLayers(HarmonyIntegration), then re-join. This is
+#                     the split/join cycle that is expensive on large cohorts
+#                     and the reason BPCells was added. Kept for reproducibility
+#                     with runs made under that workflow.
+#
+# NOTE on the harmony package: both the CRAN release ("harmony") and the GitHub
+# dev version expose RunHarmony() with args reduction.use / reduction.save /
+# dims.use. The very old argument name 'reduction=' no longer works; this
+# pipeline uses the current names, so either install is fine.
+INTEGRATION_METHOD     <- "RunHarmony"  # "RunHarmony" | "IntegrateLayers"
+
 USE_BPCELLS            <- FALSE  # Use BPCells on-disk matrix handling (write_matrix_dir) during
                                  # the post-merge QC (Step 2.3) and integration (Step 2.4) steps.
                                  # Recommended for large cohorts (>8 samples) to prevent RAM
@@ -485,6 +509,10 @@ validate_config <- function() {
   if (!is.logical(REMOVE_DOUBLETS) || length(REMOVE_DOUBLETS) != 1 ||
       is.na(REMOVE_DOUBLETS)) {
     errs <- c(errs, "REMOVE_DOUBLETS must be TRUE or FALSE.")
+  }
+  if (!INTEGRATION_METHOD %in% c("RunHarmony", "IntegrateLayers")) {
+    errs <- c(errs, paste0("INTEGRATION_METHOD must be 'RunHarmony' or ",
+                           "'IntegrateLayers'. Got: '", INTEGRATION_METHOD, "'"))
   }
   if (!DOUBLET_METHOD %in% c("DoubletFinder", "scDblFinder", "both")) {
     errs <- c(errs, paste0("DOUBLET_METHOD must be one of 'DoubletFinder', ",
@@ -570,7 +598,7 @@ if (REMOVE_DOUBLETS) {
 }
 
 # =============================================================================
-# --- DOUBLET RATE RESOLVER ---------------------------------------------------
+# --- DOUBLET RATE RESOLVER# --- DOUBLET RATE RESOLVER ---------------------------------------------------
 # =============================================================================
 # Returns the expected doublet rate for ONE sample.
 #
@@ -1298,12 +1326,10 @@ for (i in 1:nrow(metadata)) {
     if (DOUBLET_METHOD == "DoubletFinder") {
       final_calls  <- df_res$calls[colnames(seurat_obj)]
       primary_info <- df_res$info
-      primary_score <- df_res$score[colnames(seurat_obj)]
 
     } else if (DOUBLET_METHOD == "scDblFinder") {
       final_calls  <- sc_res$calls[colnames(seurat_obj)]
       primary_info <- sc_res$info
-      primary_score <- sc_res$score[colnames(seurat_obj)]
 
     } else {  # "both" - compare, log, then apply the consensus rule
       conc <- report_concordance(df_res$calls, sc_res$calls, sample_id, DOUBLET_DIAG_DIR)
@@ -1321,7 +1347,6 @@ for (i in 1:nrow(metadata)) {
       )
       names(final_calls) <- colnames(seurat_obj)
       primary_info  <- df_res$info
-      primary_score <- df_res$score[colnames(seurat_obj)]
     }
 
     seurat_obj$Doublet_Status <- unname(final_calls)
@@ -1370,10 +1395,18 @@ for (i in 1:nrow(metadata)) {
                    if (!is.na(primary_info$pk)) paste0(" | pK: ", primary_info$pk) else "",
                    " | Action: ", action_taken))
 
-    # ---- 7d. Diagnostic UMAP: doublet scores before removal ----------------
+    # ---- 7d. Diagnostic UMAPs: doublet scores before removal ---------------
+    # One UMAP is computed and reused for every panel below.
+    #
+    # IMPORTANT: each method gets its OWN plot. The two scores are NOT on the
+    # same scale and are never merged:
+    #   DF_score          = pANN, the proportion of artificial nearest
+    #                       neighbours. Range depends on pK and pN.
+    #   scDblFinder_score = a calibrated classifier probability in [0, 1].
+    # Averaging them would be arithmetic on incompatible units, so the
+    # pipeline plots them side by side and lets you judge.
     tryCatch({
       seu_tmp_umap <- seurat_obj
-      seu_tmp_umap$.dblt_score <- primary_score
       n_pc_umap    <- min(30, ncol(seu_tmp_umap) - 1)
       seu_tmp_umap <- NormalizeData(seu_tmp_umap, verbose = FALSE) %>%
         FindVariableFeatures(verbose = FALSE) %>%
@@ -1382,15 +1415,75 @@ for (i in 1:nrow(metadata)) {
         RunUMAP(dims = 1:n_pc_umap, verbose = FALSE,
                 reduction.name = "umap_doublets")
 
-      p_dblt <- FeaturePlot(seu_tmp_umap, features = ".dblt_score",
-                            reduction = "umap_doublets") +
+      sub_txt <- paste0(round(doublet_fraction * 100, 1),
+                        "% doublets | Action: ", action_taken)
+
+      save_score_umap <- function(col, label, fname) {
+        if (!col %in% colnames(seu_tmp_umap@meta.data)) return(invisible(NULL))
+        if (all(is.na(seu_tmp_umap@meta.data[[col]]))) return(invisible(NULL))
+        p <- FeaturePlot(seu_tmp_umap, features = col,
+                         reduction = "umap_doublets") +
+          coord_fixed() +
+          ggtitle(paste0(label, ": ", sample_id), subtitle = sub_txt)
+        ggsave(file.path(DOUBLET_DIAG_DIR, paste0(sample_id, "_", fname, ".png")),
+               plot = p, width = 7, height = 6, dpi = DPI_SETTING, bg = "white")
+        rm(p)
+      }
+
+      # Per-method score maps - only for methods that actually ran.
+      save_score_umap("DF_score",
+                      "DoubletFinder pANN score", "doublet_umap_DoubletFinder")
+      save_score_umap("scDblFinder_score",
+                      "scDblFinder probability",  "doublet_umap_scDblFinder")
+
+      # The final consensus call, whatever rule produced it.
+      p_call <- DimPlot(seu_tmp_umap, group.by = "Doublet_Status",
+                        reduction = "umap_doublets",
+                        cols = c("Singlet" = "grey80", "Doublet" = "#D6604D")) +
         coord_fixed() +
-        ggtitle(paste0("Doublet Score (", DOUBLET_METHOD, "): ", sample_id),
-                subtitle = paste0(round(doublet_fraction * 100, 1),
-                                  "% doublets | Action: ", action_taken))
-      ggsave(file.path(DOUBLET_DIAG_DIR, paste0(sample_id, "_doublet_umap.png")),
-             plot = p_dblt, width = 7, height = 6, dpi = DPI_SETTING, bg = "white")
-      rm(p_dblt, seu_tmp_umap)
+        ggtitle(paste0("Final call (", DOUBLET_METHOD,
+                       if (DOUBLET_METHOD == "both")
+                         paste0("/", DOUBLET_CONSENSUS_RULE) else "",
+                       "): ", sample_id),
+                subtitle = sub_txt)
+      ggsave(file.path(DOUBLET_DIAG_DIR, paste0(sample_id, "_doublet_umap_call.png")),
+             plot = p_call, width = 7, height = 6, dpi = DPI_SETTING, bg = "white")
+      rm(p_call)
+
+      # METHOD-CLASSIFICATION MAP (both-mode only). The most informative panel:
+      # every cell falls into one of four states - agreed doublet, agreed
+      # singlet, or flagged by exactly one method.
+      # cells the two methods disagree about. If they scatter randomly the
+      # callers are merely noisy at the margin; if they concentrate on one
+      # cluster, one method is systematically wrong about a real population -
+      # which the agreement percentage and kappa alone will never reveal.
+      if (DOUBLET_METHOD == "both" &&
+          all(c("DF_class", "scDblFinder_class") %in% colnames(seu_tmp_umap@meta.data))) {
+        seu_tmp_umap$.dblt_agreement <- ifelse(
+          seu_tmp_umap$DF_class == "Doublet" & seu_tmp_umap$scDblFinder_class == "Doublet",
+          "Both: doublet",
+          ifelse(seu_tmp_umap$DF_class == "Doublet", "DoubletFinder only",
+          ifelse(seu_tmp_umap$scDblFinder_class == "Doublet", "scDblFinder only",
+                 "Both: singlet")))
+        p_dis <- DimPlot(seu_tmp_umap, group.by = ".dblt_agreement",
+                         reduction = "umap_doublets",
+                         cols = c("Both: singlet"      = "grey85",
+                                  "Both: doublet"      = "#B2182B",
+                                  "DoubletFinder only" = "#2166AC",
+                                  "scDblFinder only"   = "#F4A582")) +
+          coord_fixed() +
+          ggtitle(paste0("Doublet classification by method: ", sample_id),
+                  subtitle = paste0("agreement ",
+                                    if (!is.null(conc)) round(conc$agreement * 100, 1) else NA,
+                                    "% | kappa ",
+                                    if (!is.null(conc)) round(conc$kappa, 3) else NA))
+        ggsave(file.path(DOUBLET_DIAG_DIR,
+                         paste0(sample_id, "_doublet_umap_method_classification.png")),
+               plot = p_dis, width = 7.5, height = 6, dpi = DPI_SETTING, bg = "white")
+        rm(p_dis)
+      }
+
+      rm(seu_tmp_umap)
     }, error = function(e) {
       message(paste("      -> [WARNING] Doublet UMAP failed for", sample_id, ":", e$message))
     })
@@ -1706,14 +1799,19 @@ saveRDS(data, output_rds)
 # =============================================================================
 # --- STEP 2.4: Normalization, Dimensionality Reduction & Integration --------
 # =============================================================================
-# This modern workflow uses the IntegrateLayers function with HarmonyIntegration.
-# https://satijalab.org/seurat/articles/seurat5_integration
-#   1. The RNA assay is split into temporary layers, one per sample.
-#   2. Normalization, HVG finding, Scaling, and PCA run on each layer.
-#   3. An 'unintegrated' UMAP is created for diagnostics (Track A).
-#   4. IntegrateLayers with HarmonyIntegration creates a corrected 'harmony'
-#      reduction (Track B).
-#   5. Layers are re-joined for downstream analysis.
+# Two interchangeable routes, chosen by INTEGRATION_METHOD (Section 1.6). Both
+# end with the SAME reductions - "pca", "umap_none"/clusters_none (Track A,
+# unintegrated diagnostic) and "harmony", "umap_harmony"/clusters_harmony
+# (Track B, batch-corrected) - and a joined object, so Script 02 does not care
+# which route ran.
+#
+#   "RunHarmony"      Work on the JOINED matrix throughout. Normalize -> HVG ->
+#                     Scale -> PCA once, then harmony::RunHarmony() on the PCA.
+#                     No split, no re-join. Cheaper; the recommended default.
+#
+#   "IntegrateLayers" Seurat v5 layered path: split by SampleID, process per
+#                     layer, IntegrateLayers(HarmonyIntegration), then JoinLayers.
+#                     Retained for reproducibility with older runs.
 # =============================================================================
 output_rds_layered <- file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_merged_post_qc.rds"))
 data <- readRDS(output_rds_layered)
@@ -1721,59 +1819,116 @@ data[["RNA"]]$data       <- NULL
 data[["RNA"]]$scale.data <- NULL
 gc()
 
-message("\n=== STEP 2.4: Normalization, Dimensionality Reduction, and Integration (Seurat v5 Method) ===")
+message(paste0("\n=== STEP 2.4: Normalization, Dimensionality Reduction, and ",
+               "Integration (", INTEGRATION_METHOD, ") ==="))
 
-# --- Split the object into layers by SampleID for integration ---------------
-data[["RNA"]] <- split(data[["RNA"]], f = data$SampleID)
-message("  -> RNA assay split into layers by SampleID.")
-gc()
+if (INTEGRATION_METHOD == "RunHarmony") {
+  # ---------------------------------------------------------------------------
+  # ROUTE A: harmony::RunHarmony() on the joined object. No layer splitting.
+  # The object reloaded above was already joined in Step 2.3, so there is
+  # nothing to split or re-join here.
+  # ---------------------------------------------------------------------------
+  suppressPackageStartupMessages(library(harmony))
 
-# BPCells on-disk storage for split layers (skipped if USE_BPCELLS = FALSE)
-if (USE_BPCELLS) {
-  for (i in Layers(data)) {
-    write_matrix_dir(
-      mat = data[["RNA"]][i],
-      dir = file.path(OUTPUT_DIR, paste0("tmpdir/", PROJECT_NAME, "_merged_qc_", i))
-    )
-    data[["RNA"]][i] <- open_matrix_dir(
-      dir = file.path(OUTPUT_DIR, paste0("tmpdir/", PROJECT_NAME, "_merged_qc_", i))
-    )
-    print(i)
-  }
+  data <- NormalizeData(data, verbose = TRUE)
+  data <- FindVariableFeatures(data, nfeatures = N_VARIABLE_FEATURES, verbose = TRUE)
+  data <- ScaleData(data, verbose = TRUE)
+  data <- RunPCA(data, npcs = N_PCS_TO_USE, verbose = TRUE)
+  message("  -> Normalization, scaling and PCA complete (joined matrix).")
   gc()
+
+  # --- Track A: unintegrated PCA (diagnostic) ---
+  message("  -> Generating unintegrated UMAP (Track A)...")
+  data <- FindNeighbors(data, dims = 1:N_PCS_TO_USE, reduction = "pca",
+                        graph.name = "pca_nn", verbose = FALSE, k.param = UMAP_N_NEIGHBORS)
+  data <- FindClusters(data, resolution = CLUSTER_RESOLUTION, algorithm = "leiden",
+                       graph.name = "pca_nn", cluster.name = "clusters_none", verbose = FALSE)
+  data <- RunUMAP(data, dims = 1:N_PCS_TO_USE, reduction = "pca",
+                  n.neighbors = UMAP_N_NEIGHBORS, min.dist = UMAP_MIN_DIST,
+                  reduction.name = "umap_none", verbose = FALSE, n.epochs = 500)
+  gc()
+
+  # --- Track B: Harmony correction of the PCA ---
+  # Current harmony (CRAN and GitHub) uses reduction.use / reduction.save /
+  # dims.use. The legacy 'reduction=' argument is gone.
+  message("  -> Running Harmony via harmony::RunHarmony (Track B)...")
+  data <- RunHarmony(data,
+                     group.by.vars  = "SampleID",
+                     reduction.use  = "pca",
+                     dims.use       = 1:N_PCS_TO_USE,
+                     reduction.save = "harmony",
+                     verbose        = TRUE)
+  gc()
+
+} else {
+  # ---------------------------------------------------------------------------
+  # ROUTE B: Seurat v5 layered workflow (split -> per-layer -> IntegrateLayers).
+  # ---------------------------------------------------------------------------
+  data[["RNA"]] <- split(data[["RNA"]], f = data$SampleID)
+  message("  -> RNA assay split into layers by SampleID.")
+  gc()
+
+  if (USE_BPCELLS) {
+    for (i in Layers(data)) {
+      write_matrix_dir(
+        mat = data[["RNA"]][i],
+        dir = file.path(OUTPUT_DIR, paste0("tmpdir/", PROJECT_NAME, "_merged_qc_", i))
+      )
+      data[["RNA"]][i] <- open_matrix_dir(
+        dir = file.path(OUTPUT_DIR, paste0("tmpdir/", PROJECT_NAME, "_merged_qc_", i))
+      )
+      print(i)
+    }
+    gc()
+  }
+
+  data <- NormalizeData(data, verbose = TRUE)
+  data <- FindVariableFeatures(data, nfeatures = N_VARIABLE_FEATURES, verbose = TRUE)
+  data <- ScaleData(data, verbose = TRUE)
+  data <- RunPCA(data, npcs = N_PCS_TO_USE, verbose = TRUE)
+  message("  -> Per-layer normalization, scaling, and PCA complete.")
+  gc()
+
+  # --- Track A: unintegrated PCA (diagnostic) ---
+  message("  -> Generating unintegrated UMAP (Track A)...")
+  data <- FindNeighbors(data, dims = 1:N_PCS_TO_USE, reduction = "pca",
+                        graph.name = "pca_nn", verbose = FALSE, k.param = UMAP_N_NEIGHBORS)
+  data <- FindClusters(data, resolution = CLUSTER_RESOLUTION, algorithm = "leiden",
+                       graph.name = "pca_nn", cluster.name = "clusters_none", verbose = FALSE)
+  data <- RunUMAP(data, dims = 1:N_PCS_TO_USE, reduction = "pca",
+                  n.neighbors = UMAP_N_NEIGHBORS, min.dist = UMAP_MIN_DIST,
+                  reduction.name = "umap_none", verbose = FALSE, n.epochs = 500)
+  gc()
+
+  # --- Track B: Harmony via IntegrateLayers ---
+  message("  -> Running Harmony integration via IntegrateLayers (Track B)...")
+  data <- IntegrateLayers(
+    object         = data,
+    method         = HarmonyIntegration,
+    orig.reduction = "pca",
+    new.reduction  = "harmony",
+    group.by       = "SampleID",
+    verbose        = TRUE
+  )
+  gc()
+
+  # --- Re-join layers for downstream analysis ---
+  message("  -> Re-joining layers into a single matrix for downstream analysis...")
+  data <- JoinLayers(data)
+  if (USE_BPCELLS) {
+    data[["RNA"]]$counts     <- as(LayerData(data, assay = "RNA", layer = "counts"),     "dgCMatrix")
+    gc()
+    data[["RNA"]]$data       <- as(LayerData(data, assay = "RNA", layer = "data"),       "dgCMatrix")
+    gc()
+    data[["RNA"]]$scale.data <- as(LayerData(data, assay = "RNA", layer = "scale.data"), "dgCMatrix")
+    gc()
+  }
+  message("  -> Layers successfully joined.")
 }
 
-# --- Normalize, find HVGs, scale, and run PCA on each layer -----------------
-data <- NormalizeData(data, verbose = TRUE)
-data <- FindVariableFeatures(data, nfeatures = N_VARIABLE_FEATURES, verbose = TRUE)
-data <- ScaleData(data, verbose = TRUE)
-data <- RunPCA(data, npcs = N_PCS_TO_USE, verbose = TRUE)
-message("  -> Per-layer normalization, scaling, and PCA complete.")
-gc()
-
-# --- Track A: Unintegrated PCA (diagnostic) ---------------------------------
-message("  -> Generating unintegrated UMAP (Track A)...")
-data <- FindNeighbors(data, dims = 1:N_PCS_TO_USE, reduction = "pca",
-                      graph.name = "pca_nn", verbose = FALSE, k.param = UMAP_N_NEIGHBORS)
-data <- FindClusters(data, resolution = CLUSTER_RESOLUTION, algorithm = "leiden",
-                     graph.name = "pca_nn", cluster.name = "clusters_none", verbose = FALSE)
-data <- RunUMAP(data, dims = 1:N_PCS_TO_USE, reduction = "pca",
-                n.neighbors = UMAP_N_NEIGHBORS, min.dist = UMAP_MIN_DIST,
-                reduction.name = "umap_none", verbose = FALSE, n.epochs = 500)
-gc()
-
-# --- Track B: Harmony integration -------------------------------------------
-message("  -> Running Harmony integration via IntegrateLayers (Track B)...")
-data <- IntegrateLayers(
-  object         = data,
-  method         = HarmonyIntegration,
-  orig.reduction = "pca",
-  new.reduction  = "harmony",
-  group.by       = "SampleID",
-  verbose        = TRUE
-)
-gc()
-
+# --- Track B graph, clustering and UMAP (shared by both routes) -------------
+# RunHarmony and IntegrateLayers both leave a 'harmony' reduction; the
+# neighbour graph, clusters and UMAP built on it are identical downstream.
 data <- FindNeighbors(data, dims = 1:N_PCS_TO_USE, reduction = "harmony",
                       graph.name = "harmony_nn", verbose = TRUE, k.param = UMAP_N_NEIGHBORS)
 data <- FindClusters(data, resolution = CLUSTER_RESOLUTION, algorithm = "leiden",
@@ -1782,20 +1937,6 @@ data <- RunUMAP(data, dims = 1:N_PCS_TO_USE, reduction = "harmony",
                 n.neighbors = UMAP_N_NEIGHBORS, min.dist = UMAP_MIN_DIST,
                 reduction.name = "umap_harmony", verbose = TRUE, n.epochs = 500)
 gc()
-
-# --- Re-join layers for downstream analysis ---------------------------------
-message("  -> Re-joining layers into a single matrix for downstream analysis...")
-data <- JoinLayers(data)
-if (USE_BPCELLS) {
-  # Convert BPCells on-disk matrices back to sparse dgCMatrix in memory
-  data[["RNA"]]$counts     <- as(LayerData(data, assay = "RNA", layer = "counts"),     "dgCMatrix")
-  gc()
-  data[["RNA"]]$data       <- as(LayerData(data, assay = "RNA", layer = "data"),       "dgCMatrix")
-  gc()
-  data[["RNA"]]$scale.data <- as(LayerData(data, assay = "RNA", layer = "scale.data"), "dgCMatrix")
-  gc()
-}
-message("  -> Layers successfully joined.")
 
 # --- Diagnostic UMAP plots --------------------------------------------------
 p1 <- DimPlot(data, reduction = "umap_none",    group.by = "SampleID") +
