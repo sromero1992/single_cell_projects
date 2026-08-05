@@ -57,6 +57,56 @@ Verify:
 packageVersion("CytoTRACE2")   # expect 1.1.0 or newer
 ```
 
+For Script 09's Ensembl → symbol step (only triggered if your object carries
+Ensembl rownames) also install the annotation packages — Script 00 does this
+automatically:
+
+```r
+BiocManager::install(c("AnnotationDbi", "org.Mm.eg.db", "org.Hs.eg.db"))
+```
+
+### Exact working call (validated) — how Script 09 invokes CytoTRACE 2
+
+These arguments were validated on the scDVEP benchmark (Nestorowa 2016 HSC data,
+1920 cells × 20475 genes) and are the ones Script 09 now uses. Each item marked
+below caused failed runs when changed, so do not "simplify" them:
+
+```r
+## Input MUST be a dense data.frame (genes × cells) with gene-SYMBOL rownames.
+## Sparse matrices cause SILENT failures; Ensembl rownames collapse every score.
+if (!is.data.frame(ct2_input))
+  ct2_input <- as.data.frame(as.matrix(ct2_input))
+
+ct2_result <- CytoTRACE2::cytotrace2(
+  ct2_input,
+  species               = "mouse",   # or "human"
+  is_seurat             = FALSE,      # pass the data.frame, NOT the Seurat object
+  parallelize_models    = FALSE,      # avoids parallel-backend issues
+  parallelize_smoothing = FALSE,      # REQUIRED: avoids socket-cluster hangs
+  seed                  = 42
+)
+```
+
+Pitfalls that repeatedly broke runs (from `NOTES_debugging.txt`):
+
+- **Do NOT pass `verbose = TRUE`** — it is not a valid argument and throws
+  `unused argument (verbose = TRUE)`.
+- **Keep `parallelize_smoothing = FALSE`.** `TRUE` reintroduces socket-cluster
+  hangs (required on Windows, safe and recommended on Linux).
+- **Dense data.frame only.** A sparse `dgCMatrix` produces no error but returns
+  meaningless scores.
+- **Gene symbols, not Ensembl IDs.** Script 09 maps Ensembl → symbol via
+  `org.Mm.eg.db` / `org.Hs.eg.db` before calling `cytotrace2()`, then
+  deduplicates symbols (keeping the highest mean-expression row).
+
+Return value is a `data.frame` (rows = cells): `CytoTRACE2_Score`,
+`CytoTRACE2_Potency`, `CytoTRACE2_Relative`, `preKNN_CytoTRACE2_Score`,
+`preKNN_CytoTRACE2_Potency`. The continuous score is clipped to `[0,1]`.
+
+A self-contained reference implementation ships as `run_cytotrace2.R` in the
+project root (adds AUCell cell-cycle scoring and optional CellRank trajectories);
+the full setup walkthrough is `cytotrace2_linux_setup.docx`.
+
 ### Dependencies it pulls in
 
 `data.table`, `doParallel`, `dplyr`, `ggplot2`, `HiClimR`, `magrittr`, `Matrix`, `plyr`, `Rfast`, `RSpectra`, `Seurat`, `SeuratObject`, `stringr`.
@@ -78,7 +128,10 @@ sudo apt install libnetcdf-dev libgsl-dev
 | Seurat v4 + Matrix 1.6 conflict | Documented incompatibility | Upgrade Seurat, or downgrade Matrix to 1.5-4.1 |
 | `Rfast` fails to compile | No C++17 toolchain | Install `gcc-c++`, retry |
 | Killed / OOM during prediction | Too many parallel workers | Lower `CT2_NCORES` to 1–2 in Script 09 |
-| `is.atomic(y) is not TRUE` | Input not a plain matrix/Seurat | Script 09 passes a Seurat object with `is_seurat = TRUE`; check your object isn't wrapped |
+| `is.atomic(y) is not TRUE` | Input not a plain dense data.frame | Script 09 passes a dense data.frame with `is_seurat = FALSE`; check the input isn't sparse |
+| Scores all identical / meaningless | Sparse input, or Ensembl rownames | Use a dense data.frame with gene-symbol rownames (Script 09 handles both) |
+| `unused argument (verbose = TRUE)` | `verbose` is not a valid arg | Remove it |
+| Hangs during smoothing | `parallelize_smoothing = TRUE` | Set it to `FALSE` |
 
 ### `'configure' exists but is not executable` (ncdf4 → HiClimR → CytoTRACE2)
 

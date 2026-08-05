@@ -96,8 +96,8 @@ set.seed(123)
 # =============================================================================
 
 # --- 1.1: Project Identity & Paths -------------------------------------------
-PROJECT_NAME <- "Nr4a1_s17_ack"
-ROOT_PATH    <- "/home/ssromerogon/local_drive/optimus_drive/selim_working_dir/2026_nr4a1_ack/r_process"
+PROJECT_NAME <- "Wu_Diet_project2"
+ROOT_PATH    <- "/home/ssromerogon/local_drive/optimus_drive/selim_working_dir/2026_wu_project2/r_process"
 OUTPUT_DIR   <- file.path(ROOT_PATH, "seurat_output")
 
 # Input object — the final annotated object from Script 06.
@@ -112,7 +112,7 @@ SCORES_DIR <- file.path(OUTPUT_DIR, "cell_scores")
 # --- 1.2: Metadata Columns ---------------------------------------------------
 CELLTYPE_COLUMN  <- "CellType"        # "sub_cell_types" for subtype objects
 SAMPLE_COLUMN    <- "SampleID"
-CONDITION_COLUMN <- "Genotype_sex"    # grouping variable for comparisons
+CONDITION_COLUMN <- "Diet"            # Wu diet study grouping variable
 
 # Order for plot axes. Put the control/reference level FIRST.
 # Set to NULL to use whatever order the factor already has.
@@ -397,7 +397,51 @@ if (RUN_CYTOTRACE2) {
                 "preKNN_CytoTRACE2_Score", "preKNN_CytoTRACE2_Potency")
   ct2_all  <- NULL
 
-  # ---- Helper: run CytoTRACE2 on one Seurat object ------------------------
+  # ---- Helper: build the exact input CytoTRACE 2 expects --------------------
+  # Validated on the scDVEP benchmark (see run_cytotrace2.R, NOTES_debugging.txt
+  # and cytotrace2_linux_setup.docx). Three things are enforced here because
+  # each one, when wrong, silently collapses every score:
+  #   1. DENSE data.frame (genes x cells). Sparse matrices cause SILENT failures.
+  #   2. Gene SYMBOL rownames. If the object carries Ensembl IDs they are mapped
+  #      to symbols (mouse: org.Mm.eg.db, human: org.Hs.eg.db); otherwise
+  #      CytoTRACE 2's internal gene panel matches almost nothing.
+  #   3. Deduplicated rownames (keep the highest mean-expression row per symbol).
+  prep_ct2_input <- function(obj) {
+    m <- GetAssayData(obj, assay = "RNA", layer = CT2_SLOT)   # RAW counts, never log
+
+    # Ensembl -> symbol, but only if the rownames actually look like Ensembl IDs.
+    if (length(rownames(m)) && all(grepl("^ENS", rownames(m)))) {
+      org_db <- if (CT2_SPECIES == "human") "org.Hs.eg.db" else "org.Mm.eg.db"
+      if (has_pkg(org_db) && has_pkg("AnnotationDbi")) {
+        message("    Mapping Ensembl IDs -> gene symbols via ", org_db, " ...")
+        sym <- suppressMessages(AnnotationDbi::mapIds(
+          getExportedValue(org_db, org_db),
+          keys = rownames(m), keytype = "ENSEMBL",
+          column = "SYMBOL", multiVals = "first"))
+        keep <- !is.na(sym) & sym != ""
+        m <- m[keep, , drop = FALSE]
+        rownames(m) <- sym[keep]
+      } else {
+        message("    [NOTE] Rownames look like Ensembl IDs but ", org_db,
+                " is not installed; CytoTRACE 2 may score poorly.")
+      }
+    }
+
+    # Deduplicate symbols: keep the highest mean-expression row for each.
+    if (any(duplicated(rownames(m)))) {
+      o <- order(Matrix::rowMeans(m), decreasing = TRUE)
+      m <- m[o, , drop = FALSE]
+      m <- m[!duplicated(rownames(m)), , drop = FALSE]
+    }
+
+    as.data.frame(as.matrix(m))   # DENSE data.frame - required
+  }
+
+  # ---- Helper: run CytoTRACE 2 on one Seurat object ------------------------
+  # Uses the VALIDATED argument set. Do NOT re-enable the parallelize_* flags or
+  # add verbose = TRUE: parallelize_smoothing = TRUE reintroduces socket-cluster
+  # hangs and 'verbose' is not a valid argument ("unused argument" error). Both
+  # were the source of repeated failed runs (see NOTES_debugging.txt section 1).
   run_ct2_block <- function(obj, label) {
     if (ncol(obj) < CT2_MIN_CELLS) {
       message(paste0("    [SKIP] ", label, ": only ", ncol(obj),
@@ -407,26 +451,31 @@ if (RUN_CYTOTRACE2) {
     message(paste0("    -> ", label, ": ", ncol(obj), " cells..."))
 
     res <- tryCatch({
-      # is_seurat = TRUE returns the Seurat object with predictions in metadata.
-      # slot_type must point at RAW counts - CytoTRACE 2 must not see log data.
+      # is_seurat = FALSE: feed a plain DENSE data.frame, not a Seurat object.
+      ct2_input <- prep_ct2_input(obj)
       out <- cytotrace2(
-        obj,
-        is_seurat              = TRUE,
-        slot_type              = CT2_SLOT,
-        species                = CT2_SPECIES,
-        batch_size             = CT2_BATCH_SIZE,
-        smooth_batch_size      = CT2_SMOOTH_BATCH_SIZE,
-        parallelize_models     = TRUE,
-        parallelize_smoothing  = TRUE,
-        ncores                 = CT2_NCORES,
-        seed                   = 14
+        ct2_input,
+        is_seurat             = FALSE,
+        species               = CT2_SPECIES,
+        batch_size            = CT2_BATCH_SIZE,
+        smooth_batch_size     = CT2_SMOOTH_BATCH_SIZE,
+        parallelize_models    = FALSE,   # validated: avoids parallel backend issues
+        parallelize_smoothing = FALSE,   # validated: REQUIRED, avoids socket hangs
+        ncores                = CT2_NCORES,
+        seed                  = 14
       )
-      md <- out@meta.data
-      keep <- intersect(ct2_cols, colnames(md))
+      # is_seurat = FALSE returns a data.frame: rows = cells, cols = score types.
+      keep <- intersect(ct2_cols, colnames(out))
       if (length(keep) == 0) {
         stop("cytotrace2() returned no recognised prediction columns.")
       }
-      md[, keep, drop = FALSE]
+      res_df <- out[, keep, drop = FALSE]
+      # Clip the continuous scores to [0,1] (validated guard against tiny spill).
+      for (sc_col in intersect(c("CytoTRACE2_Score", "preKNN_CytoTRACE2_Score"),
+                               colnames(res_df))) {
+        res_df[[sc_col]] <- pmin(pmax(res_df[[sc_col]], 0), 1)
+      }
+      res_df
     }, error = function(e) {
       message(paste0("    [WARNING] CytoTRACE 2 failed on ", label, ": ", e$message))
       NULL

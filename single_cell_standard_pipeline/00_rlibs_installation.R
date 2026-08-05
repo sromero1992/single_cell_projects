@@ -32,7 +32,11 @@ cran_pkgs <- c(
 bioc_pkgs <- c(
   "BiocManager", "ComplexHeatmap", "Biobase", "BiocNeighbors", "BiocGenerics",
   "celda", "dittoSeq", "AUCell", "Gviz", "GenomicRanges", "rtracklayer",
-  "BiocSingular", "SingleCellExperiment", "SummarizedExperiment", "scDblFinder"
+  "BiocSingular", "SingleCellExperiment", "SummarizedExperiment", "scDblFinder",
+  # Symbol <-> Ensembl mapping for the PathVisio/WikiPathways exports in Script 07
+  # and for the Ensembl->symbol step in Script 09's CytoTRACE 2 preprocessing.
+  # org.Hs.eg.db is needed only when CT2_SPECIES = "human"; cheap to keep here.
+  "AnnotationDbi", "org.Mm.eg.db", "org.Hs.eg.db"
 )
 
 github_pkgs <- c(
