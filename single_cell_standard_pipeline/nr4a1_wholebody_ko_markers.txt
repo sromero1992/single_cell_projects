@@ -1,0 +1,85 @@
+------- Global markers ---------
+Plasma B cells	Ighg1, Mzb1
+B cells	Ms4a1, Cd19
+T cells	Cd3e, Cd4, Cd8a, Trbc2
+cDCs	Clec9a, Xcr1
+Macrophages	Cd163, Csf1r, Cd68, Mrc1, Aif1
+Fibroblasts	Col1a1, Col3a1, Col6a2
+ENs	Vip, Tubb3, Vat1l
+EGCs	Sox10, Plp1
+LECs	Lyve1, Flt4, Pecam1
+VECs	Plvap, Flt1
+Colonocytes	Epcam, Muc2, Krt20
+SMCs	Myh11, Tagln, Hhip
+vSMCs	Myh11, Tagln, Des
+Adipocytes	Plin4, Fabp4
+
+Dotplot: Ighg1, Mzb1, Ms4a1, Cd19, Cd3e, Cd4, Cd8a, Trbc2, Clec9a, Xcr1, Cd163, Csf1r, Cd68, Mrc1, Aif1, Col1a1, Col3a1, Col6a2, Vip, Tubb3, Vat1l, Sox10, Plp1, Lyve1, Flt4, Pecam1, Plvap, Flt1, Epcam, Muc2, Krt20, Myh11, Tagln, Hhip, Des, Plin4, Fabp4
+
+-----------------------------------------------------------------------------------
+Colonocytes
+# Separated first these two with panglaoDB and then confirm these
+Goblet cells	Muc2, Spink4, Agr2, Retnlb, Fam3d
+Enterocytes	Ceacam1, Krt19, Krt20, Muc13, Lypd8
+Enteroendocrine cells	Chga, Chgb, Tph1
+Tuft cells	Dclk1, Trpm5, Avil
+# Then enterocytes sub ann
+DCS	Reg4, Ccl6, Dll1
+Abs. colonocytes	Alpi, Ces2c, Slc26a2
+TA cells	Mki67, Top2a, Pcna
+Stem cells	Lgr5, Ascl2, Slc12a2
+
+Dotplot: Alpi, Ces2c, Slc26a2, Mki67, Top2a, Pcna, Lgr5, Ascl2, Slc12a2
+
+
+-----------------------------------------------------------------------------------
+T cells sub annotation (This contains NK and Mast cells)
+
+T cells	Cd3e, Cd3d, Cd3g
+ILCs	Gata3
+NK cells 	Ncr1, Klrb1b
+Mast cells	Ms4a2, Cpa3
+
+Dotplot: Cd3e, Cd3d, Cd3g, Gata3, Ncr1, Klrb1b, Ms4a2, Cpa3
+
+Sub-setting T cells
+
+CD4+ T cells	Cd4
+CD8+ T cells	Cd8a, Cd8b1, Sell
+Cyc. T cells	Mki67
+γδ T cells	Trdc, Trgc1
+
+Dotplot: Cd3e, Cd3d, Cd3g, Cd4, Cd8a, Cd8b1, Mki67, Trdc, Trgc1, Gata3
+
+
+-----------------------------------------------------------------------------------
+Macrophages sub annotation
+
+Neutrophils	Cxcr2, Csf3r, S100a8
+cDCs	Cd11c, Clec9a, Xcr1, Itgae, Flt3
+M1 macrophages	Il1b, Ccr7, Cd86, Cd80, Ccl5, Il6, Nos2
+Monocytes	Cd14, Ccr2, Cd33, Sell, Fcgr3
+M2 macrophages	Mrc1, C1qa, C1qb, C1qc, Cd163
+M0 macrophages	Cd68, Csf1r 
+
+Dotplot: Cd11c, Clec9a, Xcr1, Itgae, Flt3, Il1b, Ccr7, Cd86, Cd80, Ccl5, Il6, Nos2, Cd14, Ccr2, Cd33, Sell, Fcgr3, Mrc1, C1qa, C1qb, C1qc, Cd163, Cd68, Csf1r 
+
+-----------------------------------------------------------------------------------
+Fibroblasts potential sub-annotation
+
+GFs	Col1a1, Fn1
+CBFs	Col1a1, Fn1, Wnt2, Wnt2b, Sfrp1	
+CTFs	Col1a1, Fn1, Wnt5a, Wnt5b, Bmp2, Cxcl14
+MFs	Col1a1, Fn1, Acta2
+IAFs	Col1a1, Fn1, Ccl19
+
+Dotplot: Col1a1, Fn1, Wnt2, Wnt2b, Sfrp1, Wnt5a, Wnt5b, Bmp2, Cxcl14, Acta2, Cxcl12, Ccl19
+
+
+
+-----------------------------------------------------------------------------------
+GRN genes
+
+Canonical Wnt Signaling Pathway (GO:0060070)
+NCOA3,CSNK1A1,RYK,JUP,WNT5A,CAV1,WNT5B,AXIN2,WNT9A,WNT9B,WNT16,SFRP4,SFRP5,BCL9,SFRP2,CPE,CD24,LEF1,DDX3X,GSK3B,USP34,LRRK2,LRP6,WNT8B,LRP5,FZD10,WNT8A,CELSR2,SFRP1,WNT6,FRAT1,FRAT2,FRZB,WNT11,TMEM67,DVL1,DVL2,DVL3,GPC4,MYOC,WNT1,WNT2,WNT3,WNT4,FZD2,SIAH1,FZD1,FZD4,TCF7L2,WNT10B,TCF7L1,WNT10A,FZD6,WNT3A,FZD5,FZD8,FZD7,SIAH2,WNT7A,FZD9,WNT7B,CSNK1E,CCDC88C,FERMT2,NR4A2,TCF7,PRKD2,SNAI1,STRN,RAB5A,NXN,PKD1,WNT2B,ARL6,RARG,CTNNB1,DIXDC1,KLHL12,GATA3,PORCN,PLCG2,VPS35,BCL9L, NR4A1
+

@@ -48,8 +48,8 @@ set.seed(123)
 # =============================================================================
 # --- PART 1: CONFIGURATION ---------------------------------------------------
 # =============================================================================
-PROJECT_NAME <- "Nr4a1_s17_ack"
-ROOT_PATH    <- "/home/ssromerogon/local_drive/optimus_drive/selim_working_dir/2026_nr4a1_ack/r_process"
+PROJECT_NAME <- "Wu_Diet_project2"
+ROOT_PATH    <- "/home/ssromerogon/local_drive/optimus_drive/selim_working_dir/2026_wu_project2/r_process"
 OUTPUT_DIR   <- file.path(ROOT_PATH, "seurat_output")
 
 # Input

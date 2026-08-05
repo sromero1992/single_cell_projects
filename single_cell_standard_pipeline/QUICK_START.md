@@ -71,9 +71,11 @@ DOUBLET_METHOD <- "DoubletFinder"   # "DoubletFinder" | "scDblFinder" | "both"
 | Parameter | Default | Notes |
 |---|---|---|
 | `DOUBLET_RATE` | `"auto"` | **Computed per sample** from that sample's recovered cell count (~0.8% per 1,000 cells). Set a number to override. Under DoubletFinder this is a **hard quota**, not a ceiling. |
-| `DOUBLET_RATE_AUTO_MAX` | `0.20` | Cap on the automatic estimate; also keeps it below the rollback threshold. |
+| `EXPECTED_CELLS_PER_SAMPLE` | `NULL` | `NULL` = use each sample's own count (correct for multiplexed Flex). A number states your loading target for every lane. |
+| `REMOVE_DOUBLETS` | `FALSE` | `FALSE` = **label only, delete nothing** — filter yourself later. `TRUE` = delete per sample before the merge. |
+| `DOUBLET_RATE_CEILING` | `0.20` | Cap on the automatic estimate; must stay below the rollback threshold. |
 | `DOUBLET_ROLLBACK_THRESHOLD` | `0.25` | Must stay **above** `DOUBLET_RATE` or rollback fires on every sample. Validated at startup. |
-| `DF_PK_RANGE_MIN` / `MAX` | `0.01` / `0.15` | Plausible pK window. If the BCmetric global peak lands outside it, the best in-window peak is used instead. |
+| `DF_PK_RANGE_MIN` / `MAX` | `0.01` / `0.25` | Plausible pK window. If the BCmetric global peak lands outside it, the best in-window peak is used instead. |
 | `DF_PK_FALLBACK` | `0.09` | Used only if no peak exists in the window at all. |
 | `DF_HOMOTYPIC_ADJUST` | `TRUE` | Shrinks `nExp` by the estimated same-cell-type (undetectable) doublet fraction. Leave on. |
 | `DOUBLET_CONSENSUS_RULE` | `"intersect"` | `"both"` mode only. `intersect` = conservative, `union` = aggressive. |
@@ -87,6 +89,72 @@ Everything lands in `seurat_output/doublet_diagnostics/` plus the master log `se
 3. **`pK_Used` vs `pK_Global_Peak`** — if they differ, constraint logic intervened. Expected occasionally; suspicious if it happens on every sample.
 4. **`Target_Rate_Pct` and `Rate_Source`** — the doublet rate actually applied per sample. `AUTO_CAPPED` means the lane looked overloaded and the estimate was clamped; worth checking.
 5. **`<sample>_DF_pk_plot.png`** — the selected pK should sit on a real peak inside the shaded band, not on a noisy shoulder.
+
+### The two scores are never combined
+
+`DoubletFinder` and `scDblFinder` produce numbers that are **not on the same scale**, so the pipeline never averages them:
+
+| Column | Range | Meaning |
+|---|---|---|
+| `DF_score` | ~0 to ~0.5+, varies with pK and pN | pANN — proportion of artificial nearest neighbours |
+| `scDblFinder_score` | 0 to 1, calibrated | classifier probability |
+
+A pANN of 0.35 and an scDblFinder score of 0.35 mean different things, so `(a+b)/2` would be arithmetic on incompatible units. Consensus is therefore computed on the **binary calls** (`DF_class`, `scDblFinder_class`), not the scores, and each score gets its own plot.
+
+If you want one continuous value, build it from within-sample percentile ranks rather than the raw scores:
+
+```r
+rank01 <- function(x) rank(x, na.last = "keep") / sum(!is.na(x))
+data$doublet_score_combined <- rowMeans(cbind(rank01(data$DF_score),
+                                              rank01(data$scDblFinder_score)),
+                                        na.rm = TRUE)
+```
+
+### Doublet diagnostic plots
+
+All in `seurat_output/doublet_diagnostics/`, one set per sample:
+
+| File | When | Shows |
+|---|---|---|
+| `_DF_pk_plot.png` | DoubletFinder ran | BCmetric curve, chosen pK, plausible band — **a parameter decision you can audit** |
+| `_scDbl_score_distribution.png` | scDblFinder ran | Score histogram + threshold — **a result**, not a decision (scDblFinder self-tunes, so there is no knob to check) |
+| `_doublet_umap_DoubletFinder.png` | DoubletFinder ran | pANN score on UMAP |
+| `_doublet_umap_scDblFinder.png` | scDblFinder ran | probability on UMAP |
+| `_doublet_umap_call.png` | always | the final `Doublet_Status` call |
+| `_doublet_concordance.png` | `"both"` only | 2×2 confusion matrix, agreement %, Cohen's kappa |
+| `_doublet_umap_method_classification.png` | `"both"` only | **read this one first** — see below |
+
+**The method-classification map is the most informative plot in `"both"` mode.** It colours every cell as *Both: singlet* / *Both: doublet* / *DoubletFinder only* / *scDblFinder only*.
+
+- Disagreements **scattered randomly** → the callers are just noisy at the margin. Either is fine; `intersect` is safe.
+- Disagreements **concentrated on one cluster** → one method is systematically wrong about a real population. Identify that cluster before trusting either caller — the agreement percentage and kappa will never reveal this, because a single badly-handled cluster can still leave overall agreement at 95%.
+
+### Multiplexed runs (10x Flex, CellPlex, hashing)
+
+If several samples shared one GEM well, **leave `EXPECTED_CELLS_PER_SAMPLE <- NULL`** and never enter the GEM-well total.
+
+Cell Ranger demultiplexes by probe barcode and already removes multiplets whose two cells came from *different* samples. Only *undetected* multiplets — both cells sharing a barcode — reach the per-sample H5, a fraction `1/k` of the total for `k` barcodes. Because the rate model is linear, dividing the cells by `k` and dividing the rate by `k` give the same answer:
+
+| Basis | Calculation | Rate |
+|---|---|---|
+| Whole 4-plex GEM well (80,000 cells) | `0.008 × 80` = 64%, ÷ 4 barcodes | **16%** |
+| One sample's own count (20,000 cells) | `0.008 × 20` | **16%** |
+
+So each sample's measured count is exactly right here, not an approximation.
+
+**Sanity-check what the pipeline will read** — these should be per-barcode counts, not GEM-well totals:
+
+```r
+library(hdf5r)
+for (f in list.files(H5_DIR, pattern = "sample_filtered_feature_bc_matrix.h5$",
+                     recursive = TRUE, full.names = TRUE)) {
+  h <- H5File$new(f, "r")
+  cat(sprintf("%-20s %6d cells\n", basename(dirname(f)), h[["matrix/barcodes"]]$dims))
+  h$close_all()
+}
+```
+
+> ⚠️ 10x caps Flex at **20,000 cells per probe barcode** and recommends 4,000 as a starting point, warning that the undetected multiplet rate climbs toward the cap. At ~20k/barcode a ~16% rate is real rather than an artifact — but the doublet step is then removing a lot of cells, so read `Action` and `Target_Rate_Pct` in the log with care.
 
 > **Re-running doublets with a different method:** delete the Checkpoint 2 files (`*_decontx_dblt_processed.rds`) inside `seurat_output/scevan_per_sample_results/<SampleID>/`. Checkpoint 1 is kept, so SCEVAN will not re-run.
 
@@ -209,7 +277,7 @@ Every column is attached to every cell from that sample. Auto-created: `group` =
 | `parent_cell_type` | Broad type this sub-type belongs to (same as `cell_type` for broad markers) |
 | `tier` | `broad` or `sub` |
 | `markers` | Pipe-separated symbols: `Cd3e\|Cd3d\|Cd3g` |
-| `sub_resolution` | Leiden resolution for sub-clustering |
+| `subcluster_resolution` | Leiden resolution for sub-clustering |
 
 ---
 

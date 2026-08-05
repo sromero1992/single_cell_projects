@@ -424,23 +424,26 @@ ROUND_DECONTX_COUNTS   <- TRUE # Round decontX corrected counts to nearest integ
                                  # Set TRUE if downstream tools require integer count matrices.
                                  # See decontX vignette for details.
 
-# INTEGRATION_METHOD: how Harmony batch correction is run. Same maths either
-# way (Harmony grouping on SampleID, producing a 'harmony' reduction), but the
-# object handling differs sharply in cost:
+# INTEGRATION_METHOD: how Harmony batch correction is run. The two routes
+# differ in object handling, and that is the whole point of the choice:
 #
-#   "RunHarmony"      (DEFAULT) The classic harmony::RunHarmony() call on the
-#                     JOINED object. Normalization, HVGs, scaling and PCA run
-#                     once on the whole matrix, then RunHarmony() corrects the
-#                     PCA. No layer splitting at any point. Cheaper in both time
-#                     and memory, and makes USE_BPCELLS largely unnecessary.
+#   "RunHarmony"      (DEFAULT) NO layer splitting at all. Everything -
+#                     normalize, HVGs, scaling, PCA, UMAP - runs once on the
+#                     JOINED matrix, then harmony::RunHarmony() corrects the PCA
+#                     using the SampleID column directly. Harmony only needs one
+#                     embedding plus a grouping column, so per-sample layers are
+#                     never created. Avoids the split/join churn entirely.
 #                     This is the original wu_project1 behaviour.
 #
-#   "IntegrateLayers" The Seurat v5 layered workflow: split the RNA assay into
-#                     one layer per sample, process per layer, then
-#                     IntegrateLayers(HarmonyIntegration), then re-join. This is
-#                     the split/join cycle that is expensive on large cohorts
-#                     and the reason BPCells was added. Kept for reproducibility
-#                     with runs made under that workflow.
+#   "IntegrateLayers" Seurat v5 layered workflow: split by SampleID, process
+#                     per layer, IntegrateLayers(HarmonyIntegration), then
+#                     re-join. The split is intrinsic to this API. Kept for
+#                     reproducibility with runs made under it; this is the
+#                     PhD-student approach.
+#
+# TRADE-OFF: RunHarmony selects HVGs GLOBALLY (one joined matrix);
+# IntegrateLayers selects them PER SAMPLE and reconciles. Both are standard and
+# valid; results are not bit-identical. RunHarmony is cheaper and is the default.
 #
 # NOTE on the harmony package: both the CRAN release ("harmony") and the GitHub
 # dev version expose RunHarmony() with args reduction.use / reduction.save /
@@ -1799,22 +1802,27 @@ saveRDS(data, output_rds)
 # =============================================================================
 # --- STEP 2.4: Normalization, Dimensionality Reduction & Integration --------
 # =============================================================================
-# Two interchangeable routes, chosen by INTEGRATION_METHOD (Section 1.6). Both
-# end with the SAME reductions - "pca", "umap_none"/clusters_none (Track A,
-# unintegrated diagnostic) and "harmony", "umap_harmony"/clusters_harmony
-# (Track B, batch-corrected) - and a joined object, so Script 02 does not care
-# which route ran.
+# Chosen by INTEGRATION_METHOD (Section 1.6). Both routes end with the SAME
+# reductions - "pca", "umap_none"/clusters_none (Track A, unintegrated
+# diagnostic), "harmony", "umap_harmony"/clusters_harmony (Track B, corrected)
+# - and a single joined object, so Script 02 does not care which ran.
 #
-#   "RunHarmony"      Work on the JOINED matrix throughout. Normalize -> HVG ->
-#                     Scale -> PCA once, then harmony::RunHarmony() on the PCA.
-#                     No split, no re-join. Cheaper; the recommended default.
+#   "RunHarmony"      (DEFAULT) NO SPLITTING. Work on the joined matrix the
+#                     whole way: Normalize -> HVG -> Scale -> PCA -> UMAP once,
+#                     then harmony::RunHarmony(group.by.vars = "SampleID")
+#                     corrects the PCA using the SampleID column directly.
+#                     Harmony takes one embedding plus a grouping variable, so
+#                     no per-sample layers are ever created. This is the whole
+#                     reason to prefer the direct call: it avoids the
+#                     split/join churn entirely.
 #
-#   "IntegrateLayers" Seurat v5 layered path: split by SampleID, process per
-#                     layer, IntegrateLayers(HarmonyIntegration), then JoinLayers.
-#                     Retained for reproducibility with older runs.
+#   "IntegrateLayers" Seurat v5 layered path, which REQUIRES per-sample layers:
+#                     split by SampleID -> per-layer Normalize/HVG/Scale/PCA ->
+#                     IntegrateLayers(HarmonyIntegration) -> JoinLayers. Kept
+#                     for reproducibility with runs made under it.
 # =============================================================================
 output_rds_layered <- file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_merged_post_qc.rds"))
-data <- readRDS(output_rds_layered)
+data <- readRDS(output_rds_layered)   # already joined in Step 2.3
 data[["RNA"]]$data       <- NULL
 data[["RNA"]]$scale.data <- NULL
 gc()
@@ -1824,9 +1832,7 @@ message(paste0("\n=== STEP 2.4: Normalization, Dimensionality Reduction, and ",
 
 if (INTEGRATION_METHOD == "RunHarmony") {
   # ---------------------------------------------------------------------------
-  # ROUTE A: harmony::RunHarmony() on the joined object. No layer splitting.
-  # The object reloaded above was already joined in Step 2.3, so there is
-  # nothing to split or re-join here.
+  # ROUTE A (default): joined matrix throughout, no split, no re-join.
   # ---------------------------------------------------------------------------
   suppressPackageStartupMessages(library(harmony))
 
@@ -1834,7 +1840,7 @@ if (INTEGRATION_METHOD == "RunHarmony") {
   data <- FindVariableFeatures(data, nfeatures = N_VARIABLE_FEATURES, verbose = TRUE)
   data <- ScaleData(data, verbose = TRUE)
   data <- RunPCA(data, npcs = N_PCS_TO_USE, verbose = TRUE)
-  message("  -> Normalization, scaling and PCA complete (joined matrix).")
+  message("  -> Normalization, HVGs, scaling and PCA complete (joined matrix, no split).")
   gc()
 
   # --- Track A: unintegrated PCA (diagnostic) ---
@@ -1848,10 +1854,10 @@ if (INTEGRATION_METHOD == "RunHarmony") {
                   reduction.name = "umap_none", verbose = FALSE, n.epochs = 500)
   gc()
 
-  # --- Track B: Harmony correction of the PCA ---
+  # --- Track B: Harmony correction of the PCA, batch = SampleID column ---
   # Current harmony (CRAN and GitHub) uses reduction.use / reduction.save /
-  # dims.use. The legacy 'reduction=' argument is gone.
-  message("  -> Running Harmony via harmony::RunHarmony (Track B)...")
+  # dims.use. The legacy 'reduction=' argument no longer works.
+  message("  -> Running Harmony via harmony::RunHarmony on the SampleID column (Track B)...")
   data <- RunHarmony(data,
                      group.by.vars  = "SampleID",
                      reduction.use  = "pca",
@@ -1859,10 +1865,11 @@ if (INTEGRATION_METHOD == "RunHarmony") {
                      reduction.save = "harmony",
                      verbose        = TRUE)
   gc()
+  # No join needed - the object was never split.
 
 } else {
   # ---------------------------------------------------------------------------
-  # ROUTE B: Seurat v5 layered workflow (split -> per-layer -> IntegrateLayers).
+  # ROUTE B: Seurat v5 layered workflow. Split is intrinsic to IntegrateLayers.
   # ---------------------------------------------------------------------------
   data[["RNA"]] <- split(data[["RNA"]], f = data$SampleID)
   message("  -> RNA assay split into layers by SampleID.")
@@ -1886,7 +1893,7 @@ if (INTEGRATION_METHOD == "RunHarmony") {
   data <- FindVariableFeatures(data, nfeatures = N_VARIABLE_FEATURES, verbose = TRUE)
   data <- ScaleData(data, verbose = TRUE)
   data <- RunPCA(data, npcs = N_PCS_TO_USE, verbose = TRUE)
-  message("  -> Per-layer normalization, scaling, and PCA complete.")
+  message("  -> Per-layer normalization, HVGs, scaling and PCA complete.")
   gc()
 
   # --- Track A: unintegrated PCA (diagnostic) ---
@@ -1912,7 +1919,7 @@ if (INTEGRATION_METHOD == "RunHarmony") {
   )
   gc()
 
-  # --- Re-join layers for downstream analysis ---
+  # --- Re-join layers (this route split, so it must join) ---
   message("  -> Re-joining layers into a single matrix for downstream analysis...")
   data <- JoinLayers(data)
   if (USE_BPCELLS) {
@@ -1927,8 +1934,6 @@ if (INTEGRATION_METHOD == "RunHarmony") {
 }
 
 # --- Track B graph, clustering and UMAP (shared by both routes) -------------
-# RunHarmony and IntegrateLayers both leave a 'harmony' reduction; the
-# neighbour graph, clusters and UMAP built on it are identical downstream.
 data <- FindNeighbors(data, dims = 1:N_PCS_TO_USE, reduction = "harmony",
                       graph.name = "harmony_nn", verbose = TRUE, k.param = UMAP_N_NEIGHBORS)
 data <- FindClusters(data, resolution = CLUSTER_RESOLUTION, algorithm = "leiden",

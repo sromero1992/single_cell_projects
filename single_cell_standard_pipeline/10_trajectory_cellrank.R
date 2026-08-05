@@ -82,8 +82,8 @@ PYTHON_ENV <- "scanpy_env_311"
 PYTHON_BIN <- NULL
 
 # --- 1.2: Project Identity & Paths -------------------------------------------
-PROJECT_NAME <- "Nr4a1_s17_ack"
-ROOT_PATH    <- "/home/ssromerogon/local_drive/optimus_drive/selim_working_dir/2026_nr4a1_ack/r_process"
+PROJECT_NAME <- "Wu_Diet_project2"
+ROOT_PATH    <- "/home/ssromerogon/local_drive/optimus_drive/selim_working_dir/2026_wu_project2/r_process"
 OUTPUT_DIR   <- file.path(ROOT_PATH, "seurat_output")
 
 RDS_PATH <- file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_with_cell_scores.rds"))
@@ -92,7 +92,7 @@ TRAJ_DIR <- file.path(OUTPUT_DIR, "trajectory")
 # --- 1.3: Metadata columns ---------------------------------------------------
 CELLTYPE_COLUMN  <- "CellType"
 SAMPLE_COLUMN    <- "SampleID"
-CONDITION_COLUMN <- "Genotype_sex"
+CONDITION_COLUMN <- "Diet"
 
 # --- 1.4: Subsetting ---------------------------------------------------------
 # Trajectory inference is only meaningful within a connected differentiation

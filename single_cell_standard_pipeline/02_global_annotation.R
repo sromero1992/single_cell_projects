@@ -65,9 +65,9 @@ set.seed(123)
 
 # --- 1.1: Project Identity ---
 # These MUST match the values set in Script 01.
-PROJECT_NAME <- "Nr4a1_s17_ack"
+PROJECT_NAME <- "Wu_Diet_project2"
 #ROOT_PATH   <- "Z:/selim_working_dir/2026_nr4a1_ack/r_process"  # Windows
-ROOT_PATH <- "/home/ssromerogon/2026_nr4a1_ack/r_process"
+ROOT_PATH <- "/home/ssromerogon/local_drive/optimus_drive/selim_working_dir/2026_wu_project2/r_process"
 
 # --- 1.2: Path Configuration (Auto-generated; do not edit) ---
 OUTPUT_DIR       <- file.path(ROOT_PATH, "seurat_output")
@@ -762,12 +762,30 @@ plot_expression_custom <- function(seurat_obj,
 }
 
   
+# =============================================================================
+# --- PROBE / EXON KO-SUPPRESSION VERIFICATION PLOTS (conditional) ------------
+# =============================================================================
+# These plots verify knockdown/knockout at the probe level and are meaningful
+# ONLY when the run included a probe-capture assay (ADD_PROBE_DATA = TRUE in
+# Script 01). They reference Nr4a1 exon probe columns / the 'Nr4a1-cust'
+# feature, which do not exist for studies without probes (e.g. the Wu diet
+# study). Detect the probe data and skip the whole block cleanly if absent.
+PROBE_DATA_PRESENT <- any(grepl("probe_count", colnames(data@meta.data))) ||
+  ("Nr4a1-cust" %in% rownames(data)) || ("Nr4a1" %in% rownames(data))
+
+if (!PROBE_DATA_PRESENT) {
+  message("  [SKIP] No probe/exon data detected in this object - skipping the ",
+          "KO-suppression verification plots (Nr4a1 exon/probe panels).")
+}
+
+if (PROBE_DATA_PRESENT) {
+
 # Correct call for Nr4a1
 # Recommended call for Nr4a1 using your new function
 plot_results <- plot_expression_custom(
   seurat_obj    = data,
   gene          = "Nr4a1",
-  plot_type     = "bar", 
+  plot_type     = "bar",
   group_by      = "broad_cell_types",
   condition_col = "Genotype_sex",
   hide_x_text   = TRUE,      # Removes the crowded labels from the bottom of every plot
@@ -989,6 +1007,8 @@ save_path_mean <- file.path(OUTPUT_DIR, "Nr4a1_Exon_Mean_Barplots_Colonocytes.pn
 ggsave(filename = save_path_mean, plot = p_mean_bar, width = 10, height = 12, dpi = 300, bg = "white")
 
 p_mean_bar
+
+}  # end if (PROBE_DATA_PRESENT) - probe/exon KO-suppression verification plots
 
 message("--- Compositional analysis complete ---")
 

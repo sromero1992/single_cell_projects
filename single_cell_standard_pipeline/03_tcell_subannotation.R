@@ -55,10 +55,10 @@ set.seed(123)
 # =============================================================================
 
 # --- 1.1: Project Paths (must match Scripts 01 and 02) -----------------------
-PROJECT_NAME <- "Nr4a1_s17_ack"
+PROJECT_NAME <- "Wu_Diet_project2"
 #ROOT_PATH <- "/home/ssromerogon/2026_nr4a1_ack/r_process"
 #ROOT_PATH   <- "Z:/selim_working_dir/2026_nr4a1_ack/r_process"  # Windows
-ROOT_PATH <- "/home/ssromerogon/local_drive/optimus_drive/selim_working_dir/2026_nr4a1_ack/r_process"
+ROOT_PATH <- "/home/ssromerogon/local_drive/optimus_drive/selim_working_dir/2026_wu_project2/r_process"
 
 OUTPUT_DIR       <- file.path(ROOT_PATH, "seurat_output")
 TCELL_DIR        <- file.path(OUTPUT_DIR, "tcell_subannotation")   # <-- all T cell plots go here

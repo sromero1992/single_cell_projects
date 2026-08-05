@@ -46,6 +46,52 @@ library(writexl)
 library(ggplot2)
 library(patchwork)
 set.seed(123)
+
+# =============================================================================
+# --- HELPERS: Ensembl mapping + sheet finalization ---------------------------
+# =============================================================================
+# symbol_to_ensembl(): mouse SYMBOL -> ENSMUSG, trying the official symbol first
+# then ALIAS for anything unmapped. Degrades to NA (never errors) if the
+# annotation packages are absent, so a missing org.Mm.eg.db cannot stop the run.
+# Adapted from add_ensembl_for_pathvisio.R.
+.ensembl_ok <- ADD_ENSEMBL &&
+  requireNamespace("AnnotationDbi", quietly = TRUE) &&
+  requireNamespace("org.Mm.eg.db", quietly = TRUE)
+if (ADD_ENSEMBL && !.ensembl_ok) {
+  message("  [NOTE] ADD_ENSEMBL=TRUE but org.Mm.eg.db/AnnotationDbi not installed; ",
+          "Ensembl column will be skipped. Install via 00_rlibs_installation.R.")
+}
+symbol_to_ensembl <- function(symbols) {
+  if (!.ensembl_ok) return(rep(NA_character_, length(symbols)))
+  symbols <- as.character(symbols)
+  ens <- AnnotationDbi::mapIds(org.Mm.eg.db::org.Mm.eg.db, keys = symbols,
+                               keytype = "SYMBOL", column = "ENSEMBL",
+                               multiVals = "first")
+  miss <- is.na(ens)
+  if (any(miss)) {
+    alias <- tryCatch(
+      AnnotationDbi::mapIds(org.Mm.eg.db::org.Mm.eg.db, keys = symbols[miss],
+                            keytype = "ALIAS", column = "ENSEMBL",
+                            multiVals = "first"),
+      error = function(e) rep(NA_character_, sum(miss)))
+    ens[miss] <- alias
+  }
+  unname(ens)
+}
+
+# finalize_sheet(): guarantee 'gene' is the FIRST column and 'Ensembl' the
+# SECOND in every exported table. Applied to every DE/DV/overlap sheet just
+# before writing, so all downstream files are PathVisio-ready with one call.
+finalize_sheet <- function(df) {
+  df <- as.data.frame(df)
+  if (!"gene" %in% colnames(df)) return(df)          # e.g. placeholder sheets
+  if (!"Ensembl" %in% colnames(df)) {
+    df$Ensembl <- symbol_to_ensembl(df$gene)
+  }
+  front <- c("gene", "Ensembl")
+  df[, c(front, setdiff(colnames(df), front)), drop = FALSE]
+}
+finalize_all <- function(sheet_list) lapply(sheet_list, finalize_sheet)
 # =============================================================================
 # --- PART 1: USER CONFIGURATION ----------------------------------------------
 # =============================================================================
@@ -56,8 +102,8 @@ MODE <- "broad"   # <-- ACTION: change to "subtype" for subtype runs
 #MODE <- "subtype"   # <-- ACTION: change to "subtype" for subtype runs
 
 # --- 1.2: Paths --------------------------------------------------------------
-PROJECT_NAME <- "Nr4a1_s17_ack"
-ROOT_PATH    <- "/home/ssromerogon/local_drive/optimus_drive/selim_working_dir/2026_nr4a1_ack/r_process"
+PROJECT_NAME <- "Wu_Diet_project2"
+ROOT_PATH    <- "/home/ssromerogon/local_drive/optimus_drive/selim_working_dir/2026_wu_project2/r_process"
 OUTPUT_DIR   <- file.path(ROOT_PATH, "seurat_output")
 
 # RDS to load — change per run
@@ -87,7 +133,7 @@ message(paste("  Output folder:", DE_OUT_DIR))
 CELLTYPE_COLUMN <- if (MODE == "broad") "CellType" else "sub_cell_types"
 
 # --- 1.4: MAST Parameters ----------------------------------------------------
-CONDITION_COLUMN  <- "Genotype_sex"
+CONDITION_COLUMN  <- "Diet"       # Wu diet study: Cellulose / Fiber / PUFA / Mix
 SAMPLE_COLUMN     <- "SampleID"
 DE_LOGFC_THRESH   <- 0.5     # discovery threshold — moderate+ effects in xlsx
 DE_MIN_PCT        <- 0.10
@@ -96,37 +142,51 @@ MIN_CELLS_GROUP   <- 20      # skip group if fewer cells than this
 DV_PVAL_THRESH    <- 0.05    # SplineDV raw p-value threshold for DV genes
 
 # --- 1.5: Contrasts ----------------------------------------------------------
-# Sex-separated: Polyp vs WT, KO vs Polyp
+# Wu diet study. Cellulose is the control diet, so every contrast is
+# <treatment> vs Cellulose: a positive log2FC means UP in the treatment diet.
+# CONFIRM these names match the Diet column of Wu_p2_metadata.xlsx exactly
+# (case-sensitive) before running.
 CONTRASTS_LIST <- list(
-  Female_Polyp_vs_WT         = c("Polyp_Female",         "WT_Female"),
-  Female_KO_vs_Polyp         = c("Polyp_NR4a1_KO_Female", "Polyp_Female"),
-  Male_Polyp_vs_WT           = c("Polyp_Male",            "WT_Male"),
-  Male_KO_vs_Polyp           = c("Polyp_NR4a1_KO_Male",   "Polyp_Male"),
-  Female_Polyp_vs_Male_Polyp = c("Polyp_Female",          "Polyp_Male")
+  Fiber_vs_Cellulose = c("Fiber", "Cellulose"),
+  PUFA_vs_Cellulose  = c("PUFA",  "Cellulose"),
+  Mix_vs_Cellulose   = c("Mix",   "Cellulose"),
+  PUFA_vs_Fiber      = c("PUFA",  "Fiber"),
+  Mix_vs_PUFA        = c("Mix",   "PUFA")
 )
 
 # --- 1.6: ANOVA Parameters ---------------------------------------------------
 RUN_ANOVA         <- TRUE
 USE_TWO_WAY_ANOVA <- FALSE   # FALSE = one-way (~Genotype_sex)
 # TRUE  = two-way (~Genotype * Sex)
-ANOVA_FACTOR1     <- "Genotype"  # used only if USE_TWO_WAY_ANOVA = TRUE
-ANOVA_FACTOR2     <- "Sex"       # used only if USE_TWO_WAY_ANOVA = TRUE
+ANOVA_FACTOR1     <- "Diet"      # used only if USE_TWO_WAY_ANOVA = TRUE
+ANOVA_FACTOR2     <- "SetDay"    # used only if USE_TWO_WAY_ANOVA = TRUE
 ANOVA_MIN_CELLS   <- 20
 ANOVA_TOP_N       <- 250         # top N genes for Enrichr
 
-# Sex-separated ANOVA groups — each run independently
-# WT is first in each vector = reference level automatically
+# One-way ANOVA across all four diets in a single model.
+# Cellulose is listed FIRST, which makes it the reference level.
 ANOVA_GROUPS <- list(
-  Female = c("WT_Female", "Polyp_Female", "Polyp_NR4a1_KO_Female"),
-  Male   = c("WT_Male",   "Polyp_Male",   "Polyp_NR4a1_KO_Male")
+  AllDiets = c("Cellulose", "Fiber", "PUFA", "Mix")
 )
 
 # --- 1.7: Enrichr Parameters -------------------------------------------------
 RUN_ENRICHR       <- TRUE
+# WikiPathways added for PathVisio interoperability (WikiPathways pathways are
+# what PathVisio consumes). Use the current mouse release.
 ENRICHR_DBS       <- c("GO_Biological_Process_2026",
                        "GO_Molecular_Function_2026",
-                       "KEGG_2026")
+                       "KEGG_2026",
+                       "WikiPathways_2024_Mouse")
 ENRICHR_TOP_N     <- 10     # top N pathways to plot per gene list
+
+# --- 1.7b: Ensembl IDs for PathVisio -----------------------------------------
+# ADD_ENSEMBL: map each gene symbol to its mouse Ensembl ID (ENSMUSG...) and
+# write it as the SECOND column of every DE / DV / overlap sheet. PathVisio and
+# WikiPathways key on Ensembl, and symbols are lossy (aliases/renames), so
+# providing Ensembl directly maximizes the pathway match rate.
+# Requires org.Mm.eg.db + AnnotationDbi. If missing, Ensembl is skipped with a
+# warning and the gene-symbol column is still written first.
+ADD_ENSEMBL <- TRUE
 
 # --- 1.8: Output Resolution --------------------------------------------------
 DPI_SETTING <- 300
@@ -148,6 +208,49 @@ message(paste("  Loaded:", ncol(data), "cells"))
 # Ensure CellType column exists
 if (!CELLTYPE_COLUMN %in% colnames(data@meta.data)) {
   stop(paste("[ERROR] Column", CELLTYPE_COLUMN, "not found in metadata."))
+}
+
+# --- Resolve the comparison column (generalised) -----------------------------
+# CONDITION_COLUMN is used everywhere as data@meta.data[[CONDITION_COLUMN]], so
+# it only has to EXIST. Three cases, handled in order:
+#   1. It already exists in the metadata            -> use it as-is (most cases).
+#   2. It is a compound "ColA_ColB" and both parts  -> build it by pasting the
+#      exist as columns (e.g. "Genotype_Diet",         two columns with "_".
+#      "Genotype_Sex", "Diet_Sex")                     This is the common
+#                                                       genotype+diet / genotype+
+#                                                       sex situation.
+#   3. Neither                                       -> stop with the available
+#                                                       columns listed.
+resolve_comparison_column <- function(obj, col) {
+  if (col %in% colnames(obj@meta.data)) {
+    message(paste0("  Comparison column '", col, "' found in metadata."))
+    return(obj)
+  }
+  parts <- strsplit(col, "_", fixed = TRUE)[[1]]
+  if (length(parts) >= 2 && all(parts %in% colnames(obj@meta.data))) {
+    obj@meta.data[[col]] <- apply(obj@meta.data[, parts, drop = FALSE], 1,
+                                  paste, collapse = "_")
+    message(paste0("  Comparison column '", col, "' AUTO-BUILT from: ",
+                   paste(parts, collapse = " + "), "."))
+    return(obj)
+  }
+  stop(paste0("[ERROR] Comparison column '", col, "' is neither present in the ",
+              "metadata nor buildable from existing columns.\n",
+              "  To build a compound column automatically, name it 'ColA_ColB' ",
+              "where ColA and ColB are existing columns.\n",
+              "  Available metadata columns: ",
+              paste(colnames(obj@meta.data), collapse = ", ")), call. = FALSE)
+}
+data <- resolve_comparison_column(data, CONDITION_COLUMN)
+
+# The compound column must also exist for the ANOVA factors, when two-way.
+if (RUN_ANOVA && USE_TWO_WAY_ANOVA) {
+  for (fac in c(ANOVA_FACTOR1, ANOVA_FACTOR2)) {
+    if (!fac %in% colnames(data@meta.data)) {
+      stop(paste0("[ERROR] Two-way ANOVA factor '", fac, "' not found in metadata."),
+           call. = FALSE)
+    }
+  }
 }
 
 # Normalize if not already done
@@ -480,12 +583,12 @@ for (ct in all_cell_types) {
     )
     
     if (!is.null(dv_result)) {
-      n_dv <- sum(dv_result$pval < DV_PVAL_THRESH, na.rm = TRUE)
-      message(paste("  → SplineDV:", n_dv, "DV genes (pval <", DV_PVAL_THRESH, ")"))
+      n_dv <- sum(dv_result$pval <= DV_PVAL_THRESH, na.rm = TRUE)
+      message(paste("  → SplineDV:", n_dv, "DV genes (pval <=", DV_PVAL_THRESH, ")"))
       ct_dv_sheets[[contrast_name]] <- dv_result
       
       # SplineDV standalone Enrichr
-      dv_sig_genes <- dv_result$gene[dv_result$pval < DV_PVAL_THRESH & !is.na(dv_result$pval)]
+      dv_sig_genes <- dv_result$gene[dv_result$pval <= DV_PVAL_THRESH & !is.na(dv_result$pval)]
       enr_dv <- run_enrichr_ora(dv_sig_genes, paste0(contrast_name, "_DV_only"))
       if (!is.null(enr_dv)) {
         enr_dv_all[[paste0(ct, "|", contrast_name)]] <- enr_dv %>%
@@ -556,20 +659,20 @@ for (ct in all_cell_types) {
   
   # DE file: one sheet per contrast, sorted log2FC desc
   de_file <- file.path(DE_OUT_DIR, paste0(safe_ct, "_MAST_DE.xlsx"))
-  write_xlsx(lapply(ct_de_sheets, as.data.frame), de_file)
+  write_xlsx(finalize_all(ct_de_sheets), de_file)
   message(paste("  Saved:", basename(de_file)))
   
   # SplineDV file: one sheet per contrast, sorted by DV pval
   if (any(sapply(ct_dv_sheets, function(x) !is.null(x) && nrow(x) > 1))) {
     dv_file <- file.path(DE_OUT_DIR, paste0(safe_ct, "_SplineDV.xlsx"))
-    write_xlsx(lapply(ct_dv_sheets, as.data.frame), dv_file)
+    write_xlsx(finalize_all(ct_dv_sheets), dv_file)
     message(paste("  Saved:", basename(dv_file)))
   }
   
   # DV ∩ DE Overlap file
   if (length(ct_overlap_sheets) > 0) {
     ov_file <- file.path(DE_OUT_DIR, paste0(safe_ct, "_DV_DE_Overlap.xlsx"))
-    write_xlsx(lapply(ct_overlap_sheets, as.data.frame), ov_file)
+    write_xlsx(finalize_all(ct_overlap_sheets), ov_file)
     message(paste("  Saved:", basename(ov_file)))
   }
   
