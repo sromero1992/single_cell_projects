@@ -125,35 +125,21 @@ message("=== Loading processed Seurat object ===")
 data <- readRDS(INPUT_RDS)
 message(paste("  Loaded:", ncol(data), "cells,", nrow(data), "genes"))
 
-# --- Load and parse markers from CSV ----------------------------------------
-message("=== Loading markers from CSV ===")
-if (!file.exists(MARKERS_CSV_FILE)) {
-  stop(paste("[ERROR] Marker CSV not found:", MARKERS_CSV_FILE,
-             "\nPlease place cell_type_markers.csv in your ROOT_PATH."))
-}
-markers_df <- read.csv(MARKERS_CSV_FILE, stringsAsFactors = FALSE)
+# --- Load and parse markers via {scprep} ------------------------------------
+# get_markers() reads the same CSV and explodes the pipe-separated gene lists,
+# so BROAD_MARKERS_LIST is identical to the old hand-parsed version but the
+# parsing lives in one tested place. Point it at MARKERS_CSV_FILE to keep your
+# project's file as the source, or drop the argument to use the copy shipped in
+# the package (single source of truth across all datasets).
+message("=== Loading markers via scprep::get_markers() ===")
+markers_df <- scprep::get_markers(MARKERS_CSV_FILE)
 
-# Helper: parse pipe-separated marker string into a character vector
-parse_markers <- function(marker_string) {
-  strsplit(trimws(marker_string), "\\|")[[1]]
-}
-
-# Build BROAD_MARKERS_LIST from tier == "broad"
 broad_df           <- markers_df[markers_df$tier == "broad", ]
-BROAD_MARKERS_LIST <- setNames(
-  lapply(broad_df$markers, parse_markers),
-  broad_df$cell_type
-)
+BROAD_MARKERS_LIST <- scprep::markers_as_list(broad_df)   # cell_type -> genes, CSV order
 
-# 2. Flatten while preserving the order from the CSV
-# use.names = FALSE prevents R from prepending the cell type to the gene name
-all_markers_ordered <- unlist(BROAD_MARKERS_LIST, use.names = FALSE)
-
-# 3. Remove duplicates while keeping the FIRST occurrence
-broad_dotplot_markers <- unique(all_markers_ordered)
+# Flatten (first occurrence wins) for the dotplot gene axis.
+broad_dotplot_markers <- unique(broad_df$gene)
 print(broad_dotplot_markers)
-
-
 
 message(paste("  Broad cell types loaded:", length(BROAD_MARKERS_LIST)))
 

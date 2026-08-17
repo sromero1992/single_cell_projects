@@ -38,6 +38,23 @@ gcc --version && g++ --version && make --version
 
 If any of those are missing, every source install below will fail with confusing errors about `.so` files.
 
+### The `scprep` package (preprocessing engine for Scripts 01 / 01b / 02)
+
+Separate from the packages below (which are external and prone to breaking),
+the pipeline's own preprocessing code is shipped as a local package, `scprep/`.
+`00_rlibs_installation.R` installs it automatically as its **last step** (section
+6), after its dependencies. You only need to do this by hand if the auto-install
+couldn't locate the folder:
+
+```r
+devtools::install("scprep")     # from the repo root (folder containing scprep/)
+```
+
+It builds in seconds and its heavy dependencies are only *Suggests* (already
+covered by `00_rlibs_installation.R`). Full details + the three usage scenarios:
+`scprep/README.md` and `scprep/ARCHITECTURE.md`, or the "Installing the scprep
+package" section of `QUICK_START.md`.
+
 ---
 
 ## 1. CytoTRACE 2 — required by Script 09
