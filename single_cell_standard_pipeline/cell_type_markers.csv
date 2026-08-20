@@ -1,44 +1,44 @@
-tier,cell_type,parent_cell_type,markers,subcluster_resolution,description
-broad,Plasma B cells,,Jchain|Mzb1|Igha|Xbp1|Prdm1|Sdc1,,"Antibody-secreting plasma cells; Prdm1, Xbp1, Sdc1 and Jchain are the standard plasma-cell program. Igha added because intestinal plasma cells are predominantly IgA, not IgG"
-broad,B cells,,Ms4a1|Cd19|Cd79a|Cd79b,,Mature B lymphocytes; Cd79a/b added for robustness
-broad,T cells,,Cd3e|Cd4|Cd8a|Trbc2|Il2rb|Nkg7|Klrd1,,UMBRELLA lymphoid cluster; pan-lymphoid genes added so CD3-negative NK and ILC subsets land here and reach the sub tier
-broad,Macrophages,,Cd163|Csf1r|Cd68|Mrc1|Aif1|Lyz2|Fcer1g|Itgam,,"UMBRELLA myeloid cluster; pan-myeloid genes added so dendritic cells, monocytes and neutrophils land here and reach the sub tier"
-broad,Mast cells,,Kit|Cpa3|Fcer1a,2,Mast cells; Kit and Mcpt4 added. Intentionally defined at BOTH tiers as a safety net - see the sub-tier row
-broad,ICCs,,Kit|Ano1|Etv1|Prkcq,,"Interstitial Cells of Cajal - the pacemaker cells of the gut that generate slow-wave electrical activity driving colonic motility. Mesenchymal-origin, Kit+ Etv1+ Ano1+. Kit is shared with Mast cells, so Etv1 (lineage-specifying TF) and Ano1 (Ca2+-activated Cl- channel, DOG1) are the true discriminators; ICCs are Cpa3-/Fcer1a- unlike mast cells"
-broad,Fibroblasts,,Col1a1|Col3a1|Col6a2|Pdgfra,,Stromal fibroblasts defined by collagen expression; Pdgfra added
-broad,SMCs,,Des|Cnn1|Myh11|Tagln|Acta2|Actg2|Myl9,,"Smooth muscle cells (intestinal muscularis/visceral); Actg2, Acta2 and Myl9 added as verified SMC markers"
-broad,vSMCs,,Myh11|Tagln|Acta2|Rgs5|Notch3|Kcnj8|Pdgfrb,Vascular smooth muscle cells. CAUTION Notch3 is its only exclusive marker here but Notch3 is pan-mural (expressed by pericytes too). vSMC vs pericyte separation is intrinsically hard in scRNA-seq - consider merging if the clusters do not resolve
-broad,Muscularis mucosae,,Grem2|Nog|Rspo3|Myh11|Acta2|Cnn1,,"Grem2-high muscularis mucosae - a thin smooth-muscle layer at the crypt base that doubles as a stem-cell niche source. Carries a smooth-muscle contractile program (Myh11, Acta2, Cnn1) together with BMP-antagonist / niche factors (Grem2, Nog, Rspo3, Cd81); Foxl1-negative and Pdgfra-low, distinguishing it from telocytes. Lies directly beneath crypt-base ISCs and is a documented source of crypt-base BMP antagonism (Manieri et al. 2023, Dev Cell PMID 36924771), functionally overlapping trophocytes (McCarthy et al. 2020, Cell Stem Cell)"
-broad,ENs,,Tubb3|Elavl4|Snap25|Uchl1|Phox2b|Vip|Vat1l,,Enteric neurons; pan-neuronal markers added because Vip labels only a VIP-positive subset
-broad,EGCs,,Sox10|Plp1|S100b|Gfap,,Enteric glial cells (peripheral glia); S100b and Gfap added
-broad,LECs,,Prox1|Flt4|Ccl21a|Mmrn1|Lyve1|Pecam1,,Lymphatic endothelial cells; Prox1 is the canonical lymphatic transcription factor. Note Lyve1 is also expressed by resident macrophages
-broad,VECs,,Cdh5|Pecam1|Egfl7|Plvap|Flt1,,Vascular endothelial cells; Cdh5 and Pecam1 added so endothelium is identified as such. Pecam1 is now shared with LECs and therefore down-weighted automatically
-broad,Colonocytes,,Epcam|Krt19|Krt20|Vil1|Muc2,,Colonic epithelial cells (umbrella for all epithelial subtypes including goblet)
-broad,Adipocytes,,Adipoq|Plin1|Plin4|Fabp4,,Adipocytes defined by lipid-storage genes; usually only recovered if mesenteric fat was included
-sub,Goblet cells,Colonocytes,Muc2|Spink4|Agr2|Retnlb|Fam3d,3,Mucus-secreting goblet cells; first-pass separation from absorptive enterocytes
-sub,EECs,Colonocytes,Chga|Chgb|Tph1|Cck|Scgn|Scg5,3,Enteroendocrine cells; rare hormone-secreting epithelial cells
-sub,Tuft cells,Colonocytes,Dclk1|Trpm5|Avil|Sh2d6|Plcg2,3,Chemosensory tuft cells with brush-border morphology
-sub,DCS,Colonocytes,Reg4|Dll1|Ccl6,3,Deep crypt secretory cells; niche support for stem cells. NOTE Reg4 is shared with goblet cells and Ccl6 is worth verifying against your reference
-sub,Abs. colonocytes,Colonocytes,Alpi|Ces2c|Slc26a2|Ceacam1|Aqp8,3,Absorptive colonocytes; mature ion-transport and lipid-handling cells
-sub,TA cells,Colonocytes,Mki67|Top2a|Birc5|Pcna|Stmn1,3,Transit-amplifying cells; actively cycling progenitors
-sub,Stem cells,Colonocytes,Lgr5|Ascl2|Smoc2|Slc12a2|Prom1,3,"Intestinal stem cells (crypt base columnar). Trimmed to 5 verified CBC markers. Lrig1 REMOVED - it marks a largely non-overlapping quiescent population in colon (Powell 2012, Cell), so mixing it with Lgr5 dilutes the signature. Olfm4 excluded - not expressed in mouse colon (Schuijers 2014)"
-sub,ILC1,T cells,Tbx21|Il12rb2|Ifng,2,"ILC1; Tbx21-positive innate lymphoid cells, IFNg-producing, Eomes-negative and Prf1-negative (this is what separates them from NK)"
-sub,ILC2,T cells,Gata3|Il1rl1|Klrg1|Areg,2,"ILC2; Gata3-high innate lymphoid cells, type 2 cytokine producers"
-sub,ILC3,T cells,Rorc|Il22|Ncr1,2,"ILC3; Rorc-positive innate lymphoid cells, IL-22-producing, NCR-positive and NCR-negative subsets"
-sub,NK cells,T cells,Ncr1|Klrb1c|Eomes|Gzma|Prf1|Klrb1b,2,"Natural killer cells; Eomes added as the standard discriminator from ILC1, plus cytotoxic effectors Gzma and Prf1"
-sub,Mast cells,T cells,Ms4a2|Cpa3|Kit|Mcpt4,2,"Mast cells; often co-cluster with lymphoid cells. Duplicated from the broad tier on purpose - the label is identical either way, so this is a safety net rather than a conflict"
-sub,CD4+ T cells,T cells,Cd4|Cd40lg|Il7r|Cd3e|Cd3d,2,Helper T cells; Cd40lg and Il7r added because Cd4/Cd3 alone cannot distinguish this from the pan-T definition
-sub,Tregs,T cells,Foxp3|Il2ra|Ikzf2|Ctla4,2,Regulatory T cells; Foxp3 is the master transcription factor
-sub,CD8+ T cells,T cells,Cd8a|Cd8b1|Sell,2,Cytotoxic T cells; CD8-expressing effector and memory T cells
-sub,Cyc. T cells,T cells,Mki67|Top2a,2,Cycling (proliferating) T cells
-sub,gd T cells,T cells,Trdc|Trgc1,2,Gamma-delta T cells; innate-like T cell subset
-sub,pDCs,Macrophages,Siglech|Bst2|Ly6d|Irf7|Tcf4,2,"Plasmacytoid DCs; Siglech and Bst2 positive, Itgax and Cd68 negative"
-sub,cDC1,Macrophages,Clec9a|Xcr1|Itgae|Itgax|Flt3,2,cDC1; cross-presenting dendritic cells. The conflicting broad-tier cDCs row was removed so these cells reach this sub tier
-sub,cDC2,Macrophages,Cd209a|Clec10a|Irf4|Sirpa|Itgax|Flt3,2,"cDC2; Cd209a, Clec10a (CD301a), Sirpa and Irf4 are verified mouse cDC2 markers. Clec4g and Siglecg were replaced NOT because they are absent from DCs (both are reported in DCs) but because both are non-specific in this panel - Clec4g also marks endothelium and Siglecg also marks B cells"
-sub,mRegDCs,Macrophages,Ccr7|Fscn1|Cd274|Pdcd1lg2|Il4i1|Ccl22,2,Mature regulatory DCs; immunostimulatory and immunosuppressive programs co-expressed
-sub,Monocytes,Macrophages,Cd14|Ccr2|Ly6c2|Fcgr3|Plac8,2,"Monocytes; Ly6c2-high, Adgre1 and Timd4 negative"
-sub,M0 macrophages,Macrophages,Cd68|Csf1r|Adgre1|Cx3cr1|Timd4,2,Resting tissue-resident macrophages; no polarization markers
-sub,M1 macrophages,Macrophages,Il1b|Tnf|Cxcl9|Cxcl10|Il6|Irf5|Nos2,2,Pro-inflammatory program. NOTE M1/M2 is an in-vitro paradigm that maps imperfectly onto tissue macrophages; consider reporting these as programs rather than discrete identities
-sub,M2 macrophages,Macrophages,Mrc1|Cd163|Arg1|Chil3|Retnla|C1qa|C1qb|C1qc,2,Anti-inflammatory program; see the M1 note on the M1/M2 paradigm
-sub,Cyc. Macrophages,Macrophages,Mki67|Top2a,2,Proliferating macrophages
-sub,Neutrophils,Macrophages,S100a8|S100a9|Csf3r|Cxcr2|Ly6g,2,"Neutrophils. WARNING neutrophils have low mRNA and high RNase content; published protocols use gene thresholds as low as 50 to retain them, whereas Script 01 defaults to POST_MIN_GENES=500 and POST_MAX_MT=5. Most neutrophils will be filtered out unless you relax those"
+tier,cell_type,parent_cell_type,markers,subcluster_resolution,description,
+broad,Plasma B cells,,Ighg1|Mzb1,,Antibody-secreting plasma cells, high Ig expression
+broad,B cells,,Ms4a1|Cd19,,Mature B lymphocytes,
+broad,T cells,,Cd3e|Cd4|Cd8a|Trbc2,,Pan-T cell markers including helper and cytotoxic T cells,
+broad,cDCs,,Clec9a|Xcr1,,Classical dendritic cells (type 1 cDC),
+broad,Macrophages,,Cd163|Csf1r|Cd68|Mrc1|Aif1,,Tissue-resident and monocyte-derived macrophages,
+broad,Fibroblasts,,Col1a1|Col3a1|Col6a2,,Stromal fibroblasts defined by collagen expression,
+broad,ENs,,Vip|Tubb3|Vat1l,,Enteric neurons of the enteric nervous system,
+broad,EGCs,,Sox10|Plp1,,Enteric glial cells (peripheral glia),
+broad,LECs,,Lyve1|Flt4|Pecam1,,Lymphatic endothelial cells,
+broad,VECs,,Plvap|Flt1,,Vascular endothelial cells,
+broad,Colonocytes,,Epcam|Muc2|Krt19|Krt20|Vil1,,Colonic epithelial cells (all subtypes),
+broad,SMCs,,Des|Cnn1|Myh11|Tagln,,Smooth muscle cells (intestinal muscularis),
+broad,vSMCs,,Myh11|Tagln|Notch3|Rgs5,,Vascular smooth muscle cells,
+broad,Pericytes,,Rgs5|Kcnj8,,Pericyte cells,
+broad,Mast cells,,Ms4a2|Cpa3,2,Mast cells, often appear in T cell broad clusters
+broad,Adipocytes,,Adipoq|Plin1|Plin4|Fabp4,,Adipocytes defined by lipid-storage genes,
+sub,Goblet cells,Colonocytes,Muc2|Spink4|Agr2|Retnlb|Fam3d,3,Mucus-secreting goblet cells, first-pass separation from absorptive enterocytes
+sub,EECs,Colonocytes,Chga|Chgb|Tph1|Cck|Scgn|Scg5,3,Enteroendocrine cells, rare hormone-secreting epithelial cells
+sub,Tuft cells,Colonocytes,Dclk1|Trpm5|Avil|Sh2d6|Plcg2,3,Chemosensory tuft cells, brush-border morphology
+sub,DCS,Colonocytes,Reg4|Ccl6|Dll1,3,Deep crypt secretory cells, niche support cells for stem cells
+sub,Abs. colonocytes,Colonocytes,Alpi|Ces2c|Slc26a2|Ceacam1|Aqp8,3,Absorptive colonocytes, mature ion-transport and lipid-handling cells
+sub,TA cells,Colonocytes,Mki67|Top2a|Birc5|Pcna|Stmn1,3,Transit-amplifying cells, actively cycling progenitors
+sub,Stem cells,Colonocytes,Lgr5|Lrig1|Ascl2|Slc12a2|Smoc2|Kcnq1|Gpx2|Ephb2|Bmpr1a|Hopx|Sox9,3,Intestinal stem cells at crypt base (CBC and reserve),
+sub,ILC1,T cells,Tbx21|Il12rb2|Ifng,2,"ILC1; Tbx21+ innate lymphoid cells, IFNg-producing, Prf1-negative",
+sub,ILC2,T cells,Gata3|Il1rl1|Klrg1|Areg,2,"ILC2; Gata3-high innate lymphoid cells, type 2 cytokine producers",
+sub,ILC3,T cells,Rorc|Il22|Ncr1,2,"ILC3; Rorc+ innate lymphoid cells, IL-22-producing, NCR+ and NCR- subsets",
+sub,NK cells,T cells,Ncr1|Klrb1b,2,Natural killer cells, innate cytotoxic lymphocytes
+sub,Mast cells,T cells,Ms4a2|Cpa3,2,Mast cells, often appear in T cell broad clusters
+sub,CD4+ T cells,T cells,Cd4|Cd3e|Cd3d,2,Helper T cells, CD4-expressing conventional T cells
+sub,Tregs,T cells,Foxp3|Il2ra|Ikzf2|Ctla4,2,Regulatory T cells, Foxp3 is the master transcription factor
+sub,CD8+ T cells,T cells,Cd8a|Cd8b1|Sell,2,Cytotoxic T cells, CD8-expressing effector and memory T cells
+sub,Cyc. T cells,T cells,Mki67|Top2a,2,Cycling (proliferating) T cells,
+sub,gd  T cells,T cells,Trdc|Trgc1,2,Gamma-delta T cells, innate-like T cell subset
+sub,pDCs,Macrophages,Siglech|Bst2|Ly6d|Irf7|Tcf4,2,Plasmacytoid DCs; Siglech+ Bst2+; no Itgax no Cd68,
+sub,cDC1,Macrophages,Itgax|Clec9a|Xcr1|Flt3|Itgae,2,cDC1; Itgax+ Clec9a+ Xcr1+; cross-presenting DCs; no Cd68 no Siglech,
+sub,cDC2,Macrophages,Itgax|Cd209a|Clec4g|Napsa|Siglecg|Flt3,2,cDC2; Cd209a+ Clec4g+ Napsa+; Itgax+ but Clec9a/Xcr1 negative; antigen-presenting to CD4+ T cells,
+sub,mRegDCs,Macrophages,Ccr7|Fscn1|Cd274|Pdcd1lg2|Il4i1|Ccl22,2,Mature regulatory DCs; Ccr7+ Fscn1+ PD-L1/L2+; immunostimulatory and immunosuppressive programs co-expressed,
+sub,Monocytes,Macrophages,Cd14|Ccr2|Ly6c2|Fcgr3|Plac8,2,Monocytes; Cd14+ Ccr2+ Ly6c2high; no Adgre1 no Timd4,
+sub,M0 macrophages,Macrophages,Cd68|Csf1r|Adgre1|Cx3cr1|Timd4,2,Resting tissue-resident macrophages; Cd68+ Adgre1+ no polarization markers,
+sub,M1 macrophages,Macrophages,Il1b|Tnf|Cxcl9|Cxcl10|Il6|Irf5|Nos2,2,Pro-inflammatory M1; Il1b+ Tnf+ Cxcl9/10+; no Mrc1 no Arg1,
+sub,M2 macrophages,Macrophages,Mrc1|Cd163|Arg1|Chil3|Retnla|C1qa|C1qb|C1qc,2,Anti-inflammatory M2; Mrc1+ Arg1+ Chil3+; no Il1b no Tnf,
+sub,Cyc. Macrophages,Macrophages,Mki67|Top2a,2,Proliferating TAMs; Mki67+ Top2a+; poor prognosis marker,
+sub,Neutrophils,Macrophages,Ly6g|Csf3r|S100a8|S100a9|Cxcr2,2,Neutrophils; Ly6g+ Csf3r+; often co-detected in myeloid clusters,

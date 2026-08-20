@@ -1,0 +1,53 @@
+Package: TamuScDSC
+Title: Modular Single-Cell Preprocessing, QC and Doublet Detection
+Version: 0.1.0
+Authors@R: c(
+    person("Selim", "Romero", email = "ssromerogon@tamu.edu", role = c("aut", "cre")),
+    person("CaiLab & ChapkinLab", role = "cph"))
+Description: Atomic, order-free, re-runnable building blocks for the
+    preprocessing stage of a single-cell RNA-seq pipeline. Accepts three
+    starting points interchangeably (one merged Seurat object, per-sample
+    checkpoint files, or a preloaded list of objects) by normalizing them to a
+    common per-sample list. Provides light and stringent QC, a dual-caller
+    doublet engine (DoubletFinder + scDblFinder) with consensus and cluster-level
+    review, DecontX ambient correction, SCEVAN, Harmony/IntegrateLayers
+    integration, an extensible marker registry, and two shipped recipes.
+License: MIT + file LICENSE
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.3.3
+Depends:
+    R (>= 4.2)
+Imports:
+    Seurat,
+    SeuratObject,
+    Matrix,
+    dplyr,
+    tidyr,
+    tibble,
+    stringr,
+    ggplot2,
+    stats,
+    utils,
+    methods
+Suggests:
+    DoubletFinder,
+    scDblFinder,
+    SingleCellExperiment,
+    BiocParallel,
+    harmony,
+    celda,
+    SCEVAN,
+    MAST,
+    SplineDV,
+    enrichR,
+    AnnotationDbi,
+    org.Mm.eg.db,
+    org.Hs.eg.db,
+    patchwork,
+    writexl,
+    testthat (>= 3.0.0),
+    knitr,
+    rmarkdown
+Config/testthat/edition: 3
+VignetteBuilder: knitr

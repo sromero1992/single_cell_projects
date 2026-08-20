@@ -1,0 +1,89 @@
+---
+title: "TamuScDSC: one pipeline, three starting points"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{TamuScDSC: one pipeline, three starting points}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(eval = FALSE, comment = "#>")
+library(TamuScDSC)
+```
+
+The whole point of `TamuScDSC` is that *where your data comes from* does not change
+*what you do to it*. `as_sample_list()` normalizes all three inputs to a named
+list of per-sample Seurat objects; every step operates on that.
+
+## Scenario 1 — one large merged Seurat object
+
+```{r}
+samples <- as_sample_list(big_object, sample_col = "SampleID")   # SplitObject
+data    <- recipe_per_sample(samples)                            # or compose atoms
+```
+
+## Scenario 2 — per-sample checkpoint files (current lab layout)
+
+```{r}
+samples <- read_checkpoints("seurat_output/processed_files")     # reads *.rds
+data    <- recipe_per_sample(samples, metadata = meta_df)
+```
+
+## Scenario 3 — a preloaded list of objects
+
+```{r}
+samples <- as_sample_list(my_list_of_seurats)                    # already a list
+data    <- recipe_per_sample(samples)
+```
+
+## The two recipes (you vs. your colleague)
+
+```{r}
+# A: light per-sample QC, doublets BEFORE merge
+data <- recipe_per_sample(input, metadata = meta_df)
+
+# B: stringent merged QC first, doublets AFTER, then cluster review
+data <- recipe_merged_stringent(input, metadata = meta_df)
+```
+
+## Composing atoms yourself (full control)
+
+```{r}
+data <- input |>
+  as_sample_list() |>
+  attach_metadata(meta_df) |>
+  qc_light(qc_params(min_features = 200, max_mt = 20)) |>
+  run_decontx() |>
+  detect_doublets(method = "both", p = doublet_params(rate = "auto")) |>
+  merge_samples() |>
+  qc_stringent(qc_params(min_features_stringent = 500, max_mt_stringent = 10)) |>
+  integrate_data(method = "RunHarmony")
+
+# review clusters, then remove
+data <- cluster_doublet_review(data, action = "flag", out_dir = "review")
+data <- apply_doublet_action(data, action = "remove", target = "cluster_flag")
+```
+
+## Re-run one problem sample and graft it back
+
+```{r}
+sub  <- subset_samples(data, ids = "WT_3")
+sub  <- detect_doublets(sub, method = "both", rate = 0.08)
+data <- graft_meta(data, sub, cols = c("DF_score", "scDblFinder_score",
+                                       "doublet_consensus"))
+```
+
+## Markers (used by annotation scripts 02–05)
+
+```{r}
+m <- get_markers()                                   # built-in default
+m <- add_markers(m, "Tuft", c("Dclk1", "Trpm5", "Gfi1b"))
+lst <- markers_as_list(m)                            # cell_type -> gene vector
+```
+
+## What happened to this object?
+
+```{r}
+provenance(data)
+```

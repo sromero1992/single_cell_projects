@@ -15,9 +15,10 @@
 #     that is easy to skim past.
 # =============================================================================
 
+setwd("/mnt/SCDC/Optimus/selim_working_dir/2026_nr4a1_ack/r_process/debug_pipeline_pkg")
 # 0. THE "FORCE" PROTOCOL - Locking the environment to official system paths
-Sys.setenv(LD_LIBRARY_PATH = "/usr/lib64")
-Sys.setenv(TMPDIR = paste0(Sys.getenv("HOME"), "/Rtemp"))
+#Sys.setenv(LD_LIBRARY_PATH = "/usr/lib64")
+#Sys.setenv(TMPDIR = paste0(Sys.getenv("HOME"), "/Rtemp"))
 options(timeout = 1200) # Prevents timeout on large GitHub builds like Monocle3
 
 if (!dir.exists(Sys.getenv("TMPDIR"))) dir.create(Sys.getenv("TMPDIR"))
@@ -31,7 +32,7 @@ cran_pkgs <- c(
 
 bioc_pkgs <- c(
   "BiocManager", "ComplexHeatmap", "Biobase", "BiocNeighbors", "BiocGenerics",
-  "celda", "dittoSeq", "AUCell", "Gviz", "GenomicRanges", "rtracklayer",
+  "celda", "dittoSeq", "AUCell", "Gviz", "GenomicRanges", "rtracklayer", "MAST",
   "BiocSingular", "SingleCellExperiment", "SummarizedExperiment", "scDblFinder",
   # Symbol <-> Ensembl mapping for the PathVisio/WikiPathways exports in Script 07
   # and for the Ensembl->symbol step in Script 09's CytoTRACE 2 preprocessing.
@@ -63,7 +64,7 @@ github_pkgs <- c(
   "scSGS" = "Xenon8778/scSGS",
   "leidenbase" = "cole-trapnell-lab/leidenbase",
   "monocle3" = "cole-trapnell-lab/monocle3"
-)
+  )
 
 # 2. AUTOMATED INSTALLATION LOGIC
 is_installed <- function(pkg) requireNamespace(pkg, quietly = TRUE)
@@ -211,37 +212,38 @@ if (is_installed("reticulate")) {
 }
 
 # =============================================================================
-# 6. LOCAL PACKAGE: scprep (preprocessing engine for Scripts 01 / 01b / 02)
+# 6. LOCAL PACKAGE: TamuScDSC (preprocessing engine for Scripts 01 / 01b / 02)
 # =============================================================================
-# scprep is NOT on CRAN/Bioc/GitHub - it ships in this repo as a folder. Install
+# TamuScDSC is NOT on CRAN/Bioc/GitHub - it ships in this repo as a folder. Install
 # it here, LAST, so its Imports (Seurat, dplyr, ...) are already present. It is a
 # fast source build. If the folder cannot be found, this only warns - install it
-# by hand with devtools::install("<path>/scprep").
-cat("\n--- Installing local package: scprep ---\n")
-# Set SCPREP_PATH explicitly to skip the search (e.g. "/path/to/repo/scprep").
-if (!exists("SCPREP_PATH")) SCPREP_PATH <- NULL
-scprep_candidates <- c(
-  SCPREP_PATH,
-  "scprep",            # cwd is the repo root
-  "../scprep",         # cwd is unified_pipeline/, package one level up
-  file.path(Sys.getenv("HOME"), "scprep")
+# by hand with devtools::install("<path>/TamuScDSC").
+cat("\n--- Installing local package: TamuScDSC ---\n")
+# Set TAMUSCDSC_PATH explicitly to skip the search (e.g. "/path/to/repo/TamuScDSC").
+if (!exists("TAMUSCDSC_PATH")) TAMUSCDSC_PATH <- NULL
+TamuScDSC_candidates <- c(
+  TAMUSCDSC_PATH,
+  "TamuScDSC",            # cwd is the repo root
+  "./TamuScDSC",         # cwd is unified_pipeline/, package one level up
+  file.path(Sys.getenv("HOME"), "TamuScDSC")
 )
-scprep_dir <- Filter(function(p) !is.null(p) &&
-                       file.exists(file.path(p, "DESCRIPTION")), scprep_candidates)
+TamuScDSC_dir <- Filter(function(p) !is.null(p) &&
+                       file.exists(file.path(p, "DESCRIPTION")), TamuScDSC_candidates)
 
-if (length(scprep_dir) > 0) {
+if (length(TamuScDSC_dir) > 0) {
   if (!requireNamespace("devtools", quietly = TRUE)) install.packages("devtools")
   tryCatch({
-    devtools::install(scprep_dir[[1]], upgrade = "never", quiet = FALSE)
-    cat("scprep installed from: ", scprep_dir[[1]], "\n")
+    devtools::install(TamuScDSC_dir[[1]], upgrade = "never", quiet = FALSE)
+    cat("TamuScDSC installed from: ", TamuScDSC_dir[[1]], "\n")
   }, error = function(e) {
-    cat("[WARNING] scprep install failed:", conditionMessage(e), "\n")
-    cat("          Install by hand: devtools::install('", scprep_dir[[1]], "')\n", sep = "")
+    cat("[WARNING] TamuScDSC install failed:", conditionMessage(e), "\n")
+    cat("          Install by hand: devtools::install('", TamuScDSC_dir[[1]], "')\n", sep = "")
   })
 } else {
-  cat("[NOTE] scprep/ folder not found from the current working directory.\n")
-  cat("       Set SCPREP_PATH <- \"/path/to/repo/scprep\" and re-run, or install\n")
-  cat("       by hand: devtools::install(\"/path/to/repo/scprep\").\n")
+  cat("[NOTE] TamuScDSC/ folder not found from the current working directory.\n")
+  cat("       Set TAMUSCDSC_PATH <- \"/path/to/repo/TamuScDSC\" and re-run, or install\n")
+  cat("       by hand: devtools::install(\"/path/to/repo/TamuScDSC\").\n")
 }
 
 cat("\nSetup complete.\n")
+

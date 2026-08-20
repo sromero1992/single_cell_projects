@@ -11,36 +11,36 @@
 
 1. R ≥ 4.3 with RStudio (or compatible IDE).
 2. Run `00_rlibs_installation.R` **once per machine**. It now hard-stops if anything Script 01 needs is missing, so a clean exit means you are genuinely ready.
-3. **The `scprep` package** — installed automatically at the end of `00_rlibs_installation.R`. Scripts `01`, `01b`, and `02` `library(scprep)` for the preprocessing / QC / doublet engine and the marker registry. See the next section only if the auto-install can't find the folder.
+3. **The `TamuScDSC` package** — installed automatically at the end of `00_rlibs_installation.R`. Scripts `01`, `01b`, and `02` `library(TamuScDSC)` for the preprocessing / QC / doublet engine and the marker registry. See the next section only if the auto-install can't find the folder.
 4. A filled-in metadata `.xlsx` (format below). `Nr4a1_s17_metadata.xlsx` and `Wu_metadata.xlsx` are usable templates.
 5. H5 files staged by `copy_sc_data.sh`.
 6. For scripts 09/10 only: see **INSTALL_NOTES.md** — CytoTRACE 2 needs a `subdir` argument, and Script 10 needs a one-time Python environment.
 
 ---
 
-## Installing the `scprep` package
+## Installing the `TamuScDSC` package
 
-`scprep` holds the preprocessing engine (ingestion, light/stringent QC, the
+`TamuScDSC` holds the preprocessing engine (ingestion, light/stringent QC, the
 DoubletFinder + scDblFinder engine, DecontX, SCEVAN, Harmony integration,
 cluster-level doublet review) plus the marker registry. It lives in the
-`scprep/` folder next to this pipeline.
+`TamuScDSC/` folder next to this pipeline.
 
 **Normally you don't run anything here** — `00_rlibs_installation.R` installs it
 automatically as its last step (section 6), after all its dependencies are in
-place. It searches for the `scprep/` folder relative to your working directory;
-if your layout is unusual, set `SCPREP_PATH <- "/path/to/repo/scprep"` before
+place. It searches for the `TamuScDSC/` folder relative to your working directory;
+if your layout is unusual, set `TAMUSCDSC_PATH <- "/path/to/repo/TamuScDSC"` before
 running Script 00.
 
 If the auto-install couldn't find the folder, or you want to reinstall after
 editing the package, do it by hand:
 
 ```r
-# from R, in the repository root (the folder that contains scprep/)
+# from R, in the repository root (the folder that contains TamuScDSC/)
 install.packages("devtools")          # if not already installed
-devtools::install("scprep")           # builds + installs the local package
+devtools::install("TamuScDSC")           # builds + installs the local package
 
 # if you edited any R/ file and changed exports, regenerate NAMESPACE + man/:
-devtools::document("scprep")
+devtools::document("TamuScDSC")
 ```
 
 Heavy dependencies (DoubletFinder, scDblFinder, harmony, celda, SCEVAN) are
@@ -49,8 +49,8 @@ install hint only if you actually call it (all of them are already handled by
 `00_rlibs_installation.R`). Verify with:
 
 ```r
-library(scprep)
-packageVersion("scprep")              # 0.1.0
+library(TamuScDSC)
+packageVersion("TamuScDSC")              # 0.1.0
 ```
 
 > The full original monolithic scripts are kept as `01_process_data_legacy.R`
@@ -63,8 +63,8 @@ packageVersion("scprep")              # 0.1.0
 | Step | Script | What it does | Typical runtime |
 |---|---|---|---|
 | — | `copy_sc_data.sh` | Stage Cell Ranger H5s into `h5_files/` | 5–30 min |
-| 0 | `00_rlibs_installation.R` | Install all dependencies **+ the local `scprep` package** | 15–60 min (first run only) |
-| 1 | `01_process_data.R` | Load H5 → DecontX → **doublets** → QC → Harmony (thin driver over `scprep`) | 1–4 h per 10 samples |
+| 0 | `00_rlibs_installation.R` | Install all dependencies **+ the local `TamuScDSC` package** | 15–60 min (first run only) |
+| 1 | `01_process_data.R` | Load H5 → DecontX → **doublets** → QC → Harmony (thin driver over `TamuScDSC`) | 1–4 h per 10 samples |
 | 1b | `01b_cluster_doublet_review.R` | *Optional.* Cluster-level doublet review; needs Script 01 run with `method = "both"` | ~15 min |
 | 2 | `02_global_annotation.R` | Weighted pre-scoring → broad cell type annotation | Interactive, ~30 min |
 | 3 | `03_tcell_subannotation.R` | T cell sub-clustering and annotation | Interactive |

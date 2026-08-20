@@ -1,12 +1,12 @@
 # =============================================================================
 # scRNA-seq PIPELINE - SCRIPT 1b: CLUSTER-LEVEL DOUBLET REVIEW
-#   thin driver over {scprep}
+#   thin driver over {TamuScDSC}
 # Version: 2.0 - PACKAGED
 #
 # Runs on the processed object BEFORE annotation. Re-clusters at high resolution,
 # averages the two doublet scores per cluster, flags clusters with MAD-adaptive
 # cutoffs, and (optionally) removes them and re-clusters the clean object.
-# All logic lives in scprep::cluster_doublet_review(); the full original script
+# All logic lives in TamuScDSC::cluster_doublet_review(); the full original script
 # is preserved as 01b_cluster_doublet_review_legacy.R.
 #
 # Requires Script 01 to have been run with DOUBLET_METHOD = "both" so that both
@@ -16,7 +16,7 @@
 # confirm the flagged clusters are real artefacts, THEN set ACTION <- "remove".
 # =============================================================================
 
-library(scprep)
+library(TamuScDSC)
 library(Seurat)
 
 # =============================================================================

@@ -125,17 +125,17 @@ message("=== Loading processed Seurat object ===")
 data <- readRDS(INPUT_RDS)
 message(paste("  Loaded:", ncol(data), "cells,", nrow(data), "genes"))
 
-# --- Load and parse markers via {scprep} ------------------------------------
+# --- Load and parse markers via {TamuScDSC} ------------------------------------
 # get_markers() reads the same CSV and explodes the pipe-separated gene lists,
 # so BROAD_MARKERS_LIST is identical to the old hand-parsed version but the
 # parsing lives in one tested place. Point it at MARKERS_CSV_FILE to keep your
 # project's file as the source, or drop the argument to use the copy shipped in
 # the package (single source of truth across all datasets).
-message("=== Loading markers via scprep::get_markers() ===")
-markers_df <- scprep::get_markers(MARKERS_CSV_FILE)
+message("=== Loading markers via TamuScDSC::get_markers() ===")
+markers_df <- TamuScDSC::get_markers(MARKERS_CSV_FILE)
 
 broad_df           <- markers_df[markers_df$tier == "broad", ]
-BROAD_MARKERS_LIST <- scprep::markers_as_list(broad_df)   # cell_type -> genes, CSV order
+BROAD_MARKERS_LIST <- TamuScDSC::markers_as_list(broad_df)   # cell_type -> genes, CSV order
 
 # Flatten (first occurrence wins) for the dotplot gene axis.
 broad_dotplot_markers <- unique(broad_df$gene)

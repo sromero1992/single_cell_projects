@@ -37,6 +37,7 @@
 #   Seurat, MAST, dplyr, tidyr, writexl, tibble, ggplot2, patchwork
 #   Optional ANOVA: parallel, broom, enrichR
 # =============================================================================
+library(TamuScDSC)   # DE/DV/enrichment helpers now live in the package
 library(Seurat)
 library(MAST)
 library(dplyr)
@@ -61,37 +62,10 @@ if (ADD_ENSEMBL && !.ensembl_ok) {
   message("  [NOTE] ADD_ENSEMBL=TRUE but org.Mm.eg.db/AnnotationDbi not installed; ",
           "Ensembl column will be skipped. Install via 00_rlibs_installation.R.")
 }
-symbol_to_ensembl <- function(symbols) {
-  if (!.ensembl_ok) return(rep(NA_character_, length(symbols)))
-  symbols <- as.character(symbols)
-  ens <- AnnotationDbi::mapIds(org.Mm.eg.db::org.Mm.eg.db, keys = symbols,
-                               keytype = "SYMBOL", column = "ENSEMBL",
-                               multiVals = "first")
-  miss <- is.na(ens)
-  if (any(miss)) {
-    alias <- tryCatch(
-      AnnotationDbi::mapIds(org.Mm.eg.db::org.Mm.eg.db, keys = symbols[miss],
-                            keytype = "ALIAS", column = "ENSEMBL",
-                            multiVals = "first"),
-      error = function(e) rep(NA_character_, sum(miss)))
-    ens[miss] <- alias
-  }
-  unname(ens)
-}
 
 # finalize_sheet(): guarantee 'gene' is the FIRST column and 'Ensembl' the
 # SECOND in every exported table. Applied to every DE/DV/overlap sheet just
 # before writing, so all downstream files are PathVisio-ready with one call.
-finalize_sheet <- function(df) {
-  df <- as.data.frame(df)
-  if (!"gene" %in% colnames(df)) return(df)          # e.g. placeholder sheets
-  if (!"Ensembl" %in% colnames(df)) {
-    df$Ensembl <- symbol_to_ensembl(df$gene)
-  }
-  front <- c("gene", "Ensembl")
-  df[, c(front, setdiff(colnames(df), front)), drop = FALSE]
-}
-finalize_all <- function(sheet_list) lapply(sheet_list, finalize_sheet)
 # =============================================================================
 # --- PART 1: USER CONFIGURATION ----------------------------------------------
 # =============================================================================
@@ -114,9 +88,10 @@ RDS_PATH <- file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_final_annotated.rds"))
 #RDS_PATH <- file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_macrophages_subclustered.rds"))
 #RDS_PATH <- file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_colonocytes_subclustered.rds"))
 
-# Output directory — automatically set based on MODE
+# Output directory — automatically set based on MODE.
+# Everything from Script 07 goes into ONE master folder (no sub-subfolders).
 if (MODE == "broad") {
-  DE_OUT_DIR <- file.path(OUTPUT_DIR, "DE_results", "broad")
+  DE_OUT_DIR <- file.path(OUTPUT_DIR, "DE_results")
 } else if (MODE == "subtype") {
   # Detect subtype from RDS filename automatically
   rds_base   <- tools::file_path_sans_ext(basename(RDS_PATH))
@@ -221,26 +196,6 @@ if (!CELLTYPE_COLUMN %in% colnames(data@meta.data)) {
 #                                                       sex situation.
 #   3. Neither                                       -> stop with the available
 #                                                       columns listed.
-resolve_comparison_column <- function(obj, col) {
-  if (col %in% colnames(obj@meta.data)) {
-    message(paste0("  Comparison column '", col, "' found in metadata."))
-    return(obj)
-  }
-  parts <- strsplit(col, "_", fixed = TRUE)[[1]]
-  if (length(parts) >= 2 && all(parts %in% colnames(obj@meta.data))) {
-    obj@meta.data[[col]] <- apply(obj@meta.data[, parts, drop = FALSE], 1,
-                                  paste, collapse = "_")
-    message(paste0("  Comparison column '", col, "' AUTO-BUILT from: ",
-                   paste(parts, collapse = " + "), "."))
-    return(obj)
-  }
-  stop(paste0("[ERROR] Comparison column '", col, "' is neither present in the ",
-              "metadata nor buildable from existing columns.\n",
-              "  To build a compound column automatically, name it 'ColA_ColB' ",
-              "where ColA and ColB are existing columns.\n",
-              "  Available metadata columns: ",
-              paste(colnames(obj@meta.data), collapse = ", ")), call. = FALSE)
-}
 data <- resolve_comparison_column(data, CONDITION_COLUMN)
 
 # The compound column must also exist for the ANOVA factors, when two-way.
@@ -266,160 +221,10 @@ message(paste("  Cell types found:", paste(all_cell_types, collapse = ", ")))
 # =============================================================================
 # --- PART 3: MAST WRAPPER ----------------------------------------------------
 # =============================================================================
-run_mast <- function(so, ident.1, ident.2,
-                     group.by     = CONDITION_COLUMN,
-                     latent.vars  = SAMPLE_COLUMN,
-                     logfc.thresh = DE_LOGFC_THRESH,
-                     min.pct      = DE_MIN_PCT) {
-  
-  Idents(so) <- so[[group.by, drop = TRUE]]
-  
-  # Check minimum cells
-  n1 <- sum(Idents(so) == ident.1)
-  n2 <- sum(Idents(so) == ident.2)
-  if (n1 < MIN_CELLS_GROUP || n2 < MIN_CELLS_GROUP) {
-    message(paste("  [SKIP] Too few cells:", ident.1, "=", n1, "|", ident.2, "=", n2,
-                  "(min =", MIN_CELLS_GROUP, ")"))
-    return(NULL)
-  }
-  
-  markers <- tryCatch({
-    FindMarkers(
-      object          = so,
-      ident.1         = ident.1,
-      ident.2         = ident.2,
-      test.use        = "MAST",
-      latent.vars     = latent.vars,
-      logfc.threshold = logfc.thresh,
-      min.pct         = min.pct,
-      verbose         = FALSE
-    )
-  }, error = function(e) {
-    message(paste("  [ERROR] MAST failed:", e$message))
-    return(NULL)
-  })
-  
-  if (is.null(markers) || nrow(markers) == 0) return(NULL)
-  
-  markers %>%
-    tibble::rownames_to_column("gene") %>%
-    dplyr::mutate(
-      contrast   = paste0(ident.1, "_vs_", ident.2),
-      direction  = ifelse(avg_log2FC > 0,
-                          paste0("up_in_", ident.1),
-                          paste0("up_in_", ident.2)),
-      confidence = dplyr::case_when(
-        abs(avg_log2FC) >= 1.0 ~ "high",      # ≥2-fold: publication standard
-        abs(avg_log2FC) >= 0.5 ~ "moderate",  # ≥1.4-fold: discovery
-        TRUE                   ~ "low"
-      )
-    ) %>%
-    dplyr::arrange(p_val_adj, desc(abs(avg_log2FC)))
-}
 
 # =============================================================================
 # --- PART 3b: SPLINEDV WRAPPER -----------------------------------------------
 # =============================================================================
-run_splinedv <- function(seurat_obj, cell_type, celltype_col, condition_col,
-                         group1, group2) {
-  if (!requireNamespace("SplineDV", quietly = TRUE)) {
-    stop("[ERROR] SplineDV not installed. Run 00_rlibs_installation.R to install it.")
-  }
-  library(SplineDV)
-  
-  # Subset to cell type
-  cells_ct <- rownames(seurat_obj@meta.data)[seurat_obj@meta.data[[celltype_col]] == cell_type]
-  obj_ct   <- subset(seurat_obj, cells = cells_ct)
-  
-  # Subset to the two groups being compared
-  obj_ct <- subset(obj_ct, cells = rownames(obj_ct@meta.data)[
-    obj_ct@meta.data[[condition_col]] %in% c(group1, group2)])
-  
-  # Check minimum cells per group
-  n1 <- sum(obj_ct@meta.data[[condition_col]] == group1)
-  n2 <- sum(obj_ct@meta.data[[condition_col]] == group2)
-  if (n1 < MIN_CELLS_GROUP || n2 < MIN_CELLS_GROUP) {
-    message(paste("  [SKIP SplineDV]", cell_type, "| insufficient cells:",
-                  group1, "=", n1, "|", group2, "=", n2,
-                  "(min =", MIN_CELLS_GROUP, ")"))
-    return(NULL)
-  }
-  message(paste("  [SplineDV]", cell_type, "|", group1, "(n=", n1, ") vs",
-                group2, "(n=", n2, ")"))
-  
-  # Get cells for each group
-  cells_g1 <- rownames(obj_ct@meta.data)[obj_ct@meta.data[[condition_col]] == group1]
-  cells_g2 <- rownames(obj_ct@meta.data)[obj_ct@meta.data[[condition_col]] == group2]
-  
-  # SplineDV expects raw count matrices (not normalized)
-  counts_g1 <- GetAssayData(obj_ct, assay = "RNA", layer = "counts")[, cells_g1, drop = FALSE]
-  counts_g2 <- GetAssayData(obj_ct, assay = "RNA", layer = "counts")[, cells_g2, drop = FALSE]
-  
-  # Run splineDV
-  dv_result <- tryCatch(
-    splineDV(counts_g1, counts_g2),
-    error = function(e) {
-      message("    [ERROR] SplineDV failed: ", e$message)
-      return(NULL)
-    }
-  )
-  if (is.null(dv_result) || nrow(dv_result) == 0) return(NULL)
-  
-  # Convert S4 DFrame to standard data.frame for dplyr compatibility
-  dv_result <- as.data.frame(dv_result)
-  
-  # --- Standardize column names based on confirmed splineDV output ---
-  # Columns are: genes, mu1, mu2, CV1, CV2, drop1, drop2, dist1, dist2,
-  #   X_splinex, X_spliney, X_splinez, Y_splinex, Y_spliney, Y_splinez,
-  #   vectorDist, Direction, Pval
-  
-  # Gene column: "genes" -> "gene"
-  if ("genes" %in% colnames(dv_result)) {
-    dv_result <- dplyr::rename(dv_result, gene = genes)
-  } else if ("Gene" %in% colnames(dv_result)) {
-    dv_result <- dplyr::rename(dv_result, gene = Gene)
-  } else if (!"gene" %in% colnames(dv_result)) {
-    dv_result$gene <- rownames(dv_result)
-  }
-  
-  # P-value column: "Pval" -> "pval"
-  if ("Pval" %in% colnames(dv_result)) {
-    dv_result <- dplyr::rename(dv_result, pval = Pval)
-  } else if ("PValue" %in% colnames(dv_result)) {
-    dv_result <- dplyr::rename(dv_result, pval = PValue)
-  } else if ("pvalue" %in% colnames(dv_result)) {
-    dv_result <- dplyr::rename(dv_result, pval = pvalue)
-  } else if ("p.value" %in% colnames(dv_result)) {
-    dv_result <- dplyr::rename(dv_result, pval = p.value)
-  }
-  # If still no pval, assign NA
-  
-  if (!"pval" %in% colnames(dv_result)) {
-    message("    [WARN] No p-value column found in SplineDV output. Columns: ",
-            paste(colnames(dv_result), collapse = ", "))
-    dv_result$pval <- NA_real_
-  }
-  
-  # Compute adjusted p-value (BH) — splineDV does not provide one
-  if (any(!is.na(dv_result$pval))) {
-    dv_result$padj <- p.adjust(dv_result$pval, method = "BH")
-  } else {
-    dv_result$padj <- NA_real_
-  }
-  
-  # Add metadata columns
-  dv_result$cell_type  <- cell_type
-  dv_result$comparison <- paste0(group1, "_vs_", group2)
-  dv_result$n_cells_g1 <- n1
-  dv_result$n_cells_g2 <- n2
-  
-  # Sort by pval
-  if (any(!is.na(dv_result$pval))) {
-    dv_result <- dv_result %>% dplyr::arrange(pval)
-  }
-  
-  return(dv_result)
-}
 
 # =============================================================================
 # --- PART 4: ENRICHR WRAPPER -------------------------------------------------
@@ -435,39 +240,6 @@ if (RUN_ENRICHR) {
   })
 }
 
-run_enrichr_ora <- function(gene_list, label) {
-  # Returns a flat data frame with a 'database' column, or NULL if skipped
-  if (!RUN_ENRICHR || length(gene_list) == 0) return(NULL)
-  gene_list <- gene_list[!is.na(gene_list) & gene_list != ""]
-  if (length(gene_list) < 5) {
-    message(paste("  [SKIP Enrichr] Too few genes for:", label))
-    return(NULL)
-  }
-  Sys.sleep(2)   # respect Enrichr rate limit
-  tryCatch({
-    enrich_res <- enrichr(gene_list, ENRICHR_DBS)
-    flat_rows  <- list()
-    for (db in names(enrich_res)) {
-      df <- enrich_res[[db]]
-      if (!is.null(df) && nrow(df) > 0) {
-        df <- df %>%
-          dplyr::filter(Adjusted.P.value < 0.05) %>%
-          dplyr::arrange(Adjusted.P.value) %>%
-          head(100) %>%
-          dplyr::mutate(database = db, .before = 1)
-        flat_rows[[db]] <- df
-      }
-    }
-    if (length(flat_rows) > 0) {
-      message(paste("  Enrichr done:", label))
-      return(dplyr::bind_rows(flat_rows))
-    }
-    return(NULL)
-  }, error = function(e) {
-    message(paste("  [ERROR Enrichr]", e$message))
-    return(NULL)
-  })
-}
 
 # =============================================================================
 # --- PART 5: MAIN MAST + SPLINEDV LOOP ---------------------------------------
@@ -507,7 +279,10 @@ for (ct in all_cell_types) {
     message(paste("  Contrast:", contrast_name, "|", ident1, "vs", ident2))
     
     # --- MAST DE -------------------------------------------------------------
-    result <- run_mast(so_ct, ident.1 = ident1, ident.2 = ident2)
+    result <- run_mast(so_ct, ident.1 = ident1, ident.2 = ident2,
+                       group_by = CONDITION_COLUMN, latent_vars = SAMPLE_COLUMN,
+                       logfc_thresh = DE_LOGFC_THRESH, min_pct = DE_MIN_PCT,
+                       min_cells = MIN_CELLS_GROUP)
     
     if (!is.null(result)) {
       n_sig <- sum(result$p_val_adj < DE_PADJ_THRESH, na.rm = TRUE)
@@ -536,8 +311,8 @@ for (ct in all_cell_types) {
                               result$confidence == "high"]
       
       # MAST Enrichr
-      enr_up <- run_enrichr_ora(sig_up, paste0(contrast_name, "_UP"))
-      enr_dn <- run_enrichr_ora(sig_dn, paste0(contrast_name, "_DOWN"))
+      enr_up <- run_enrichr_ora(sig_up, paste0(contrast_name, "_UP"), dbs = ENRICHR_DBS, enabled = RUN_ENRICHR)
+      enr_dn <- run_enrichr_ora(sig_dn, paste0(contrast_name, "_DOWN"), dbs = ENRICHR_DBS, enabled = RUN_ENRICHR)
       if (!is.null(enr_up)) {
         ct_enrichr_sheets[[paste0(contrast_name, "_UP")]] <- enr_up
         enr_de_all[[paste0(ct, "|", contrast_name, "|UP")]] <- enr_up %>%
@@ -579,7 +354,8 @@ for (ct in all_cell_types) {
       celltype_col  = CELLTYPE_COLUMN,
       condition_col = CONDITION_COLUMN,
       group1        = ident1,
-      group2        = ident2
+      group2        = ident2,
+      min_cells     = MIN_CELLS_GROUP
     )
     
     if (!is.null(dv_result)) {
@@ -589,7 +365,7 @@ for (ct in all_cell_types) {
       
       # SplineDV standalone Enrichr
       dv_sig_genes <- dv_result$gene[dv_result$pval <= DV_PVAL_THRESH & !is.na(dv_result$pval)]
-      enr_dv <- run_enrichr_ora(dv_sig_genes, paste0(contrast_name, "_DV_only"))
+      enr_dv <- run_enrichr_ora(dv_sig_genes, paste0(contrast_name, "_DV_only"), dbs = ENRICHR_DBS, enabled = RUN_ENRICHR)
       if (!is.null(enr_dv)) {
         enr_dv_all[[paste0(ct, "|", contrast_name)]] <- enr_dv %>%
           dplyr::mutate(cell_type = ct, contrast = contrast_name)
@@ -617,7 +393,7 @@ for (ct in all_cell_types) {
         if (nrow(ov_up) > 0) {
           ct_overlap_sheets[[paste0(contrast_name, "_UP")]] <- ov_up
           message(paste("  → Overlap UP:", nrow(ov_up), "genes"))
-          enr_ov_up <- run_enrichr_ora(ov_up$gene, paste0(contrast_name, "_overlap_UP"))
+          enr_ov_up <- run_enrichr_ora(ov_up$gene, paste0(contrast_name, "_overlap_UP"), dbs = ENRICHR_DBS, enabled = RUN_ENRICHR)
           if (!is.null(enr_ov_up)) {
             ct_ov_enr_sheets[[paste0(contrast_name, "_UP")]] <- enr_ov_up
             enr_overlap_all[[paste0(ct, "|", contrast_name, "|UP")]] <- enr_ov_up %>%
@@ -636,7 +412,7 @@ for (ct in all_cell_types) {
         if (nrow(ov_dn) > 0) {
           ct_overlap_sheets[[paste0(contrast_name, "_DOWN")]] <- ov_dn
           message(paste("  → Overlap DOWN:", nrow(ov_dn), "genes"))
-          enr_ov_dn <- run_enrichr_ora(ov_dn$gene, paste0(contrast_name, "_overlap_DOWN"))
+          enr_ov_dn <- run_enrichr_ora(ov_dn$gene, paste0(contrast_name, "_overlap_DOWN"), dbs = ENRICHR_DBS, enabled = RUN_ENRICHR)
           if (!is.null(enr_ov_dn)) {
             ct_ov_enr_sheets[[paste0(contrast_name, "_DOWN")]] <- enr_ov_dn
             enr_overlap_all[[paste0(ct, "|", contrast_name, "|DOWN")]] <- enr_ov_dn %>%
@@ -659,20 +435,20 @@ for (ct in all_cell_types) {
   
   # DE file: one sheet per contrast, sorted log2FC desc
   de_file <- file.path(DE_OUT_DIR, paste0(safe_ct, "_MAST_DE.xlsx"))
-  write_xlsx(finalize_all(ct_de_sheets), de_file)
+  write_xlsx(finalize_all(ct_de_sheets, add_ensembl = ADD_ENSEMBL), de_file)
   message(paste("  Saved:", basename(de_file)))
   
   # SplineDV file: one sheet per contrast, sorted by DV pval
   if (any(sapply(ct_dv_sheets, function(x) !is.null(x) && nrow(x) > 1))) {
     dv_file <- file.path(DE_OUT_DIR, paste0(safe_ct, "_SplineDV.xlsx"))
-    write_xlsx(finalize_all(ct_dv_sheets), dv_file)
+    write_xlsx(finalize_all(ct_dv_sheets, add_ensembl = ADD_ENSEMBL), dv_file)
     message(paste("  Saved:", basename(dv_file)))
   }
   
   # DV ∩ DE Overlap file
   if (length(ct_overlap_sheets) > 0) {
     ov_file <- file.path(DE_OUT_DIR, paste0(safe_ct, "_DV_DE_Overlap.xlsx"))
-    write_xlsx(finalize_all(ct_overlap_sheets), ov_file)
+    write_xlsx(finalize_all(ct_overlap_sheets, add_ensembl = ADD_ENSEMBL), ov_file)
     message(paste("  Saved:", basename(ov_file)))
   }
   
@@ -754,159 +530,18 @@ HEATMAP_MIN_GENE_OVERLAP <- 3
 HEATMAP_REDUNDANCY_RATIO <- 0.5
 HEATMAP_MIN_CELL_TYPES   <- 2
 
-make_pathway_heatmap <- function(enr_list, title, out_file) {
-  if (length(enr_list) == 0) {
-    message(paste("  [SKIP heatmap] No enrichr data for:", title))
-    return(invisible(NULL))
-  }
-  all_enr <- dplyr::bind_rows(enr_list)
-  if (nrow(all_enr) == 0) return(invisible(NULL))
-  
-  # Filter to GOBP only — most interpretable for biological pathway stories
-  all_enr <- all_enr %>%
-    dplyr::filter(database == "GO_Biological_Process_2026")
-  
-  if (nrow(all_enr) == 0) {
-    message(paste("  [SKIP heatmap] No GOBP results for:", title))
-    return(invisible(NULL))
-  }
-  
-  all_enr <- all_enr %>%
-    dplyr::mutate(
-      gene_count     = as.integer(sub("/.*", "", Overlap)),
-      neg_log10_padj = -log10(pmax(Adjusted.P.value, 1e-10))
-    ) %>%
-    dplyr::filter(Adjusted.P.value < 0.05, gene_count >= HEATMAP_MIN_GENE_OVERLAP)
-  
-  if (nrow(all_enr) == 0) {
-    message(paste("  [SKIP heatmap] No significant pathways after filtering for:", title))
-    return(invisible(NULL))
-  }
-  
-  if ("direction" %in% colnames(all_enr)) {
-    all_enr <- all_enr %>%
-      dplyr::mutate(group_key = paste0(cell_type, "\n", contrast, "\n", direction))
-  } else {
-    all_enr <- all_enr %>%
-      dplyr::mutate(group_key = paste0(cell_type, "\n", contrast))
-  }
-  
-  deduplicate_pathways <- function(df) {
-    if (nrow(df) <= 1) return(df)
-    df <- df %>%
-      dplyr::mutate(score = gene_count * neg_log10_padj) %>%
-      dplyr::arrange(desc(score))
-    gene_lists <- lapply(df$Genes, function(g) unlist(strsplit(g, ";\\s*|,\\s*")))
-    keep <- rep(TRUE, nrow(df))
-    n    <- nrow(df)
-    for (i in seq_len(n)) {
-      if (!keep[i]) next
-      if (i == n) break
-      for (j in seq(i + 1, n)) {
-        if (!keep[j]) next
-        gi <- gene_lists[[i]]; gj <- gene_lists[[j]]
-        shared <- length(intersect(gi, gj))
-        pct_i  <- if (length(gi) > 0) shared / length(gi) else 0
-        pct_j  <- if (length(gj) > 0) shared / length(gj) else 0
-        if (pct_j > HEATMAP_REDUNDANCY_RATIO || pct_i > HEATMAP_REDUNDANCY_RATIO)
-          keep[j] <- FALSE
-      }
-    }
-    df[keep, ] %>% dplyr::select(-score)
-  }
-  
-  all_enr_dedup <- all_enr %>%
-    dplyr::group_by(group_key) %>%
-    dplyr::group_modify(~ deduplicate_pathways(.x) %>% head(HEATMAP_TOP_N_PATHWAYS)) %>%
-    dplyr::ungroup()
-  
-  median_gene_count <- median(all_enr_dedup$gene_count, na.rm = TRUE)
-  
-  pathway_global <- all_enr_dedup %>%
-    dplyr::group_by(Term) %>%
-    dplyr::summarise(
-      n_cell_types    = dplyr::n_distinct(cell_type),
-      mean_gene_count = mean(gene_count, na.rm = TRUE),
-      mean_score      = mean(gene_count * neg_log10_padj, na.rm = TRUE),
-      .groups = "drop"
-    ) %>%
-    dplyr::filter(
-      n_cell_types >= HEATMAP_MIN_CELL_TYPES |
-        mean_gene_count >= median_gene_count
-    ) %>%
-    dplyr::arrange(desc(n_cell_types), desc(mean_score)) %>%
-    head(HEATMAP_TOP_N_PATHWAYS)
-  
-  selected_terms <- pathway_global$Term
-  if (length(selected_terms) == 0) {
-    message(paste("  [SKIP heatmap] No cross-representative pathways for:", title))
-    return(invisible(NULL))
-  }
-  message(paste("  Pathways selected:", length(selected_terms)))
-  
-  heatmap_df <- all_enr_dedup %>%
-    dplyr::filter(Term %in% selected_terms) %>%
-    dplyr::group_by(Term, group_key) %>%
-    dplyr::summarise(
-      neg_log10_padj = max(neg_log10_padj, na.rm = TRUE),
-      gene_count     = max(gene_count,     na.rm = TRUE),
-      .groups = "drop"
-    ) %>%
-    tidyr::complete(Term, group_key,
-                    fill = list(neg_log10_padj = 0, gene_count = 0))
-  
-  term_order         <- pathway_global$Term
-  term_order_wrapped <- stringr::str_wrap(term_order, width = 35)
-  heatmap_df$Term    <- stringr::str_wrap(heatmap_df$Term, width = 35)
-  heatmap_df$Term    <- factor(heatmap_df$Term, levels = rev(term_order_wrapped))
-  heatmap_df$group_key <- factor(heatmap_df$group_key)
-  heatmap_df$label   <- ifelse(heatmap_df$gene_count > 0,
-                               as.character(heatmap_df$gene_count), "")
-  
-  n_terms  <- length(unique(heatmap_df$Term))
-  n_groups <- length(unique(heatmap_df$group_key))
-  
-  p_heat <- ggplot(heatmap_df,
-                   aes(x = group_key, y = Term, fill = neg_log10_padj)) +
-    geom_tile(color = "white", linewidth = 0.4) +
-    geom_text(aes(label = label), size = 4.5, color = "black", fontface = "bold") +
-    scale_fill_gradient(low = "white", high = "#d73027",
-                        name = "-log10\n(adj.p)", na.value = "grey95") +
-    labs(title    = title,
-         subtitle = paste0("Top ", n_terms, " pathways | Gene count in cells | ",
-                           "logFC ≥ 1.0 genes only | GOBP only | ",
-                           "Redundancy: ", HEATMAP_REDUNDANCY_RATIO * 100, "%"),
-         x = NULL, y = NULL) +
-    theme_bw(base_size = 16) +
-    theme(
-      plot.title    = element_text(hjust = 0.5, size = 18, face = "bold"),
-      plot.subtitle = element_text(hjust = 0.5, size = 12, color = "grey40"),
-      axis.text.x   = element_text(angle = 45, hjust = 1, size = 12),
-      axis.text.y   = element_text(size = 13),
-      legend.title  = element_text(size = 13),
-      legend.text   = element_text(size = 12),
-      panel.grid    = element_blank(),
-      plot.margin   = margin(10, 10, 10, 20)
-    )
-  
-  w <- max(10, n_groups * 1.6 + 4)
-  h <- max(8,  n_terms  * 0.7 + 5)
-  
-  ggsave(out_file, p_heat, width = w, height = h,
-         dpi = DPI_SETTING, bg = "white", limitsize = FALSE)
-  message(paste("  Heatmap saved:", basename(out_file)))
-  
-  write.csv(
-    heatmap_df %>%
-      dplyr::left_join(
-        pathway_global %>%
-          dplyr::select(Term, n_cell_types, mean_gene_count) %>%
-          dplyr::mutate(Term = stringr::str_wrap(Term, width = 35)),
-        by = "Term"),
-    sub("\\.png$", "_data.csv", out_file), row.names = FALSE
-  )
-  return(invisible(p_heat))
-}
+
+# =============================================================================
+# --- PATHWAY BARPLOTS (companion to the heatmaps) ----------------------------
+# =============================================================================
+# Top-N enriched GOBP pathways as a horizontal barplot:
+#   bar length = Odds Ratio (ORA effect size; falls back to Combined Score,
+#                then gene overlap if a column is absent)
+#   bar colour = adjusted p-value (red = most significant)
+#   number at bar end = gene count (overlap with the pathway)
+# Pools cell types by keeping each pathway's most significant occurrence, then
+# takes the top ENRICHR_TOP_N by significance. One per contrast/direction, saved
+# next to the matching heatmap.
 
 # --- 1: DE MAST — one per contrast per direction ---------------------------
 message("\n=== Generating DE MAST pathway heatmaps ===")
@@ -916,9 +551,15 @@ for (contrast_name in names(CONTRASTS_LIST)) {
   make_pathway_heatmap(enr_up,
                        paste("DE MAST — UP —", contrast_name, "—", MODE),
                        file.path(DE_OUT_DIR, paste0("HEATMAP_DE_MAST_UP_", contrast_name, ".png")))
+  make_pathway_barplot(enr_up,
+                       paste("DE MAST — UP —", contrast_name, "—", MODE),
+                       file.path(DE_OUT_DIR, paste0("BARPLOT_DE_MAST_UP_", contrast_name, ".png")))
   make_pathway_heatmap(enr_down,
                        paste("DE MAST — DOWN —", contrast_name, "—", MODE),
                        file.path(DE_OUT_DIR, paste0("HEATMAP_DE_MAST_DOWN_", contrast_name, ".png")))
+  make_pathway_barplot(enr_down,
+                       paste("DE MAST — DOWN —", contrast_name, "—", MODE),
+                       file.path(DE_OUT_DIR, paste0("BARPLOT_DE_MAST_DOWN_", contrast_name, ".png")))
 }
 
 # --- 2: DV+DE Overlap — one per contrast per direction --------------------
@@ -929,9 +570,15 @@ for (contrast_name in names(CONTRASTS_LIST)) {
   make_pathway_heatmap(enr_up,
                        paste("DV+DE Overlap — UP —", contrast_name, "—", MODE),
                        file.path(DE_OUT_DIR, paste0("HEATMAP_Overlap_UP_", contrast_name, ".png")))
+  make_pathway_barplot(enr_up,
+                       paste("DV+DE Overlap — UP —", contrast_name, "—", MODE),
+                       file.path(DE_OUT_DIR, paste0("BARPLOT_Overlap_UP_", contrast_name, ".png")))
   make_pathway_heatmap(enr_down,
                        paste("DV+DE Overlap — DOWN —", contrast_name, "—", MODE),
                        file.path(DE_OUT_DIR, paste0("HEATMAP_Overlap_DOWN_", contrast_name, ".png")))
+  make_pathway_barplot(enr_down,
+                       paste("DV+DE Overlap — DOWN —", contrast_name, "—", MODE),
+                       file.path(DE_OUT_DIR, paste0("BARPLOT_Overlap_DOWN_", contrast_name, ".png")))
 }
 
 # --- 3: SplineDV — one per contrast (no direction) ------------------------
@@ -941,210 +588,16 @@ for (contrast_name in names(CONTRASTS_LIST)) {
   make_pathway_heatmap(enr_dv,
                        paste("SplineDV — DV Pathways —", contrast_name, "—", MODE),
                        file.path(DE_OUT_DIR, paste0("HEATMAP_SplineDV_", contrast_name, ".png")))
+  make_pathway_barplot(enr_dv,
+                       paste("SplineDV — DV Pathways —", contrast_name, "—", MODE),
+                       file.path(DE_OUT_DIR, paste0("BARPLOT_SplineDV_", contrast_name, ".png")))
 }
 
 # =============================================================================
 # --- GENE HUB HEATMAPS -------------------------------------------------------
 # =============================================================================
-gene_hub_dir <- file.path(DE_OUT_DIR, "gene_heatmaps")
-if (!dir.exists(gene_hub_dir)) dir.create(gene_hub_dir, recursive = TRUE)
+gene_hub_dir <- DE_OUT_DIR   # gene-hub heatmaps go in the master DE folder
 
-make_gene_hub_heatmap <- function(enr_list, de_list, title, out_file) {
-  # enr_list: named list of enrichr flat dfs (cell_type, contrast, direction cols)
-  # de_list:  named list of DE result dfs (gene, avg_log2FC, p_val_adj, cell_type)
-  
-  if (length(enr_list) == 0 || length(de_list) == 0) {
-    message(paste("  [SKIP gene hub] Insufficient data for:", title))
-    return(invisible(NULL))
-  }
-  
-  # --- 1. Build pathway universe from enrichr results -----------------------
-  all_enr <- dplyr::bind_rows(enr_list) %>%
-    dplyr::filter(database == "GO_Biological_Process_2026") %>%   # GOBP only
-    dplyr::mutate(
-      gene_count     = as.integer(sub("/.*", "", Overlap)),
-      neg_log10_padj = -log10(pmax(Adjusted.P.value, 1e-10))
-    ) %>%
-    dplyr::filter(Adjusted.P.value < 0.05, gene_count >= HEATMAP_MIN_GENE_OVERLAP)
-  
-  if (nrow(all_enr) == 0) {
-    message(paste("  [SKIP gene hub] No significant pathways for:", title))
-    return(invisible(NULL))
-  }
-  
-  # Select top pathways — same scoring as pathway heatmap
-  top_pathways <- all_enr %>%
-    dplyr::group_by(Term) %>%
-    dplyr::summarise(
-      mean_gene_count = mean(gene_count, na.rm = TRUE),
-      mean_score      = mean(gene_count * neg_log10_padj, na.rm = TRUE),
-      .groups = "drop"
-    ) %>%
-    dplyr::arrange(desc(mean_score)) %>%
-    head(GENE_HUB_TOP_N_PATHWAYS)
-  
-  selected_pathways <- top_pathways$Term
-  
-  # --- 2. Build gene universe from DE results --------------------------------
-  all_de <- dplyr::bind_rows(de_list) %>%
-    dplyr::filter(p_val_adj <= 0.05, abs(avg_log2FC) >= GENE_HUB_MIN_LOGFC)
-  
-  if (nrow(all_de) == 0) {
-    message(paste("  [SKIP gene hub] No qualifying DE genes for:", title))
-    return(invisible(NULL))
-  }
-  
-  # --- 3. Build gene × pathway membership matrix ----------------------------
-  # Parse pathway gene lists
-  pathway_gene_lists <- all_enr %>%
-    dplyr::filter(Term %in% selected_pathways) %>%
-    dplyr::select(Term, Genes) %>%
-    dplyr::distinct() %>%
-    dplyr::rowwise() %>%
-    dplyr::mutate(
-      gene_vec = list(trimws(unlist(strsplit(Genes, ";|,"))))
-    ) %>%
-    dplyr::ungroup()
-  
-  # Get unique qualifying DE genes
-  de_genes <- unique(all_de$gene)
-  
-  # For each gene × pathway: is the gene in the pathway?
-  membership <- tidyr::expand_grid(
-    gene = de_genes,
-    Term = selected_pathways
-  ) %>%
-    dplyr::left_join(
-      pathway_gene_lists %>% dplyr::select(Term, gene_vec),
-      by = "Term"
-    ) %>%
-    dplyr::rowwise() %>%
-    dplyr::mutate(
-      member = gene %in% gene_vec[[1]]
-    ) %>%
-    dplyr::ungroup() %>%
-    dplyr::select(gene, Term, member)
-  
-  # --- 4. Score genes by hub connectivity -----------------------------------
-  gene_hub_scores <- membership %>%
-    dplyr::filter(member) %>%
-    dplyr::group_by(gene) %>%
-    dplyr::summarise(
-      n_pathways = dplyr::n_distinct(Term),
-      .groups = "drop"
-    ) %>%
-    dplyr::filter(n_pathways >= GENE_HUB_MIN_PATHWAYS) %>%
-    dplyr::left_join(
-      all_de %>%
-        dplyr::group_by(gene) %>%
-        dplyr::summarise(
-          avg_log2FC = mean(avg_log2FC, na.rm = TRUE),
-          .groups = "drop"
-        ),
-      by = "gene"
-    ) %>%
-    dplyr::mutate(hub_score = n_pathways * abs(avg_log2FC)) %>%
-    dplyr::arrange(desc(hub_score)) %>%
-    head(GENE_HUB_TOP_N_GENES)
-  
-  if (nrow(gene_hub_scores) == 0) {
-    message(paste("  [SKIP gene hub] No hub genes found (need >=",
-                  GENE_HUB_MIN_PATHWAYS, "pathway memberships) for:", title))
-    return(invisible(NULL))
-  }
-  
-  top_genes    <- gene_hub_scores$gene
-  selected_pathways_final <- selected_pathways[
-    selected_pathways %in% (membership %>%
-                              dplyr::filter(gene %in% top_genes, member) %>%
-                              dplyr::pull(Term) %>% unique())
-  ]
-  
-  # --- 5. Build plot matrix -------------------------------------------------
-  plot_df <- membership %>%
-    dplyr::filter(gene %in% top_genes, Term %in% selected_pathways_final) %>%
-    dplyr::left_join(
-      all_de %>%
-        dplyr::group_by(gene) %>%
-        dplyr::summarise(avg_log2FC = mean(avg_log2FC, na.rm = TRUE),
-                         .groups = "drop"),
-      by = "gene"
-    ) %>%
-    dplyr::mutate(
-      fill_val = ifelse(member, avg_log2FC, NA_real_),
-      label    = ifelse(member, sprintf("%.1f", avg_log2FC), "")
-    )
-  
-  # Order genes by hub score (top hub at top)
-  gene_order    <- gene_hub_scores$gene
-  pathway_order <- stringr::str_wrap(selected_pathways_final, width = GENE_HUB_WRAP_WIDTH)
-  
-  plot_df$gene <- factor(plot_df$gene, levels = rev(gene_order))
-  plot_df$Term <- factor(
-    stringr::str_wrap(plot_df$Term, width = GENE_HUB_WRAP_WIDTH),
-    levels = pathway_order
-  )
-  
-  # Add n_pathways annotation to gene labels
-  gene_labels <- gene_hub_scores %>%
-    dplyr::mutate(label_full = paste0(gene, " (", n_pathways, ")")) %>%
-    dplyr::select(gene, label_full)
-  levels(plot_df$gene) <- gene_labels$label_full[
-    match(levels(plot_df$gene), gene_labels$gene)
-  ]
-  
-  n_genes    <- length(unique(plot_df$gene))
-  n_pathways <- length(unique(plot_df$Term))
-  
-  # --- 6. Plot --------------------------------------------------------------
-  p_hub <- ggplot(plot_df, aes(x = Term, y = gene)) +
-    geom_tile(aes(fill = fill_val), color = "white", linewidth = 0.4) +
-    geom_text(aes(label = label), size = 3.8, color = "black", fontface = "bold") +
-    scale_fill_gradient2(
-      low      = "#4575b4",
-      mid      = "white",
-      high     = "#d73027",
-      midpoint = 0,
-      name     = "avg\nlog2FC",
-      na.value = "grey92"     # NA cells automatically get grey
-    ) +
-    labs(
-      title    = title,
-      subtitle = paste0(
-        "Genes: padj ≤ 0.05 | logFC ≥ ", GENE_HUB_MIN_LOGFC,
-        " | Red = up-regulated | Blue = down-regulated | ",
-        "Number = logFC (1dp) | Gene label: name (n pathways) | ",
-        "Hub score = n_pathways × |logFC| | GOBP only"
-      ),
-      x = NULL, y = NULL
-    ) +
-    theme_bw(base_size = 15) +
-    theme(
-      plot.title    = element_text(hjust = 0.5, size = 17, face = "bold"),
-      plot.subtitle = element_text(hjust = 0.5, size = 10, color = "grey40"),
-      axis.text.x   = element_text(angle = 45, hjust = 1, size = 10),
-      axis.text.y   = element_text(size = 11),
-      legend.title  = element_text(size = 12),
-      legend.text   = element_text(size = 11),
-      panel.grid    = element_blank(),
-      plot.margin   = margin(10, 10, 10, 20)
-    )
-  
-  w <- max(10, n_pathways * 1.4 + 4)
-  h <- max(8,  n_genes    * 0.5 + 5)
-  
-  ggsave(out_file, p_hub, width = w, height = h,
-         dpi = DPI_SETTING, bg = "white", limitsize = FALSE)
-  message(paste("  Gene hub heatmap saved:", basename(out_file),
-                "| Hub genes:", n_genes, "| Pathways:", n_pathways))
-  
-  # Save data
-  write.csv(
-    plot_df %>% dplyr::select(gene, Term, member, fill_val, label),
-    sub("\\.png$", "_data.csv", out_file), row.names = FALSE
-  )
-  return(invisible(p_hub))
-}
 
 # --- Run gene hub heatmaps per contrast -------------------------------------
 message("\n=== Generating Gene Hub heatmaps ===")
@@ -1194,8 +647,7 @@ for (contrast_name in names(CONTRASTS_LIST)) {
 if (RUN_ANOVA) {
   library(broom)
   
-  anova_dir <- file.path(DE_OUT_DIR, "ANOVA")
-  if (!dir.exists(anova_dir)) dir.create(anova_dir, recursive = TRUE)
+  anova_dir <- DE_OUT_DIR   # ANOVA outputs go in the master DE folder
   
   # --- Auto-derive Genotype and Sex columns if needed (for two-way ANOVA) ---
   if (USE_TWO_WAY_ANOVA) {
@@ -1273,7 +725,7 @@ if (RUN_ANOVA) {
     
     # Enrichr on top N genes — flat table saved alongside ANOVA csv
     top_genes <- head(anova_wide$gene[!is.na(anova_wide[[sort_col]])], ANOVA_TOP_N)
-    enr_anova <- run_enrichr_ora(top_genes, paste0(label, "_ANOVA_top", ANOVA_TOP_N))
+    enr_anova <- run_enrichr_ora(top_genes, paste0(label, "_ANOVA_top", ANOVA_TOP_N), dbs = ENRICHR_DBS, enabled = RUN_ENRICHR)
     if (!is.null(enr_anova)) {
       enr_file <- file.path(anova_dir, paste0(label, "_ANOVA_Enrichr.xlsx"))
       write_xlsx(list(Enrichr = as.data.frame(enr_anova)), enr_file)
