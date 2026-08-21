@@ -9,6 +9,7 @@
 #   a flat h5_files/ directory laid out exactly the way Script 01 expects:
 #
 #     h5_files/<SampleID>/sample_filtered_feature_bc_matrix.h5
+#     h5_files/<SampleID>/sample_raw_feature_bc_matrix.h5
 #     h5_files/<SampleID>/sample_raw_probe_bc_matrix.h5   (optional)
 #     h5_files/<SampleID>/web_summary.html                (optional)
 #
@@ -62,6 +63,7 @@ DEST_DIR="h5_files"
 COPY_FILTERED="yes"
 COPY_PROBE="yes"
 COPY_SUMMARY="yes"
+COPY_RAW="yes"
 
 # OVERWRITE: "no" skips files already staged (safe to re-run); "yes" re-copies.
 OVERWRITE="no"
@@ -71,6 +73,7 @@ OVERWRITE="no"
 # =============================================================================
 
 FILTERED_NAME="sample_filtered_feature_bc_matrix.h5"
+RAW_NAME="sample_raw_feature_bc_matrix.h5"
 PROBE_NAME="sample_raw_probe_bc_matrix.h5"
 SUMMARY_NAME="web_summary.html"
 
@@ -88,7 +91,7 @@ echo "============================================================"
 echo " Source root : ${SOURCE_ROOT}"
 echo " Pools       : ${POOLS[*]}"
 echo " Destination : ${DEST_DIR}"
-echo " Copying     : filtered=${COPY_FILTERED} probe=${COPY_PROBE} summary=${COPY_SUMMARY}"
+echo " Copying     : filtered=${COPY_FILTERED} raw=${COPY_RAW} probe=${COPY_PROBE} summary=${COPY_SUMMARY}"
 [ "${DRY_RUN}" = "1" ] && echo " MODE        : DRY RUN (nothing will be copied)"
 echo "============================================================"
 echo
@@ -177,6 +180,8 @@ for pool in "${POOLS[@]}"; do
       copy_one "${sample_path}${PROBE_NAME}"    "${target}" "no"  "${sample}"
     [ "${COPY_SUMMARY}" = "yes" ] && \
       copy_one "${sample_path}${SUMMARY_NAME}"  "${target}" "no"  "${sample}"
+    [ "${COPY_RAW}" = "yes" ] && \
+      copy_one "${sample_path}${RAW_NAME}"  "${target}" "no"  "${sample}"
   done
   echo
 done
