@@ -67,20 +67,37 @@ run_decontx <- function(x, assay = "RNA", round_counts = TRUE,
   tryCatch({
     counts_sparse <- SeuratObject::GetAssayData(x, assay = assay, layer = "counts")
 
+    # decontX requires the background to share the SAME GENES (rows) as the
+    # sample. The filtered Seurat object usually carries fewer genes than the raw
+    # matrix (CreateSeuratObject's min.cells drops some), which is exactly the
+    # 'eta rows != counts rows' error. So restrict BOTH to their shared genes.
+    # This aligns GENES (rows) only -- cells are left alone (decontX itself drops
+    # the filtered barcodes from the background).
+    used_bg <- FALSE
+    genes   <- NULL
+    res     <- NULL
     if (!is.null(bg)) {
-      # DecontX needs the background genes to match. Use the intersection; any
-      # custom feature absent from the raw matrix (e.g. a summed probe) keeps its
-      # original counts and is stitched back afterwards.
-      common <- intersect(rownames(counts_sparse), rownames(bg))
-      if (length(common) < 2) stop("background shares too few genes with the sample")
-      res <- celda::decontX(x = counts_sparse[common, , drop = FALSE],
-                            background = bg[common, , drop = FALSE])
-      dec <- res$decontXcounts
-      extra <- setdiff(rownames(counts_sparse), common)
-      corrected_counts <- if (length(extra) == 0) dec
-        else rbind(dec, counts_sparse[extra, , drop = FALSE])[rownames(counts_sparse), ]
+      genes <- intersect(rownames(counts_sparse), rownames(bg))
+      res <- tryCatch({
+        r <- celda::decontX(x = counts_sparse[genes, , drop = FALSE],
+                            background = bg[genes, , drop = FALSE])
+        used_bg <- TRUE
+        message("      background aligned to ", length(genes), " shared genes (rows).")
+        r
+      }, error = function(e) {
+        message("      [WARN] DecontX with background failed (", e$message,
+                "); retrying without background."); NULL })
+    }
+    if (is.null(res)) res <- celda::decontX(x = counts_sparse)
+
+    if (used_bg) {
+      dec   <- res$decontXcounts
+      extra <- setdiff(rownames(counts_sparse), genes)   # sample genes absent from raw
+      corrected_counts <- if (length(extra) == 0)
+        dec[rownames(counts_sparse), , drop = FALSE]
+      else
+        rbind(dec, counts_sparse[extra, , drop = FALSE])[rownames(counts_sparse), , drop = FALSE]
     } else {
-      res <- celda::decontX(x = counts_sparse)
       corrected_counts <- res$decontXcounts
     }
 

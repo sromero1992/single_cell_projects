@@ -14,6 +14,7 @@ library(Seurat)
 # =============================================================================
 PROJECT_NAME  <- "Nr4a1_ack17"
 ROOT_PATH     <- "/mnt/SCDC/Optimus/selim_working_dir/2026_nr4a1_ack/r_process/debug_pipeline_pkg"
+ROOT_PATH     <- "/home/ssromerogon/local_drive/optimus_drive/selim_working_dir/2026_nr4a1_ack/r_process/debug_pipeline_pkg"
 METADATA_FILE <- file.path(ROOT_PATH, "Nr4a1_s17_metadata.xlsx")
 H5_DIR        <- file.path(ROOT_PATH, "h5_files")
 OUTPUT_DIR    <- file.path(ROOT_PATH, "seurat_output")
@@ -183,6 +184,9 @@ if (dbl$method == "both") {
   )
 }
 
+
+feats <- c("Epcam", "Cd3e", "Pecam1", "Cd19", "Cd68", "Sox10", "Tubb3", "Col1a1", "Myh11", "Sox4", "Sox9")
+FeaturePlot(merged_obj, reduction = "umap_harmony", features = feats)
 DimPlot(merged_obj, reduction = "umap_harmony", group.by = "clusters_harmony")
 
 # =============================================================================
