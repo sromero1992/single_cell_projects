@@ -52,16 +52,12 @@
 # ============================================================================
 # BATCHING STRATEGY
 # ============================================================================
-#   The CytoTRACE 2 authors recommend running SEPARATELY over each dataset
-#   rather than integrating first, because the post-processing step smooths
-#   predictions using neighbouring cells and can therefore be distorted by
-#   batch effects. Absolute outputs (CytoTRACE2_Score, _Potency) are calibrated
-#   and remain comparable across runs; CytoTRACE2_Relative is NOT comparable
-#   across runs, as it is rescaled within each input.
-#
-#   RUN_PER_SAMPLE = TRUE (default) honours this: each SampleID is scored
-#   independently and results are stitched back together. Set FALSE only if
-#   you have few cells per sample and accept the caveat.
+#   CytoTRACE 2 is run once over the WHOLE dataset (the standard usage). The
+#   absolute outputs (CytoTRACE2_Score, _Potency) are calibrated, and scoring all
+#   cells together lets the KNN smoothing borrow strength across the many cells
+#   of each shared cell state - which gives cleaner scores than splitting the
+#   data into small subsets. CytoTRACE2_Relative is rescaled within the input,
+#   so it reflects this whole-dataset ordering.
 #
 # INSTALLATION:
 #   CytoTRACE 2 and CytoTRACE v1 are NOT on CRAN/Bioconductor and are the two
@@ -101,7 +97,7 @@ ROOT_PATH    <- "/home/ssromerogon/local_drive/optimus_drive/selim_working_dir/2
 OUTPUT_DIR   <- file.path(ROOT_PATH, "seurat_output")
 
 # Input object — the final annotated object from Script 06.
-RDS_PATH <- file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_final_annotated.rds"))
+RDS_PATH <- file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_unified_annotated.rds"))
 
 # Or point at a subtype object to score within one lineage:
 #RDS_PATH <- file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_tcells_subclustered.rds"))
@@ -110,14 +106,27 @@ RDS_PATH <- file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_final_annotated.rds"))
 SCORES_DIR <- file.path(OUTPUT_DIR, "cell_scores")
 
 # --- 1.2: Metadata Columns ---------------------------------------------------
-CELLTYPE_COLUMN  <- "CellType"        # "sub_cell_types" for subtype objects
+MODE <- "subtypes"
+CELLTYPE_COLUMN  <- if (MODE == "broad") "CellType_broad" else "CellType"
 SAMPLE_COLUMN    <- "SampleID"
-CONDITION_COLUMN <- "Diet"            # Wu diet study grouping variable
+CONDITION_COLUMN <- "Genotype_sex"
 
 # Order for plot axes. Put the control/reference level FIRST.
 # Set to NULL to use whatever order the factor already has.
-CONDITION_LEVELS <- NULL
-# e.g. CONDITION_LEVELS <- c("WT_Female", "Polyp_Female", "Polyp_NR4a1_KO_Female")
+CONDITION_LEVELS <- c(
+  "WT_Female", "Polyp_Female", "Polyp_NR4a1_KO_Female",
+  "WT_Male",   "Polyp_Male",   "Polyp_NR4a1_KO_Male"
+)
+
+# Pairwise contrasts: each is c(group1, group2). Used for the per-contrast score
+# comparisons (Wilcoxon per cell type) on both the potency/entropy and the
+# AUCell pathway scores.
+CONTRASTS_LIST <- list(
+  Nr4a1_KO_polyp_vs_polyp_Female = c("Polyp_NR4a1_KO_Female", "Polyp_Female"),
+  Nr4a1_KO_polyp_vs_polyp_Male   = c("Polyp_NR4a1_KO_Male",   "Polyp_Male"),
+  Polyp_vs_WT_Female             = c("Polyp_Female",          "WT_Female"),
+  Polyp_vs_WT_Male               = c("Polyp_Male",            "WT_Male")
+)
 
 # Reduction used for score UMAPs. Script 01 produces "umap_harmony".
 UMAP_REDUCTION <- "umap_harmony"
@@ -126,23 +135,62 @@ UMAP_REDUCTION <- "umap_harmony"
 RUN_CYTOTRACE2 <- TRUE   # absolute potency (recommended primary method)
 RUN_CYTOTRACE1 <- TRUE   # original relative CytoTRACE; skipped if not installed
 RUN_ENTROPY    <- TRUE   # native entropy metrics; no dependencies, always works
+RUN_PATHWAY_SCORES <- TRUE  # AUCell per-cell scoring of the GOBP gene sets below
+RUN_CCAT  <- TRUE    # CCAT connectome-correlation potency (SCENT PPI). Fully guarded:
+                     #   any failure in the fragile mouse->human->PPI chain is skipped.
+RUN_SCENT <- FALSE   # SCENT signalling entropy (CompSR) - slow (min); fully guarded.
+CCAT_SPECIES <- "mouse"  # "mouse" -> homologene 10090->9606 to the human PPI; "human" = direct
+
+# --- 1.3b: Pathway (AUCell) scoring ------------------------------------------
+# Per-cell activity of curated GO Biological Process gene sets, scored with
+# AUCell. Gene sets are pulled from org.Mm.eg.db by GO ID (GOALL = term +
+# descendants); if that is unavailable, the curated fallback list is used.
+# Column names become AUCell_<name>; these join the potency/entropy scores in
+# every by-condition plot and in the per-contrast comparisons.
+PATHWAY_SPECIES <- "mouse"    # "mouse" (org.Mm.eg.db) or "human" (org.Hs.eg.db)
+PATHWAY_GO_TERMS <- list(
+  canonical_WNT         = "GO:0060070",  # canonical Wnt signaling pathway
+  noncanonical_WNT      = "GO:0035567",  # non-canonical Wnt signaling pathway
+  apoptosis             = "GO:0006915",  # apoptotic process
+  programmed_cell_death = "GO:0012501",  # programmed cell death
+  ferroptosis           = "GO:0097707"   # ferroptosis
+)
+# Curated fallback gene sets (mouse symbols) used only if the GO lookup fails.
+PATHWAY_FALLBACK <- list(
+  canonical_WNT = c("Ctnnb1","Wnt3","Wnt3a","Lef1","Tcf7","Axin2","Ccnd1","Myc",
+                    "Apc","Gsk3b","Dvl1","Fzd1","Lrp6","Sox9","Ascl2"),
+  noncanonical_WNT = c("Wnt5a","Wnt11","Ror2","Vangl2","Prickle1","Daam1","Rhoa",
+                       "Rac1","Jun","Nfatc1","Ryk","Camk2a","Ptk7"),
+  apoptosis = c("Casp3","Casp8","Casp9","Bax","Bak1","Bcl2","Bcl2l1","Bid","Apaf1",
+                "Trp53","Fas","Fadd","Cycs","Diablo"),
+  programmed_cell_death = c("Casp3","Casp1","Ripk1","Ripk3","Mlkl","Tnf","Fas","Bax",
+                            "Bcl2","Gsdmd","Casp8","Tnfrsf1a","Zbp1"),
+  ferroptosis = c("Gpx4","Slc7a11","Acsl4","Ncoa4","Fth1","Ftl1","Slc3a2","Nfe2l2",
+                  "Tfrc","Alox15","Sat1","Aifm2","Vdac2")
+)
+PATHWAY_MIN_GENES <- 5   # skip a gene set with fewer than this many genes present
 
 # --- 1.4: CytoTRACE 2 Parameters ---------------------------------------------
 # SPECIES: "mouse" or "human". CytoTRACE 2's feature set is mouse-based; for
 #   human input it performs orthology mapping internally.
 CT2_SPECIES <- "mouse"
 
-# RUN_PER_SAMPLE: score each SampleID separately (recommended — see header).
-CT2_RUN_PER_SAMPLE <- TRUE
-
 # CT2_SLOT: which layer to feed. MUST be raw/CPM counts, never log-transformed.
 CT2_SLOT <- "counts"
 
-# CT2_NCORES: parallel cores. The authors advise 1-2 on machines with <16 GB
-#   RAM, since each worker holds a copy of the expression block.
-CT2_NCORES <- 4
+# CT2_PARALLELIZE: run the model + smoothing on multiple threads. This is the
+#   CytoTRACE 2 DOCUMENTED DEFAULT (TRUE) and the fast path on Linux. We only set
+#   it FALSE on Windows, where the socket cluster hangs (handled automatically
+#   below). Set FALSE by hand if you hit backend issues on your machine.
+CT2_PARALLELIZE <- TRUE
 
-# Batch sizes. Defaults follow the package recommendations:
+# CT2_NCORES: cores when parallelizing. NULL = the package default (auto-detects
+#   and uses half the cores; Windows forced to 1). The authors advise 1-2 on
+#   machines with < 16 GB RAM, since each worker holds a copy of the block.
+CT2_NCORES <- NULL
+
+# Batch sizes (package defaults). To reproduce the manuscript on a big machine,
+# the authors use batch_size = 100000, smooth_batch_size = 10000.
 #   batch_size        — cells processed at once (recommended for >10K cells)
 #   smooth_batch_size — subsample within a batch for the diffusion smoothing
 CT2_BATCH_SIZE        <- 10000
@@ -392,14 +440,14 @@ if (RUN_CYTOTRACE2) {
   message("\n=== STEP 2: CytoTRACE 2 ===")
   suppressPackageStartupMessages(library(CytoTRACE2))
 
-  # Container for results, filled either per-sample or in one pass.
+  # Container for results (whole-dataset pass).
   ct2_cols <- c("CytoTRACE2_Score", "CytoTRACE2_Potency", "CytoTRACE2_Relative",
                 "preKNN_CytoTRACE2_Score", "preKNN_CytoTRACE2_Potency")
   ct2_all  <- NULL
 
   # ---- Helper: build the exact input CytoTRACE 2 expects --------------------
-  # Validated on the scDVEP benchmark (see run_cytotrace2.R, NOTES_debugging.txt
-  # and cytotrace2_linux_setup.docx). Three things are enforced here because
+  # Validated on the scDVEP benchmark (see run_cytotrace2.R and INSTALL_NOTES.md
+  # section 1). Three things are enforced here because
   # each one, when wrong, silently collapses every score:
   #   1. DENSE data.frame (genes x cells). Sparse matrices cause SILENT failures.
   #   2. Gene SYMBOL rownames. If the object carries Ensembl IDs they are mapped
@@ -438,10 +486,10 @@ if (RUN_CYTOTRACE2) {
   }
 
   # ---- Helper: run CytoTRACE 2 on one Seurat object ------------------------
-  # Uses the VALIDATED argument set. Do NOT re-enable the parallelize_* flags or
-  # add verbose = TRUE: parallelize_smoothing = TRUE reintroduces socket-cluster
-  # hangs and 'verbose' is not a valid argument ("unused argument" error). Both
-  # were the source of repeated failed runs (see NOTES_debugging.txt section 1).
+  # Uses the documented argument set. parallelize_* follow CT2_PARALLELIZE (docs
+  # default TRUE), but are forced FALSE on Windows where the socket cluster hangs.
+  # Do NOT add verbose = TRUE - it is not a valid argument ("unused argument"
+  # error) and was a repeated source of failed runs (see INSTALL_NOTES.md sec 1).
   run_ct2_block <- function(obj, label) {
     if (ncol(obj) < CT2_MIN_CELLS) {
       message(paste0("    [SKIP] ", label, ": only ", ncol(obj),
@@ -449,6 +497,10 @@ if (RUN_CYTOTRACE2) {
       return(NULL)
     }
     message(paste0("    -> ", label, ": ", ncol(obj), " cells..."))
+
+    # Documented default is parallelize = TRUE; force FALSE only on Windows,
+    # where the socket cluster hangs (the reason we ran serial before).
+    ct2_par <- isTRUE(CT2_PARALLELIZE) && .Platform$OS.type != "windows"
 
     res <- tryCatch({
       # is_seurat = FALSE: feed a plain DENSE data.frame, not a Seurat object.
@@ -459,8 +511,8 @@ if (RUN_CYTOTRACE2) {
         species               = CT2_SPECIES,
         batch_size            = CT2_BATCH_SIZE,
         smooth_batch_size     = CT2_SMOOTH_BATCH_SIZE,
-        parallelize_models    = FALSE,   # validated: avoids parallel backend issues
-        parallelize_smoothing = FALSE,   # validated: REQUIRED, avoids socket hangs
+        parallelize_models    = ct2_par,   # docs default TRUE (auto-FALSE on Windows)
+        parallelize_smoothing = ct2_par,
         ncores                = CT2_NCORES,
         seed                  = 14
       )
@@ -483,35 +535,12 @@ if (RUN_CYTOTRACE2) {
     res
   }
 
-  if (CT2_RUN_PER_SAMPLE) {
-    # Per the CytoTRACE 2 FAQ: run separately per dataset/batch, because the
-    # KNN post-processing borrows information across neighbouring cells and is
-    # therefore sensitive to batch structure.
-    samples <- unique(as.character(data@meta.data[[SAMPLE_COLUMN]]))
-    message(paste0("  Running per sample (", length(samples), " samples)..."))
-
-    res_list <- list()
-    for (s in samples) {
-      cells_s <- colnames(data)[as.character(data@meta.data[[SAMPLE_COLUMN]]) == s]
-      obj_s   <- subset(data, cells = cells_s)
-      r <- run_ct2_block(obj_s, s)
-      if (!is.null(r)) res_list[[s]] <- r
-      rm(obj_s); gc()
-    }
-
-    if (length(res_list) > 0) {
-      # Harmonise columns across samples before stacking (a failed optional
-      # column in one sample must not silently drop it everywhere).
-      common <- Reduce(intersect, lapply(res_list, colnames))
-      res_list <- lapply(res_list, function(d) d[, common, drop = FALSE])
-      ct2_all  <- do.call(rbind, res_list)
-    }
-    rm(res_list); gc()
-
-  } else {
-    message("  Running on the full object in one pass...")
-    ct2_all <- run_ct2_block(data, "ALL")
-  }
+  # Run on the WHOLE dataset in one pass. The absolute CytoTRACE 2 score is
+  # calibrated across datasets, and scoring all cells together lets the KNN
+  # smoothing borrow strength across the many cells of each shared cell state.
+  message("  Running CytoTRACE 2 on the full object...")
+  ct2_all <- run_ct2_block(data, "ALL")
+  gc()
 
   # ---- Attach results ------------------------------------------------------
   if (!is.null(ct2_all) && nrow(ct2_all) > 0) {
@@ -564,8 +593,8 @@ if (RUN_CYTOTRACE2) {
 # an absolute claim.
 #
 # NOTE: CytoTRACE v1 expects a plain counts matrix (genes x cells), not a
-# Seurat object, and can be memory-hungry. It is run per sample for the same
-# batch-effect reason as CytoTRACE 2.
+# Seurat object, and can be memory-hungry. It is run once over the whole dataset
+# so the relative ordering is computed across all cells together.
 # =============================================================================
 if (RUN_CYTOTRACE1) {
   message("\n=== STEP 3: CytoTRACE (v1) ===")
@@ -599,18 +628,9 @@ if (RUN_CYTOTRACE1) {
   counts_all <- GetAssayData(data, assay = "RNA", layer = "counts")
   ct1_list   <- list()
 
-  if (CT2_RUN_PER_SAMPLE) {
-    samples <- unique(as.character(data@meta.data[[SAMPLE_COLUMN]]))
-    for (s in samples) {
-      idx <- which(as.character(data@meta.data[[SAMPLE_COLUMN]]) == s)
-      r <- run_ct1_block(counts_all[, idx, drop = FALSE], s)
-      if (!is.null(r)) ct1_list[[s]] <- r
-      gc()
-    }
-  } else {
-    r <- run_ct1_block(counts_all, "ALL")
-    if (!is.null(r)) ct1_list[["ALL"]] <- r
-  }
+  # Whole-dataset pass (relative order is computed across all cells together).
+  r <- run_ct1_block(counts_all, "ALL")
+  if (!is.null(r)) ct1_list[["ALL"]] <- r
 
   if (length(ct1_list) > 0) {
     ct1_all <- do.call(rbind, ct1_list)
@@ -625,6 +645,144 @@ if (RUN_CYTOTRACE1) {
     RUN_CYTOTRACE1 <- FALSE
   }
   rm(counts_all, ct1_list); gc()
+}
+
+# =============================================================================
+# --- STEP 3b: PATHWAY SCORES (AUCell over GOBP gene sets) --------------------
+# =============================================================================
+# Per-cell AUCell activity for the configured GO Biological Process gene sets.
+# Adds AUCell_<name> columns and collects them in `pathway_cols`, which are
+# folded into the by-condition plots and the per-contrast comparisons below.
+pathway_cols <- character(0)
+if (RUN_PATHWAY_SCORES) {
+  message("\n=== STEP 3b: AUCell pathway scores ===")
+  if (!requireNamespace("AUCell", quietly = TRUE)) {
+    message("  [SKIP] AUCell not installed (BiocManager::install('AUCell')).")
+  } else {
+    present <- rownames(data)
+    org_db  <- if (tolower(PATHWAY_SPECIES) %in% c("human", "hs")) "org.Hs.eg.db" else "org.Mm.eg.db"
+    go_ok   <- requireNamespace("AnnotationDbi", quietly = TRUE) &&
+               requireNamespace(org_db, quietly = TRUE)
+
+    build_set <- function(nm) {
+      go_id <- PATHWAY_GO_TERMS[[nm]]
+      genes <- character(0)
+      if (go_ok && !is.null(go_id)) {
+        genes <- tryCatch(
+          unique(AnnotationDbi::select(getExportedValue(org_db, org_db), keys = go_id,
+                                       keytype = "GOALL", columns = "SYMBOL")$SYMBOL),
+          error = function(e) character(0))
+        genes <- genes[!is.na(genes)]
+      }
+      if (length(intersect(genes, present)) < PATHWAY_MIN_GENES)
+        genes <- PATHWAY_FALLBACK[[nm]]                       # curated fallback
+      intersect(unique(genes), present)
+    }
+
+    gene_sets <- lapply(names(PATHWAY_GO_TERMS), build_set)
+    names(gene_sets) <- names(PATHWAY_GO_TERMS)
+    gene_sets <- gene_sets[vapply(gene_sets, length, integer(1)) >= PATHWAY_MIN_GENES]
+    for (nm in names(gene_sets))
+      message(sprintf("  %-22s %d genes", nm, length(gene_sets[[nm]])))
+
+    if (length(gene_sets) > 0) {
+      expr <- GetAssayData(data, assay = "RNA", layer = "counts")
+      rk   <- AUCell::AUCell_buildRankings(expr, plotStats = FALSE, verbose = FALSE)
+      auc  <- AUCell::AUCell_calcAUC(gene_sets, rk, verbose = FALSE)
+      am   <- AUCell::getAUC(auc)                             # gene sets x cells
+      for (nm in rownames(am)) {
+        col <- paste0("AUCell_", nm)
+        data@meta.data[[col]] <- as.numeric(am[nm, colnames(data)])
+        pathway_cols <- c(pathway_cols, col)
+      }
+      message(paste0("  AUCell complete: ", length(pathway_cols), " pathway score(s) added."))
+      rm(expr, rk, auc, am); gc()
+    } else {
+      message("  [SKIP] No gene sets had enough genes present.")
+    }
+  }
+}
+
+# =============================================================================
+# --- STEP 3c: CCAT / SCENT (connectome correlation + signalling entropy) -----
+# =============================================================================
+# CCAT (Teschendorff) correlates each cell's expression with PPI hub degree; the
+# PPI (net17Jan16.m from SCENT) is indexed by HUMAN Entrez, so mouse data must be
+# mapped mouse-symbol -> human-symbol (homologene 10090->9606) -> human Entrez.
+# This chain is fragile, so the WHOLE block is wrapped: any failure just skips
+# CCAT/SCENT and the rest of Script 09 continues normally.
+ccat_cols <- character(0)
+if (RUN_CCAT || RUN_SCENT) {
+  message("\n=== STEP 3c: CCAT / SCENT ===")
+  deps_ok <- requireNamespace("SCENT", quietly = TRUE) &&
+             requireNamespace("AnnotationDbi", quietly = TRUE) &&
+             (CCAT_SPECIES != "mouse" || requireNamespace("homologene", quietly = TRUE)) &&
+             requireNamespace("org.Hs.eg.db", quietly = TRUE)
+  if (!deps_ok) {
+    message("  [SKIP] Need SCENT + org.Hs.eg.db (+ homologene for mouse). ",
+            "See INSTALL_NOTES.md (Potency benchmark methods). Continuing without CCAT/SCENT.")
+  } else tryCatch({
+    expr <- as.matrix(GetAssayData(data, assay = "RNA", layer = "counts"))
+    mouse_syms <- rownames(expr)
+
+    # 1) rownames -> HUMAN symbol
+    if (CCAT_SPECIES == "mouse") {
+      hom <- homologene::homologene(mouse_syms, inTax = 10090, outTax = 9606)
+      hom <- hom[!is.na(hom[[2]]) & hom[[2]] != "", , drop = FALSE]
+      hom <- hom[!duplicated(hom[[1]]), , drop = FALSE]        # unique source symbol
+      sym2human <- stats::setNames(as.character(hom[[2]]), as.character(hom[[1]]))
+      human_of <- sym2human[mouse_syms]
+    } else {
+      human_of <- stats::setNames(mouse_syms, mouse_syms)      # already human
+    }
+
+    # 2) HUMAN symbol -> Entrez
+    hsym <- unique(human_of[!is.na(human_of)])
+    ent  <- suppressMessages(AnnotationDbi::mapIds(
+      org.Hs.eg.db::org.Hs.eg.db, keys = hsym, keytype = "SYMBOL",
+      column = "ENTREZID", multiVals = "first"))
+    row_entrez <- ent[human_of]                                # per original row
+    keep <- !is.na(row_entrez)
+    expr_e <- expr[keep, , drop = FALSE]
+    rownames(expr_e) <- as.character(row_entrez[keep])
+    expr_e <- expr_e[!duplicated(rownames(expr_e)), , drop = FALSE]
+
+    # 3) load the SCENT PPI (human Entrez) and take the shared genes
+    utils::data("net17Jan16", package = "SCENT")
+    net <- get("net17Jan16.m")
+    common <- intersect(rownames(expr_e), rownames(net))
+    if (length(common) < 100)
+      stop("only ", length(common), " genes map to the PPI - aborting CCAT")
+    exp_sub <- expr_e[common, , drop = FALSE]
+    net_sub <- net[common, common, drop = FALSE]
+    message(sprintf("  Mapped %d genes into the PPI (of %d).", length(common), nrow(expr)))
+
+    # 4) integrate + CCAT (+ optional SCENT entropy)
+    integ <- SCENT::DoIntegPPI(exp.m = exp_sub, ppiA.m = net_sub)
+    if (RUN_CCAT) {
+      ccat <- as.numeric(SCENT::CompCCAT(exp = integ$expMC, ppiA = integ$adjMC))
+      if (length(ccat) == ncol(data)) {
+        data$CCAT_score <- ccat
+        ccat_cols <- c(ccat_cols, "CCAT_score")
+        message("  CCAT complete (", ncol(data), " cells).")
+      } else message("  [WARN] CCAT length mismatch; skipped.")
+    }
+    if (RUN_SCENT) {
+      tryCatch({
+        sr <- as.numeric(SCENT::CompSR(integ$expMC, integ$adjMC))
+        if (length(sr) == ncol(data)) {
+          data$SCENT_score <- sr
+          ccat_cols <- c(ccat_cols, "SCENT_score")
+          message("  SCENT signalling entropy complete.")
+        }
+      }, error = function(e)
+        message("  [SKIP SCENT] CompSR failed: ", conditionMessage(e)))
+    }
+    rm(expr, expr_e); gc()
+  }, error = function(e) {
+    message("  [SKIP] CCAT/SCENT failed: ", conditionMessage(e),
+            " -- continuing without it.")
+  })
 }
 
 # =============================================================================
@@ -650,6 +808,8 @@ if (RUN_CYTOTRACE2 && "potency_score"     %in% colnames(data@meta.data)) score_c
 if (RUN_CYTOTRACE1 && "CytoTRACE1_Score"  %in% colnames(data@meta.data)) score_cols <- c(score_cols, "CytoTRACE1_Score")
 if (RUN_ENTROPY    && "entropy_score"     %in% colnames(data@meta.data)) score_cols <- c(score_cols, "entropy_score")
 if (RUN_ENTROPY    && "gene_counts_score" %in% colnames(data@meta.data)) score_cols <- c(score_cols, "gene_counts_score")
+if (RUN_CCAT       && "CCAT_score"        %in% colnames(data@meta.data)) score_cols <- c(score_cols, "CCAT_score")
+if (RUN_SCENT      && "SCENT_score"       %in% colnames(data@meta.data)) score_cols <- c(score_cols, "SCENT_score")
 
 cor_df <- NULL
 if (length(score_cols) >= 2) {
@@ -697,6 +857,11 @@ if (length(score_cols) >= 2) {
 } else {
   message("  Fewer than two score columns available - skipping concordance.")
 }
+
+# Pathway (AUCell) scores are activity levels, not differentiation ordering, so
+# they were excluded from the concordance above but ARE included in every plot
+# and comparison from here on.
+if (length(pathway_cols) > 0) score_cols <- unique(c(score_cols, pathway_cols))
 
 # =============================================================================
 # --- STEP 5: VISUALISATION ---------------------------------------------------
@@ -989,18 +1154,70 @@ if (RUN_GROUP_STATS && length(score_cols) > 0) {
   }
 }
 
+# --- 6d-2: Per-contrast comparisons (CONTRASTS_LIST) -------------------------
+# For each defined contrast (a specific pair of CONDITION groups) and each cell
+# type, a Wilcoxon test on every score (potency/entropy + AUCell pathways). This
+# is the focused, pairwise version of the omnibus test above, and is the one to
+# read for the KO-vs-polyp / polyp-vs-WT questions.
+if (RUN_GROUP_STATS && exists("CONTRASTS_LIST") && length(CONTRASTS_LIST) > 0 &&
+    length(score_cols) > 0) {
+  message("  Running per-contrast comparisons (", length(CONTRASTS_LIST), " contrasts)...")
+  con_rows <- list()
+  for (cn in names(CONTRASTS_LIST)) {
+    g1 <- CONTRASTS_LIST[[cn]][1]; g2 <- CONTRASTS_LIST[[cn]][2]
+    for (sc in score_cols) {
+      for (ct in unique(as.character(md[[CELLTYPE_COLUMN]]))) {
+        if (is.na(ct)) next
+        sub <- md[as.character(md[[CELLTYPE_COLUMN]]) == ct & !is.na(md[[sc]]) &
+                  as.character(md[[CONDITION_COLUMN]]) %in% c(g1, g2), , drop = FALSE]
+        a <- sub[[sc]][as.character(sub[[CONDITION_COLUMN]]) == g1]
+        b <- sub[[sc]][as.character(sub[[CONDITION_COLUMN]]) == g2]
+        if (length(a) < STATS_MIN_CELLS || length(b) < STATS_MIN_CELLS) next
+        tt <- tryCatch(stats::wilcox.test(a, b), error = function(e) NULL)
+        if (is.null(tt)) next
+        con_rows[[paste(cn, sc, ct, sep = "|")]] <- data.frame(
+          Contrast = cn, Score = sc, CellType = ct,
+          Group1 = g1, Group2 = g2, N1 = length(a), N2 = length(b),
+          Median_1 = stats::median(a, na.rm = TRUE),
+          Median_2 = stats::median(b, na.rm = TRUE),
+          Delta    = stats::median(a, na.rm = TRUE) - stats::median(b, na.rm = TRUE),
+          Statistic = unname(tt$statistic), P_Value = tt$p.value,
+          stringsAsFactors = FALSE)
+      }
+    }
+  }
+  if (length(con_rows) > 0) {
+    con_df <- do.call(rbind, con_rows)
+    # BH-correct within each Contrast x Score family (across cell types).
+    con_df <- con_df %>%
+      group_by(Contrast, Score) %>%
+      mutate(P_Adj = stats::p.adjust(P_Value, method = STATS_PADJ_METHOD)) %>%
+      ungroup() %>%
+      arrange(Contrast, Score, P_Adj) %>%
+      as.data.frame()
+    con_df$Significant <- con_df$P_Adj < 0.05
+    con_df$CAVEAT <- "Cell-level Wilcoxon; cells within a sample are not independent. Confirm at the sample level."
+    sheets[["Contrast_Comparisons"]] <- con_df
+    message(paste0("  ", nrow(con_df), " per-contrast comparisons | ",
+                   sum(con_df$Significant, na.rm = TRUE), " significant after ",
+                   STATS_PADJ_METHOD, "."))
+  } else {
+    message("  No per-contrast comparisons met the minimum cell requirements.")
+  }
+}
+
 # --- 6e: Run metadata sheet --------------------------------------------------
 sheets[["Run_Info"]] <- data.frame(
   Parameter = c("PROJECT_NAME", "RDS_PATH", "N_Cells", "N_Genes",
                 "CELLTYPE_COLUMN", "CONDITION_COLUMN", "SAMPLE_COLUMN",
                 "RUN_CYTOTRACE2", "RUN_CYTOTRACE1", "RUN_ENTROPY",
-                "CT2_SPECIES", "CT2_RUN_PER_SAMPLE", "CT2_SLOT",
+                "CT2_SPECIES", "CT2_SLOT",
                 "CT2_USE_PREKNN", "ENTROPY_NORMALIZE", "ENTROPY_MIN_GENES",
                 "Pct_Cells_Under_1000_Genes", "Date"),
   Value = c(PROJECT_NAME, RDS_PATH, ncol(data), nrow(data),
             CELLTYPE_COLUMN, CONDITION_COLUMN, SAMPLE_COLUMN,
             RUN_CYTOTRACE2, RUN_CYTOTRACE1, RUN_ENTROPY,
-            CT2_SPECIES, CT2_RUN_PER_SAMPLE, CT2_SLOT,
+            CT2_SPECIES, CT2_SLOT,
             CT2_USE_PREKNN, ENTROPY_NORMALIZE, ENTROPY_MIN_GENES,
             round(frac_low * 100, 2), as.character(Sys.Date())),
   stringsAsFactors = FALSE

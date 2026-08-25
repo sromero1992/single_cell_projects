@@ -104,7 +104,7 @@ ct2_result <- CytoTRACE2::cytotrace2(
 )
 ```
 
-Pitfalls that repeatedly broke runs (from `NOTES_debugging.txt`):
+Pitfalls that repeatedly broke runs:
 
 - **Do NOT pass `verbose = TRUE`** — it is not a valid argument and throws
   `unused argument (verbose = TRUE)`.
@@ -121,8 +121,7 @@ Return value is a `data.frame` (rows = cells): `CytoTRACE2_Score`,
 `preKNN_CytoTRACE2_Potency`. The continuous score is clipped to `[0,1]`.
 
 A self-contained reference implementation ships as `run_cytotrace2.R` in the
-project root (adds AUCell cell-cycle scoring and optional CellRank trajectories);
-the full setup walkthrough is `cytotrace2_linux_setup.docx`.
+project root (adds AUCell cell-cycle scoring and optional CellRank trajectories).
 
 ### Dependencies it pulls in
 
@@ -347,6 +346,55 @@ pip install numpy scanoramaCT
 | Enormous memory use | `CytoTRACE()` densifies the matrix. Script 09 already runs it per sample; reduce `MAX_CELLS` if needed |
 
 If it will not install after 30 minutes of effort, set `RUN_CYTOTRACE1 <- FALSE`. CytoTRACE 2 plus the built-in entropy metrics already give you two independent estimates.
+
+---
+
+## 2b. CCAT / SCENT — optional potency benchmark, Script 09
+
+CCAT (Teschendorff signalling-entropy connectome correlation) is an optional
+potency score in Script 09 (`RUN_CCAT`). SCENT's slower signalling-entropy rate
+is behind `RUN_SCENT` (off by default). Both are **fully guarded** — if any part
+of the install or the gene-ID chain fails, Script 09 prints `[SKIP]` and finishes
+without them.
+
+**Install (Script 00 does all of this):**
+
+```r
+remotes::install_version("smoother", version = "1.1")  # archived on CRAN — pin it
+devtools::install_github("aet21/SCENT")                # provides net17Jan16.m, CompCCAT, DoIntegPPI
+install.packages(c("homologene", "mclust", "pROC"))    # ortholog map + benchmark helpers
+BiocManager::install(c("org.Hs.eg.db", "biomaRt", "scuttle"))
+```
+
+`smoother` must go in **before** SCENT (SCENT depends on it), which is why
+Script 00 installs the pinned version first.
+
+**The gene-ID chain (this is what breaks if skipped).** CCAT correlates each
+cell's expression with PPI hub degree, and SCENT's PPI (`net17Jan16.m`) is indexed
+by **human Entrez**. So mouse data must be mapped:
+
+```
+mouse symbol  --homologene(inTax=10090, outTax=9606)-->  human symbol
+              --org.Hs.eg.db-->                          human Entrez
+              --match into net17Jan16.m-->               PPI hub degree
+```
+
+Script 09's STEP 3c does exactly this (`CCAT_SPECIES = "mouse"`), then
+`DoIntegPPI` → `CompCCAT`. Set `CCAT_SPECIES = "human"` to skip the ortholog hop.
+
+**Known failure modes:**
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `smoother` won't install | archived on CRAN | `remotes::install_version("smoother","1.1")` |
+| CCAT drops all genes | mouse symbols vs human PPI | ensure `homologene` installed; `CCAT_SPECIES="mouse"` |
+| `[SKIP] Need SCENT + org.Hs.eg.db` | a dependency is missing | install the four blocks above |
+| CCAT inverts on quiescent cells | it's a breadth method (HSC paradox) | expected biology — the concordance step flags it |
+| SCENT (`CompSR`) very slow | signalling-entropy is O(min) on 1000+ cells | leave `RUN_SCENT = FALSE` unless you need it |
+
+CCAT/SCENT are treated as potency methods: their `CCAT_score` / `SCENT_score`
+join the Spearman concordance, the by-condition plots, and the per-contrast
+comparisons in Script 09.
 
 ---
 

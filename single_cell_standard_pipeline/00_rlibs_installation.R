@@ -15,19 +15,27 @@
 #     that is easy to skim past.
 # =============================================================================
 
-setwd("/mnt/SCDC/Optimus/selim_working_dir/2026_nr4a1_ack/r_process/debug_pipeline_pkg")
-# 0. THE "FORCE" PROTOCOL - Locking the environment to official system paths
-#Sys.setenv(LD_LIBRARY_PATH = "/usr/lib64")
-#Sys.setenv(TMPDIR = paste0(Sys.getenv("HOME"), "/Rtemp"))
-options(timeout = 1200) # Prevents timeout on large GitHub builds like Monocle3
+# 0. ENVIRONMENT — use SYSTEM DEFAULTS (no custom LD_LIBRARY_PATH / TMPDIR).
+# R installs into the default library (.libPaths()[1]) and uses the system temp
+# dir. If a package needs a system library (gdal, hdf5, netcdf, ...), install the
+# distro -dev package (apt/dnf) and R's configure will auto-detect it — we do NOT
+# hard-code any paths here, so this works on Ubuntu and RHEL alike.
+# (If your /tmp is mounted noexec and source builds fail, set TMPDIR to a home
+#  dir in your ~/.Renviron: TMPDIR=/home/<you>/Rtemp — not here.)
+options(timeout = 1200)  # prevents timeouts on large GitHub builds (e.g. monocle3)
 
-if (!dir.exists(Sys.getenv("TMPDIR"))) dir.create(Sys.getenv("TMPDIR"))
+# Only create TMPDIR if you have explicitly set one; otherwise leave the default.
+if (nzchar(Sys.getenv("TMPDIR")) && !dir.exists(Sys.getenv("TMPDIR")))
+  dir.create(Sys.getenv("TMPDIR"), recursive = TRUE)
 
 # 1. DEFINE PACKAGE LISTS
 cran_pkgs <- c(
   "Seurat", "devtools", "dplyr", "ggplot2", "Matrix", "ggpubr", "tidyr", "patchwork",
   "stringr", "tibble", "cowplot", "openxlsx","writexl", "readxl", "parallelly", "hdf5r",
-  "enrichR", "remotes", "R.utils", "sf", "harmony", "xgboost"
+  "enrichR", "remotes", "R.utils", "sf", "harmony", "xgboost",
+  # Potency-benchmark methods (Script 09 CCAT/SCENT + CytoTRACE cross-checks):
+  #   mclust (SCENT clustering), pROC (benchmark ROC), homologene (mouse->human).
+  "mclust", "pROC", "homologene"
 )
 
 bioc_pkgs <- c(
@@ -37,7 +45,10 @@ bioc_pkgs <- c(
   # Symbol <-> Ensembl mapping for the PathVisio/WikiPathways exports in Script 07
   # and for the Ensembl->symbol step in Script 09's CytoTRACE 2 preprocessing.
   # org.Hs.eg.db is needed only when CT2_SPECIES = "human"; cheap to keep here.
-  "AnnotationDbi", "org.Mm.eg.db", "org.Hs.eg.db"
+  "AnnotationDbi", "org.Mm.eg.db", "org.Hs.eg.db",
+  # Potency-benchmark methods (Script 09 CCAT/SCENT): scuttle (normalisation),
+  # biomaRt (ortholog / symbol mapping fallback).
+  "scuttle", "biomaRt"
 )
 
 github_pkgs <- c(
@@ -59,6 +70,9 @@ github_pkgs <- c(
   "ggtree" = "YuLab-SMU/ggtree",
   "fgsea" = "alserglab/fgsea",
   "SCEVAN" = "AntonioDeFalco/SCEVAN",
+  # SCENT: CCAT signalling-entropy potency (Script 09 benchmark). Needs the
+  # pinned 'smoother' installed FIRST (special case below, archived on CRAN).
+  "SCENT" = "aet21/SCENT",
   "SplineDV" = "Xenon8778/SplineDV",
   "CellChat" = "jinworks/CellChat",
   "scSGS" = "Xenon8778/scSGS",
@@ -69,20 +83,15 @@ github_pkgs <- c(
 # 2. AUTOMATED INSTALLATION LOGIC
 is_installed <- function(pkg) requireNamespace(pkg, quietly = TRUE)
 
-# --- Install CRAN Packages with Manual Overrides ---
-cat("\n--- Installing CRAN packages with Force Overrides ---\n")
+# --- Install CRAN packages: ONLY the missing ones, no updates -----------------
+# No hard-coded paths and no forced type="source": R uses your default repo and
+# auto-detects system libraries (install the distro -dev packages first if a
+# source build complains). Already-installed packages are left untouched.
+cat("\n--- Installing missing CRAN packages (existing ones left as-is) ---\n")
 for (pkg in cran_pkgs) {
   if (!is_installed(pkg)) {
-    cat("Force Installing:", pkg, "\n")
-    
-    # Specific overrides for the "problematic" packages
-    if (pkg == "sf") {
-      install.packages(pkg, type = "source", configure.args = "--with-gdal-config=/usr/bin/gdal-config --with-proj-lib=/usr/lib64")
-    } else if (pkg == "hdf5r") {
-      install.packages(pkg, type = "source", configure.args = "--with-hdf5=/usr/bin/h5cc")
-    } else {
-      install.packages(pkg, type = "source")
-    }
+    cat("Installing:", pkg, "\n")
+    install.packages(pkg)          # default repo/type; auto-detects system libs
   }
 }
 
@@ -95,24 +104,40 @@ cat("\n--- Checking Bioconductor packages ---\n")
 missing_bioc <- bioc_pkgs[!sapply(bioc_pkgs, is_installed)]
 
 if (length(missing_bioc) > 0) {
-  # 1. Use the 'Ncpus' option to speed it up
-  # 2. Use 'checkBuilt = TRUE' to ensure they match your RHEL 9 build
-  # 3. Use 'INSTALL_opts = "--no-test-load"' to prevent R from loading them mid-install
-  BiocManager::install(missing_bioc, 
-                       update = FALSE, 
-                       ask = FALSE, 
-                       checkBuilt = TRUE,
+  # Install ONLY the missing Bioconductor packages and DO NOT touch existing ones:
+  #   update = FALSE      -> never update already-installed dependencies
+  #   checkBuilt = FALSE  -> do NOT reinstall/recompile packages built under a
+  #                          different R minor version (this was the recompile you saw)
+  #   INSTALL_opts --no-test-load -> don't load them mid-install
+  BiocManager::install(missing_bioc,
+                       update = FALSE,
+                       ask = FALSE,
+                       checkBuilt = FALSE,
                        INSTALL_opts = "--no-test-load")
 }
 
 
-# --- Install GitHub Packages ---
-cat("\n--- Checking GitHub packages ---\n")
+# --- Special case: 'smoother' (SCENT dependency, archived on CRAN) ----------
+# SCENT depends on smoother, which was archived on CRAN, so a plain
+# install.packages("smoother") fails. Pin the last good version, and install it
+# BEFORE the GitHub loop so SCENT's build finds it.
+if (!is_installed("smoother")) {
+  cat("Installing pinned 'smoother' 1.1 (SCENT dependency)...\n")
+  tryCatch(
+    remotes::install_version("smoother", version = "1.1", upgrade = "never"),
+    error = function(e) cat("[WARNING] smoother install failed:", conditionMessage(e),
+                            "| SCENT/CCAT will be unavailable.\n"))
+}
+
+# --- Install GitHub packages: missing only, never update dependencies ---------
+cat("\n--- Installing missing GitHub packages (existing ones left as-is) ---\n")
 for (pkg_name in names(github_pkgs)) {
   if (!is_installed(pkg_name)) {
     repo <- github_pkgs[pkg_name]
     cat("Installing", pkg_name, "...\n")
-    remotes::install_github(repo, upgrade = "never", force = TRUE, quiet = FALSE)
+    # upgrade = "never" -> do not update already-installed dependencies.
+    # force  = FALSE    -> do not rebuild if somehow already present.
+    remotes::install_github(repo, upgrade = "never", force = FALSE, quiet = FALSE)
   }
 }
 
