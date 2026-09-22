@@ -21,8 +21,11 @@ function generateHeatmap_circ_simple(celltype, strict, customName, circ, period1
 
     % ── Locate input files ─────────────────────────────────────────────────
     if period12; suffix = '_period_12_'; else; suffix = '_period_24_'; end
-    fname  = fullfile(outdir, sprintf('%s%scircadian_analysis_all.csv', celltype, suffix));
-    fname2 = fullfile(outdir, sprintf('%s%scircadian_ZTs_mean.csv',     celltype, suffix));
+    ct_safe = regexprep(strtrim(char(celltype)), '[^a-zA-Z0-9_]', '_');
+    ct_safe = regexprep(ct_safe, '_+', '_');
+    ct_safe = regexprep(ct_safe, '^_|_$', '');
+    fname  = fullfile(outdir, sprintf('%s%scircadian_analysis_all.csv', ct_safe, suffix));
+    fname2 = fullfile(outdir, sprintf('%s%scircadian_ZTs_mean.csv',     ct_safe, suffix));
 
     if ~exist(fname, 'file') || ~exist(fname2, 'file')
         warning('Analysis file not found:\n  %s\nRun the analysis first.', fname);

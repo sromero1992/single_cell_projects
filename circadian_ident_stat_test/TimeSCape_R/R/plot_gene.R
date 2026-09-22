@@ -38,7 +38,7 @@ plot_gene_single <- function(
   period_val <- if (period12) 12 else 24
 
   # ── Locate CSV files ───────────────────────────────────────────────────────
-  ct_safe   <- gsub("[^[:alnum:]_]", "_", trimws(cust_cells))
+  ct_safe   <- gsub("^_|_$", "", gsub("_+", "_", gsub("[^[:alnum:]_]", "_", trimws(cust_cells))))
   ct_outdir <- file.path(outdir)   # outdir already points to the cell-type dir
   fbase     <- paste0(ct_safe, per_label)
 
@@ -91,7 +91,7 @@ plot_gene_single <- function(
   n_cells_type <- 0
   if (!is.null(sce)) {
     meta_ct      <- as.character(.get_meta(sce)[[celltype_col]])
-    meta_ct_safe <- gsub("[^[:alnum:]_]", "_", trimws(meta_ct))
+    meta_ct_safe <- gsub("^_|_$", "", gsub("_+", "_", gsub("[^[:alnum:]_]", "_", trimws(meta_ct))))
     n_cells_type <- sum(meta_ct == cust_cells, na.rm = TRUE)          # exact match
     if (n_cells_type == 0)
       n_cells_type <- sum(meta_ct_safe == ct_safe, na.rm = TRUE)      # sanitised match
@@ -107,7 +107,7 @@ plot_gene_single <- function(
   if (print_scdata && !is.null(sce)) {
     meta          <- .get_meta(sce)
     meta_ct_all   <- as.character(meta[[celltype_col]])
-    meta_safe_all <- gsub("[^[:alnum:]_]", "_", trimws(meta_ct_all))
+    meta_safe_all <- gsub("^_|_$", "", gsub("_+", "_", gsub("[^[:alnum:]_]", "_", trimws(meta_ct_all))))
     ct_mask       <- (meta_ct_all == cust_cells) | (meta_safe_all == ct_safe)
 
     if (sum(ct_mask) > 0) {
@@ -286,7 +286,7 @@ save_batch_plots <- function(
   per_label  <- if (period12) "_period_12_" else "_period_24_"
   period_val <- if (period12) 12 else 24
 
-  ct_safe   <- gsub("[^[:alnum:]_]", "_", trimws(cust_cells))
+  ct_safe   <- gsub("^_|_$", "", gsub("_+", "_", gsub("[^[:alnum:]_]", "_", trimws(cust_cells))))
   fbase     <- paste0(ct_safe, per_label)
   f_stats   <- file.path(outdir, paste0(fbase, "circadian_analysis_all.csv"))
   f_zts     <- file.path(outdir, paste0(fbase, "circadian_ZTs_mean.csv"))

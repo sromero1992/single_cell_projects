@@ -345,7 +345,7 @@ server <- function(input, output, session) {
         )
         rv$all_results <- res
         matching_key <- names(res)[startsWith(names(res),
-                           gsub("[^[:alnum:]_]", "_", trimws(ct)))]
+                           gsub("^_|_$", "", gsub("_+", "_", gsub("[^[:alnum:]_]", "_", trimws(ct)))))]
         first_key <- if (length(matching_key) > 0) matching_key[1] else ct
         if (!is.null(res[[first_key]])) {
           rv$T1 <- res[[first_key]]$T1
@@ -396,10 +396,10 @@ server <- function(input, output, session) {
   observeEvent(input$btn_heatmap, {
     req(rv$T1, rv$current_celltype)
     ct      <- rv$current_celltype
-    ct_safe <- gsub("[^[:alnum:]_]", "_", trimws(ct))
+    ct_safe <- gsub("^_|_$", "", gsub("_+", "_", gsub("[^[:alnum:]_]", "_", trimws(ct))))
     gc      <- active_group_col()
     grp_safe <- if (!is.null(gc) && isTruthy(input$sel_gene_group))
-                  gsub("[^[:alnum:]_]", "_", trimws(input$sel_gene_group))
+                  gsub("^_|_$", "", gsub("_+", "_", gsub("[^[:alnum:]_]", "_", trimws(input$sel_gene_group))))
                 else NULL
     combo_name <- if (!is.null(grp_safe)) paste0(ct_safe, "_", grp_safe) else ct_safe
     ct_outdir  <- file.path(rv$outdir, combo_name)
@@ -428,10 +428,10 @@ server <- function(input, output, session) {
   observeEvent(input$btn_batch, {
     req(rv$T1, rv$tmeta, rv$current_celltype)
     ct      <- rv$current_celltype
-    ct_safe <- gsub("[^[:alnum:]_]", "_", trimws(ct))
+    ct_safe <- gsub("^_|_$", "", gsub("_+", "_", gsub("[^[:alnum:]_]", "_", trimws(ct))))
     gc      <- active_group_col()
     grp_safe <- if (!is.null(gc) && isTruthy(input$sel_gene_group))
-                  gsub("[^[:alnum:]_]", "_", trimws(input$sel_gene_group))
+                  gsub("^_|_$", "", gsub("_+", "_", gsub("[^[:alnum:]_]", "_", trimws(input$sel_gene_group))))
                 else NULL
     combo_name <- if (!is.null(grp_safe)) paste0(ct_safe, "_", grp_safe) else ct_safe
     ct_outdir  <- file.path(rv$outdir, combo_name)
@@ -462,10 +462,10 @@ server <- function(input, output, session) {
     }
 
     ct      <- rv$current_celltype
-    ct_safe <- gsub("[^[:alnum:]_]", "_", trimws(ct))
+    ct_safe <- gsub("^_|_$", "", gsub("_+", "_", gsub("[^[:alnum:]_]", "_", trimws(ct))))
     gc      <- active_group_col()
     grp_safe <- if (!is.null(gc) && isTruthy(input$sel_gene_group))
-                  gsub("[^[:alnum:]_]", "_", trimws(input$sel_gene_group))
+                  gsub("^_|_$", "", gsub("_+", "_", gsub("[^[:alnum:]_]", "_", trimws(input$sel_gene_group))))
                 else NULL
     combo_name <- if (!is.null(grp_safe)) paste0(ct_safe, "_", grp_safe) else ct_safe
     ct_outdir  <- file.path(rv$outdir, combo_name)

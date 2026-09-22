@@ -23,16 +23,18 @@ function sce_circ_plot(sce, tmeta, cust_cells, plot_type, period12, norm_str, ou
 
     if nargin < 4 || isempty(plot_type);  plot_type = 1;          end
     if nargin < 5 || isempty(period12);   period12  = false;      end
+    ct_safe = regexprep(strtrim(char(cust_cells)), '[^a-zA-Z0-9_]', '_');
+    ct_safe = regexprep(ct_safe, '_+', '_');
+    ct_safe = regexprep(ct_safe, '^_|_$', '');
     if nargin < 7 || isempty(outdir)
-        outdir_name = regexprep(strtrim(char(cust_cells)), '[^\w]', '_');
-        outdir      = fullfile(pwd, outdir_name);
+        outdir = fullfile(pwd, ct_safe);
     end
 
     if period12; per_label = "_period_12_"; else; per_label = "_period_24_"; end
 
     % ── Read pre-computed results from CSV ─────────────────────────────────
-    fname_stats = fullfile(outdir, sprintf('%s%scircadian_analysis_all.csv', cust_cells, per_label));
-    fname_zts   = fullfile(outdir, sprintf('%s%scircadian_ZTs_mean.csv',     cust_cells, per_label));
+    fname_stats = fullfile(outdir, sprintf('%s%scircadian_analysis_all.csv', ct_safe, per_label));
+    fname_zts   = fullfile(outdir, sprintf('%s%scircadian_ZTs_mean.csv',     ct_safe, per_label));
 
     if ~exist(fname_stats,'file') || ~exist(fname_zts,'file')
         error(['Analysis files not found for cell type "%s".\n' ...
@@ -83,7 +85,7 @@ function sce_circ_plot(sce, tmeta, cust_cells, plot_type, period12, norm_str, ou
     gidx_classic = find(is_classic)';
 
     % ── Output paths (subdirectories inside the cell-type folder) ────────
-    base    = char(strcat(cust_cells, per_label));
+    base    = char(strcat(ct_safe, per_label));
     p_conf  = fullfile(outdir, [base 'plots_confident']);
     p_nconf = fullfile(outdir, [base 'plots_non_confident']);
     p_circ  = fullfile(outdir, [base 'plots_classic_circadian']);

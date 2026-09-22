@@ -1445,7 +1445,7 @@ save_batch_pathway_plots <- function(
   top_paths <- head(conf_df$Pathway, n_top)
   if (!dir.exists(outdir)) dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
 
-  ct_safe   <- gsub("[^[:alnum:]_]", "_", trimws(target_ct))
+  ct_safe   <- gsub("^_|_$", "", gsub("_+", "_", gsub("[^[:alnum:]_]", "_", trimws(target_ct))))
   saved     <- character(length(top_paths))
 
   for (i in seq_along(top_paths)) {

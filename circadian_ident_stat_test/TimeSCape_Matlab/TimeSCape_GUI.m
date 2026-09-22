@@ -199,7 +199,7 @@ function TimeSCape_GUI
     %   RIGHT PLOT AREA
     % ──────────────────────────────────────────────────────────────────────
     hPlotAxes = axes('Parent', hFig, ...
-        'Position',  [0.315, 0.08, 0.675, 0.87], ...
+        'Position',  [0.345, 0.10, 0.620, 0.78], ...
         'Color',     'white', ...
         'XColor',    [0.2 0.2 0.2], ...
         'YColor',    [0.2 0.2 0.2], ...
@@ -229,6 +229,24 @@ function TimeSCape_GUI
         'BackgroundColor', [0.28 0.28 0.32], ...
         'ForegroundColor', [0.92 0.92 0.92], ...
         'Callback',        @themeCallback);
+
+    % ── Pathway Rhythm (enrichment -> circadian test -> plot in main axes) ─
+    uicontrol('Parent', hFig, ...
+        'Style',           'pushbutton', ...
+        'Position',        [755, 730, 158, 24], ...
+        'String',          'Pathway Rhythm...', ...
+        'FontName',        FNT, 'FontSize', 9, 'FontWeight', 'bold', ...
+        'BackgroundColor', [0.15 0.55 0.30], ...
+        'ForegroundColor', [1 1 1], ...
+        'Callback',        @pathwayCallback);
+
+    uicontrol('Parent', hFig, 'Style','text', 'Position',[548, 731, 72, 16], ...
+        'String','Violin color:', 'FontName',FNT, 'FontSize',8, ...
+        'BackgroundColor',get(hFig,'Color'), 'ForegroundColor',[0.5 0.5 0.5], ...
+        'HorizontalAlignment','right');
+    hPathColor = uicontrol('Parent', hFig, 'Style','popupmenu', ...
+        'Position',[624, 730, 122, 24], ...
+        'String',{'light blue','teal','orange','purple','green','gray','red'});
 
     % ====================================================================
     %   CALLBACK FUNCTIONS
@@ -644,6 +662,99 @@ function TimeSCape_GUI
     % ====================================================================
     %   SAVE FIGURE
     % ====================================================================
+
+    function pathwayCallback(~,~)
+        if ~check_tmeta(); return; end
+        celltype  = get_sel(hCells);
+        period12  = logical(hPeriod12.Value);
+        ct_safe   = safe_name(celltype);
+        if period12; pl = '_period_12_'; else; pl = '_period_24_'; end
+        ct_outdir = fullfile(pwd, ct_safe);
+        conf_csv  = fullfile(ct_outdir, [ct_safe pl 'circadian_analysis_confident.csv']);
+        if ~isfile(conf_csv)
+            errordlg(sprintf('No circadian results for "%s".\nRun the analysis first.', celltype), 'Pathway');
+            return;
+        end
+
+        % reuse a previously saved enrichment for this cell type?
+        info  = sce_circ_pathway_load(pwd, celltype, period12);
+        reuse = false;
+        if ~isempty(info)
+            q = questdlg(sprintf('Saved enrichment found (%s, bin %g h, %s). Use it?', ...
+                    info.library, info.bin_width, info.saved), 'Pathway', ...
+                    'Use saved','Re-run','Cancel','Use saved');
+            if strcmp(q,'Cancel'); return; end
+            reuse = strcmp(q,'Use saved');
+        end
+        [library, bw, norm_str, standardize, uv, ok] = tscp_config_dialog(info);
+        if ~ok; return; end
+
+        if reuse
+            bins = info.bins;
+        else
+            try
+                T1c  = readtable(conf_csv);
+                bins = sce_circ_bin_genes(T1c, bw);
+                h = waitbar(0, 'Enriching ZT bins via Enrichr...');
+                nb = numel(bins);
+                for i = 1:nb
+                    if numel(bins(i).genes) >= 3
+                        bins(i).enrich = sce_circ_enrichr(bins(i).genes, library);
+                        pause(0.5);   % ease Enrichr rate limit
+                    else
+                        bins(i).enrich = [];
+                    end
+                    if ishandle(h); waitbar(i/nb, h); end
+                end
+                if ishandle(h); close(h); end
+                sce_circ_pathway_save(pwd, celltype, period12, bins, library, bw);
+            catch ME
+                if exist('h','var') && ishandle(h); close(h); end
+                errordlg(['Enrichment error: ', ME.message], 'Pathway'); return;
+            end
+        end
+
+        % compute + save the rhythm for ALL enriched pathways (cheap: one ranking pass)
+        try
+            hw = waitbar(0.5, 'Scoring all pathways...');
+            sce_circ_pathway_all_rhythms(sce, guiData.tmeta, bins, period12, celltype, norm_str, pwd);
+            if ishandle(hw); close(hw); end
+        catch MEall
+            if exist('hw','var') && ishandle(hw); close(hw); end
+            warning('pathway_circadian_all failed: %s', MEall.message);
+        end
+
+        % build the pathway list (ZT window | term)
+        labels = {}; pmap = zeros(0,2);
+        for i = 1:numel(bins)
+            if isempty(bins(i).enrich); continue; end
+            E = bins(i).enrich;
+            for k = 1:height(E)
+                labels{end+1} = sprintf('%s | %s  (adjP=%.1e)', bins(i).label, E.Term(k), E.AdjPvalue(k)); %#ok<AGROW>
+                pmap(end+1,:) = [i k]; %#ok<AGROW>
+            end
+        end
+        if isempty(labels); errordlg('No enriched pathways found.', 'Pathway'); return; end
+        [sel, okp] = listdlg('PromptString','Select a pathway to plot:', ...
+                             'ListString', labels, 'SelectionMode','single', 'ListSize',[560 380]);
+        if ~okp; return; end
+        bi = pmap(sel,1); ki = pmap(sel,2);
+        pw = bins(bi).enrich.Genes{ki};
+        nm = sprintf('%s | %s', bins(bi).label, bins(bi).enrich.Term(ki));
+
+        ws = warning('off','MATLAB:mkdir:DirectoryExists');
+        try
+            color_name = get_sel(hPathColor);                 % colour chosen in the main window
+            cla(hPlotAxes);                                   % flip the gene plot -> pathway plot
+            st = sce_circ_pathway_plot(sce, guiData.tmeta, pw, nm, celltype, period12, ...
+                                       hPlotAxes, color_name, uv, standardize, norm_str);
+            sce_circ_pathway_record(pwd, celltype, period12, bins(bi).label, ...
+                                    bins(bi).enrich.Term(ki), library, st, pw);
+        catch ME
+            errordlg(['Plot error: ', ME.message], 'Pathway');
+        end
+        warning(ws);
+    end
 
     function saveFigCallback(~,~)
         % Let user choose filename + format

@@ -365,7 +365,7 @@ def run_timescape(
         T0 = pd.DataFrame(summary_rows)
         ct_label = custom_celltype[0] if (custom_celltype and len(custom_celltype) == 1) \
             else "all_cell_types"
-        ct_label_safe = re.sub(r"[^a-zA-Z0-9_]", "_", ct_label)
+        ct_label_safe = re.sub(r"_+", "_", re.sub(r"[^a-zA-Z0-9_]", "_", str(ct_label).strip())).strip("_")
         T0.to_csv(os.path.join(outdir, f"{ct_label_safe}{per_label}summary_results.csv"),
                   index=False)
 

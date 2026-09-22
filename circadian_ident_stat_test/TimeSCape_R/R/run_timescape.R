@@ -464,9 +464,9 @@ run_timescape <- function(
     for (grp in iter_groups) {
 
       # ── Combo label for directory / file naming ──────────────────────────
-      ct_safe    <- gsub("[^[:alnum:]_]", "_", trimws(ct))
+      ct_safe    <- gsub("^_|_$", "", gsub("_+", "_", gsub("[^[:alnum:]_]", "_", trimws(ct))))
       grp_safe   <- if (!is.null(grp))
-                      gsub("[^[:alnum:]_]", "_", trimws(as.character(grp)))
+                      gsub("^_|_$", "", gsub("_+", "_", gsub("[^[:alnum:]_]", "_", trimws(as.character(grp)))))
                     else NULL
       combo_name <- if (!is.null(grp_safe)) paste0(ct_safe, "_", grp_safe)
                     else ct_safe

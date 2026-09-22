@@ -227,7 +227,7 @@ load_stage_results <- function(out_dir,
 
     for (i in seq_len(nrow(run_log))) {
       ct_name <- run_log$CellType[i]
-      ct_safe <- gsub("[^[:alnum:]_]", "_", trimws(ct_name))
+      ct_safe <- gsub("^_|_$", "", gsub("_+", "_", gsub("[^[:alnum:]_]", "_", trimws(ct_name))))
       ct_dir  <- file.path(out_dir, ct_safe)
       f_csv   <- file.path(ct_dir,
                    paste0(ct_safe, per_label, "circadian_analysis_all.csv"))

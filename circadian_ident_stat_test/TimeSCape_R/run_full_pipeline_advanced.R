@@ -305,7 +305,7 @@ clock_results <- list()
 
 for (focus_ct in ct_targets) {
 
-  focus_safe <- gsub("[^[:alnum:]_]", "_", trimws(focus_ct))
+  focus_safe <- gsub("^_|_$", "", gsub("_+", "_", gsub("[^[:alnum:]_]", "_", trimws(focus_ct))))
   ct_dir     <- file.path(out_dir, focus_safe)
   dir_gene   <- file.path(ct_dir, "01_gene_circadian")   # Step A: gene cosinor
   dir_pwA    <- file.path(ct_dir, "02_pathway_A")         # Step B: enricher ORA pathway

@@ -121,7 +121,7 @@ clock_genes_ref <- c(
 
 conf_mask  <- T1$pvalue < 0.05 & T1$pvalue_corr < 0.05
 conf_genes <- T1$Genes[conf_mask]
-focus_safe <- gsub("[^[:alnum:]_]", "_", trimws(focus_ct))
+focus_safe <- gsub("^_|_$", "", gsub("_+", "_", gsub("[^[:alnum:]_]", "_", trimws(focus_ct))))
 
 cat(sprintf("\nConfident circadian genes in '%s': %d / %d\n",
             focus_ct, length(conf_genes), nrow(T1)))

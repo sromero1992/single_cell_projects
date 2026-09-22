@@ -373,7 +373,7 @@ def save_batch_plots(
     n_cols : int
         Columns per panel figure.
     """
-    ct_safe   = re.sub(r"[^a-zA-Z0-9_]", "_", str(celltype).strip()).strip("_")
+    ct_safe   = re.sub(r"_+", "_", re.sub(r"[^a-zA-Z0-9_]", "_", str(celltype).strip())).strip("_")
     per_label = f"_period_{int(period)}_"
     ct_outdir = os.path.join(outdir, ct_safe)
     fbase     = os.path.join(ct_outdir, f"{ct_safe}{per_label}")

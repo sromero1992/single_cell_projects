@@ -26,17 +26,19 @@ function sce_circ_plot_gene(sce, tmeta, cust_cells, period12, cust_gene, ...
     if nargin < 7  || isempty(print_scdata);    print_scdata    = false;     end
     if nargin < 8  || isempty(norm_str);        norm_str        = 'lib_size'; end
     if nargin < 9  || isempty(use_violin_plot); use_violin_plot = false;     end
+    ct_safe = regexprep(strtrim(char(cust_cells)), '[^a-zA-Z0-9_]', '_');
+    ct_safe = regexprep(ct_safe, '_+', '_');
+    ct_safe = regexprep(ct_safe, '^_|_$', '');
     if nargin < 10 || isempty(outdir)
-        outdir_name = regexprep(strtrim(char(cust_cells)), '[^\w]', '_');
-        outdir      = fullfile(pwd, outdir_name);
+        outdir = fullfile(pwd, ct_safe);
     end
 
     if period12; period = 12; per_label = '_period_12_';
     else;        period = 24; per_label = '_period_24_'; end
 
     % ── Read pre-computed results from CSV ─────────────────────────────────
-    fname_stats = fullfile(outdir, sprintf('%s%scircadian_analysis_all.csv', cust_cells, per_label));
-    fname_zts   = fullfile(outdir, sprintf('%s%scircadian_ZTs_mean.csv',     cust_cells, per_label));
+    fname_stats = fullfile(outdir, sprintf('%s%scircadian_analysis_all.csv', ct_safe, per_label));
+    fname_zts   = fullfile(outdir, sprintf('%s%scircadian_ZTs_mean.csv',     ct_safe, per_label));
 
     if ~exist(fname_stats,'file') || ~exist(fname_zts,'file')
         error(['Analysis files not found for cell type "%s" (period=%d hr).\n' ...
