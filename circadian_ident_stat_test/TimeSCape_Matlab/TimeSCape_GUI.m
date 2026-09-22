@@ -787,7 +787,7 @@ function TimeSCape_GUI
                         'ContentType','vector', 'BackgroundColor','white');
                 otherwise   % .png (default)
                     exportgraphics(hExp, fullpath, ...
-                        'Resolution', 200, 'BackgroundColor','white');
+                        'Resolution', 300, 'BackgroundColor','white');
             end
             msgbox(sprintf('Saved:\n%s', fullpath), 'Figure Saved', 'help');
         catch ME

@@ -83,22 +83,26 @@ function sce_circ_plot_gene(sce, tmeta, cust_cells, period12, cust_gene, ...
     all_tp   = [];
 
     if print_scdata
+        % ── Build a LOCAL normalized copy — NEVER write back to the master ──
+        % sce is a handle object: `sce.X = ...` or `sce.selectcells(...)` would
+        % mutate the shared object in place and permanently drop cells/values
+        % for every later call (empty Cell Type dropdown, vanishing violins).
+        % Everything below works on local value arrays (copy-on-write).
         if strcmp(norm_str, 'lib_size')
-            X_norm = pkg.norm_libsize(sce.X, 1e4);
-            X_norm = log1p(X_norm);
-            sce.X  = X_norm; clear X_norm;
+            Xall = log1p(pkg.norm_libsize(sce.X, 1e4));
         elseif strcmp(norm_str, 'magic_impute')
-            X_norm = sc_impute(sce.X, 'MAGIC');
-            sce.X  = X_norm; clear X_norm;
+            Xall = sc_impute(sce.X, 'MAGIC');
+        else                               % 'none' — use as-is
+            Xall = sce.X;
         end
-        % 'none': sce.X already holds data as-is — no transformation applied.
 
-        ic0     = find(sce.c_cell_type_tx == cust_cells);
-        sce_sub = sce.selectcells(ic0);
-        ig      = find(sce_sub.g == cust_gene);
+        ic0        = find(sce.c_cell_type_tx == cust_cells);
+        Xsub       = Xall(:, ic0);         clear Xall;
+        batch_sub  = sce.c_batch_id(ic0);
+        ig         = find(sce.g == cust_gene);
         clear ic0;
 
-        batch_time = unique(sce_sub.c_batch_id);
+        batch_time = unique(batch_sub);
         nzts_sc    = length(batch_time);
         at_sc      = nan(nzts_sc, 1);
         for it = 1:nzts_sc
@@ -110,21 +114,21 @@ function sce_circ_plot_gene(sce, tmeta, cust_cells, period12, cust_gene, ...
         at_sc      = at_sc(valid_sc);
         nzts_sc    = sum(valid_sc);
 
-        ncell_total = size(sce_sub.X, 2);
+        ncell_total = size(Xsub, 2);
         all_expr    = zeros(ncell_total, 1);
         all_tp      = zeros(ncell_total, 1);
         for it = 1:nzts_sc
-            ics    = find(sce_sub.c_batch_id == batch_time(it));
+            ics    = find(batch_sub == batch_time(it));
             nc_loc = length(ics);
             if nc_loc > 0 && ~isempty(ig)
-                all_expr(nc_cum+1 : nc_cum+nc_loc) = full(sce_sub.X(ig, ics));
+                all_expr(nc_cum+1 : nc_cum+nc_loc) = full(Xsub(ig, ics));
                 all_tp  (nc_cum+1 : nc_cum+nc_loc) = at_sc(it);
             end
             nc_cum = nc_cum + nc_loc;
         end
         all_expr = all_expr(1:nc_cum);
         all_tp   = all_tp  (1:nc_cum);
-        clear sce_sub;
+        clear Xsub batch_sub;
     end
 
     % ── Helper: apply white axes theme ────────────────────────────────────
