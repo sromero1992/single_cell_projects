@@ -52,12 +52,13 @@
 # ============================================================================
 # BATCHING STRATEGY
 # ============================================================================
-#   CytoTRACE 2 is run once over the WHOLE dataset (the standard usage). The
-#   absolute outputs (CytoTRACE2_Score, _Potency) are calibrated, and scoring all
-#   cells together lets the KNN smoothing borrow strength across the many cells
-#   of each shared cell state - which gives cleaner scores than splitting the
-#   data into small subsets. CytoTRACE2_Relative is rescaled within the input,
-#   so it reflects this whole-dataset ordering.
+#   CytoTRACE is run PER SAMPLE by default (CT2_RUN_PER_SAMPLE = TRUE): only one
+#   sample's cells are materialised at a time, so peak memory is bounded by the
+#   biggest single sample rather than the whole dataset, and each sample is scored
+#   intact (better than CytoTRACE 2's internal random subsampling of the mixed
+#   object). The absolute outputs (CytoTRACE2_Score, _Potency) are calibrated and
+#   stay comparable across samples; CytoTRACE2_Relative is rescaled within each
+#   sample. Set CT2_RUN_PER_SAMPLE = FALSE to score the whole object in one pass.
 #
 # INSTALLATION:
 #   CytoTRACE 2 and CytoTRACE v1 are NOT on CRAN/Bioconductor and are the two
@@ -81,6 +82,7 @@ library(dplyr)
 library(tidyr)
 library(tibble)
 library(ggplot2)
+library(ggpubr)   # stat_compare_means() for the significance brackets/stars
 library(patchwork)
 library(writexl)
 library(Matrix)
@@ -92,8 +94,8 @@ set.seed(123)
 # =============================================================================
 
 # --- 1.1: Project Identity & Paths -------------------------------------------
-PROJECT_NAME <- "Wu_Diet_project2"
-ROOT_PATH    <- "/home/ssromerogon/local_drive/optimus_drive/selim_working_dir/2026_wu_project2/r_process"
+PROJECT_NAME <- "Nr4a1_s17_ack"
+ROOT_PATH    <- "/home/ssromerogon/local_drive/optimus_drive/selim_working_dir/2026_nr4a1_ack/r_process"
 OUTPUT_DIR   <- file.path(ROOT_PATH, "seurat_output")
 
 # Input object — the final annotated object from Script 06.
@@ -104,6 +106,10 @@ RDS_PATH <- file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_unified_annotated.rds")
 #RDS_PATH <- file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_colonocytes_subclustered.rds"))
 
 SCORES_DIR <- file.path(OUTPUT_DIR, "cell_scores")
+
+# Per-sample CytoTRACE results are checkpointed here as CSV. A crash at sample
+# 10/16 keeps the first 9 - re-running reloads them and scores only what's left.
+CELL_POTENCY_SCRATCH <- file.path(OUTPUT_DIR, "cell_potency_scratch")
 
 # --- 1.2: Metadata Columns ---------------------------------------------------
 MODE <- "subtypes"
@@ -139,6 +145,12 @@ RUN_PATHWAY_SCORES <- TRUE  # AUCell per-cell scoring of the GOBP gene sets belo
 RUN_CCAT  <- TRUE    # CCAT connectome-correlation potency (SCENT PPI). Fully guarded:
                      #   any failure in the fragile mouse->human->PPI chain is skipped.
 RUN_SCENT <- FALSE   # SCENT signalling entropy (CompSR) - slow (min); fully guarded.
+
+# RESUME_SCORES: if TRUE and a previous run already wrote
+# cell_scores/potency_scores_per_cell.csv, load those columns onto the object and
+# SKIP all (expensive) score computation - just redo the plots/tables/save. Use
+# this after an OOM in plotting, or to re-plot without re-scoring.
+RESUME_SCORES <- FALSE
 CCAT_SPECIES <- "mouse"  # "mouse" -> homologene 10090->9606 to the human PPI; "human" = direct
 
 # --- 1.3b: Pathway (AUCell) scoring ------------------------------------------
@@ -175,14 +187,22 @@ PATHWAY_MIN_GENES <- 5   # skip a gene set with fewer than this many genes prese
 #   human input it performs orthology mapping internally.
 CT2_SPECIES <- "mouse"
 
+# CT2_RUN_PER_SAMPLE: score each SampleID separately. Recommended for large data:
+#   each run materialises only ONE sample's cells (memory bounded by the biggest
+#   sample, not the whole dataset), keeps samples biologically intact, and is
+#   checkpointed to CSV so a crash mid-loop is resumable. The absolute
+#   CytoTRACE2_Score/_Potency stay calibrated across samples; only the RELATIVE
+#   score is rescaled within each sample. Set FALSE to run the whole object once.
+CT2_RUN_PER_SAMPLE <- TRUE
+
 # CT2_SLOT: which layer to feed. MUST be raw/CPM counts, never log-transformed.
 CT2_SLOT <- "counts"
 
-# CT2_PARALLELIZE: run the model + smoothing on multiple threads. This is the
-#   CytoTRACE 2 DOCUMENTED DEFAULT (TRUE) and the fast path on Linux. We only set
-#   it FALSE on Windows, where the socket cluster hangs (handled automatically
-#   below). Set FALSE by hand if you hit backend issues on your machine.
-CT2_PARALLELIZE <- TRUE
+# CT2_PARALLELIZE: run the model + smoothing on multiple threads. Default FALSE
+#   (serial) = LOWEST memory, which matters on big objects: TRUE spawns workers
+#   that each hold a copy of the expression block and can OOM a large run. Turn it
+#   TRUE only if you have RAM headroom and want speed.
+CT2_PARALLELIZE <- FALSE
 
 # CT2_NCORES: cores when parallelizing. NULL = the package default (auto-detects
 #   and uses half the cores; Windows forced to 1). The authors advise 1-2 on
@@ -330,6 +350,32 @@ if (frac_low > 0.5) {
 }
 
 # =============================================================================
+# --- RESUME: reload saved scores and skip computation ------------------------
+# =============================================================================
+# Prevents recomputing potency after an OOM/crash in the plotting below: load the
+# saved per-cell scores, attach them by barcode, and turn every compute step off.
+pathway_cols <- character(0)
+ccat_cols    <- character(0)
+.scores_csv  <- file.path(SCORES_DIR, "potency_scores_per_cell.csv")
+if (RESUME_SCORES && file.exists(.scores_csv)) {
+  message("\n=== RESUME: loading saved scores, skipping computation ===")
+  sc <- utils::read.csv(.scores_csv, check.names = FALSE, stringsAsFactors = FALSE)
+  rownames(sc) <- sc$Barcode
+  sc <- sc[match(colnames(data), rownames(sc)), , drop = FALSE]
+  add_cols <- setdiff(colnames(sc),
+                      c("Barcode", SAMPLE_COLUMN, CELLTYPE_COLUMN, CONDITION_COLUMN))
+  for (cn in add_cols) data@meta.data[[cn]] <- sc[[cn]]
+  # Restore the potency-category ordering lost through CSV round-trip.
+  for (pc in intersect(c("CytoTRACE2_Potency", "preKNN_CytoTRACE2_Potency"), add_cols))
+    data@meta.data[[pc]] <- factor(as.character(data@meta.data[[pc]]), levels = POTENCY_LEVELS)
+  pathway_cols <- grep("^AUCell_", add_cols, value = TRUE)
+  ccat_cols    <- intersect(c("CCAT_score", "SCENT_score"), add_cols)
+  RUN_CYTOTRACE2 <- RUN_CYTOTRACE1 <- RUN_ENTROPY <- FALSE
+  RUN_PATHWAY_SCORES <- RUN_CCAT <- RUN_SCENT <- FALSE
+  message(paste0("  Loaded ", length(add_cols), " score columns; computation skipped."))
+}
+
+# =============================================================================
 # --- STEP 1: TRANSCRIPTIONAL ENTROPY (native, no dependencies) ---------------
 # =============================================================================
 # Rationale (Teschendorff & Enver 2017): a stem or progenitor cell keeps many
@@ -445,15 +491,15 @@ if (RUN_CYTOTRACE2) {
                 "preKNN_CytoTRACE2_Score", "preKNN_CytoTRACE2_Potency")
   ct2_all  <- NULL
 
-  # ---- Helper: build the exact input CytoTRACE 2 expects --------------------
-  # Validated on the scDVEP benchmark (see run_cytotrace2.R and INSTALL_NOTES.md
-  # section 1). Three things are enforced here because
-  # each one, when wrong, silently collapses every score:
-  #   1. DENSE data.frame (genes x cells). Sparse matrices cause SILENT failures.
-  #   2. Gene SYMBOL rownames. If the object carries Ensembl IDs they are mapped
+  # ---- Helper: build the SPARSE counts CytoTRACE 2 will subsample ------------
+  # We hand CytoTRACE 2 a lean Seurat object (is_seurat = TRUE) and let IT densify
+  # one ~batch_size chunk at a time. So this returns a SPARSE matrix - it must
+  # NEVER densify the whole thing (that ~25 GB copy was the OOM). Two things still
+  # matter for correct scoring:
+  #   1. Gene SYMBOL rownames. If the object carries Ensembl IDs they are mapped
   #      to symbols (mouse: org.Mm.eg.db, human: org.Hs.eg.db); otherwise
   #      CytoTRACE 2's internal gene panel matches almost nothing.
-  #   3. Deduplicated rownames (keep the highest mean-expression row per symbol).
+  #   2. Deduplicated rownames (keep the highest mean-expression row per symbol).
   prep_ct2_input <- function(obj) {
     m <- GetAssayData(obj, assay = "RNA", layer = CT2_SLOT)   # RAW counts, never log
 
@@ -482,14 +528,16 @@ if (RUN_CYTOTRACE2) {
       m <- m[!duplicated(rownames(m)), , drop = FALSE]
     }
 
-    as.data.frame(as.matrix(m))   # DENSE data.frame - required
+    m   # SPARSE counts (symbol rownames, deduplicated); CT2 densifies per chunk
   }
 
-  # ---- Helper: run CytoTRACE 2 on one Seurat object ------------------------
-  # Uses the documented argument set. parallelize_* follow CT2_PARALLELIZE (docs
-  # default TRUE), but are forced FALSE on Windows where the socket cluster hangs.
-  # Do NOT add verbose = TRUE - it is not a valid argument ("unused argument"
-  # error) and was a repeated source of failed runs (see INSTALL_NOTES.md sec 1).
+  # ---- Helper: run CytoTRACE 2 (memory-lean) --------------------------------
+  # Builds a COUNTS-ONLY Seurat object (no data/scale.data/reductions/other
+  # assays) and passes it with is_seurat = TRUE, so CytoTRACE 2 pulls the sparse
+  # matrix and densifies only one batch_size chunk at a time - never the whole
+  # 200k x 16k matrix. parallelize_* follow CT2_PARALLELIZE (default FALSE =
+  # serial = lowest RAM; TRUE spawns workers that each copy the block).
+  # Do NOT add verbose = TRUE (invalid argument).
   run_ct2_block <- function(obj, label) {
     if (ncol(obj) < CT2_MIN_CELLS) {
       message(paste0("    [SKIP] ", label, ": only ", ncol(obj),
@@ -497,32 +545,30 @@ if (RUN_CYTOTRACE2) {
       return(NULL)
     }
     message(paste0("    -> ", label, ": ", ncol(obj), " cells..."))
-
-    # Documented default is parallelize = TRUE; force FALSE only on Windows,
-    # where the socket cluster hangs (the reason we ran serial before).
     ct2_par <- isTRUE(CT2_PARALLELIZE) && .Platform$OS.type != "windows"
 
     res <- tryCatch({
-      # is_seurat = FALSE: feed a plain DENSE data.frame, not a Seurat object.
-      ct2_input <- prep_ct2_input(obj)
+      cnts <- prep_ct2_input(obj)                              # sparse, symbol rownames
+      lean <- Seurat::CreateSeuratObject(counts = cnts)        # counts-only, minimal RAM
+      rm(cnts); gc()
       out <- cytotrace2(
-        ct2_input,
-        is_seurat             = FALSE,
+        lean,
+        is_seurat             = TRUE,
+        slot_type             = "counts",
         species               = CT2_SPECIES,
         batch_size            = CT2_BATCH_SIZE,
         smooth_batch_size     = CT2_SMOOTH_BATCH_SIZE,
-        parallelize_models    = ct2_par,   # docs default TRUE (auto-FALSE on Windows)
+        parallelize_models    = ct2_par,
         parallelize_smoothing = ct2_par,
         ncores                = CT2_NCORES,
         seed                  = 14
       )
-      # is_seurat = FALSE returns a data.frame: rows = cells, cols = score types.
-      keep <- intersect(ct2_cols, colnames(out))
-      if (length(keep) == 0) {
-        stop("cytotrace2() returned no recognised prediction columns.")
-      }
-      res_df <- out[, keep, drop = FALSE]
-      # Clip the continuous scores to [0,1] (validated guard against tiny spill).
+      # is_seurat = TRUE returns a Seurat object; scores live in its metadata.
+      md <- out@meta.data
+      rm(out, lean); gc()
+      keep <- intersect(ct2_cols, colnames(md))
+      if (length(keep) == 0) stop("cytotrace2() returned no recognised prediction columns.")
+      res_df <- md[, keep, drop = FALSE]                       # rownames = cell barcodes
       for (sc_col in intersect(c("CytoTRACE2_Score", "preKNN_CytoTRACE2_Score"),
                                colnames(res_df))) {
         res_df[[sc_col]] <- pmin(pmax(res_df[[sc_col]], 0), 1)
@@ -535,12 +581,44 @@ if (RUN_CYTOTRACE2) {
     res
   }
 
-  # Run on the WHOLE dataset in one pass. The absolute CytoTRACE 2 score is
-  # calibrated across datasets, and scoring all cells together lets the KNN
-  # smoothing borrow strength across the many cells of each shared cell state.
-  message("  Running CytoTRACE 2 on the full object...")
-  ct2_all <- run_ct2_block(data, "ALL")
-  gc()
+  if (CT2_RUN_PER_SAMPLE) {
+    # Per sample: materialise ONE sample at a time (memory bounded by the biggest
+    # sample), checkpoint each to CSV, and free it before the next.
+    samples <- unique(as.character(data@meta.data[[SAMPLE_COLUMN]]))
+    message(paste0("  Running CytoTRACE 2 per sample (", length(samples), " samples)..."))
+    if (!dir.exists(CELL_POTENCY_SCRATCH)) dir.create(CELL_POTENCY_SCRATCH, recursive = TRUE)
+
+    res_list <- list()
+    for (s in samples) {
+      ckpt <- file.path(CELL_POTENCY_SCRATCH,
+                        paste0("ct2_", gsub("[^A-Za-z0-9_.-]", "_", s), ".csv"))
+      if (file.exists(ckpt)) {                                  # resume
+        message(paste0("    [checkpoint] ", s, ": loading ", basename(ckpt)))
+        res_list[[s]] <- utils::read.csv(ckpt, row.names = 1, check.names = FALSE,
+                                         stringsAsFactors = FALSE)
+        next
+      }
+      cells_s <- colnames(data)[as.character(data@meta.data[[SAMPLE_COLUMN]]) == s]
+      obj_s   <- subset(data, cells = cells_s)
+      r <- run_ct2_block(obj_s, s)
+      if (!is.null(r)) {
+        utils::write.csv(r, ckpt, row.names = TRUE)            # save immediately
+        res_list[[s]] <- r
+        message(paste0("    [saved] ", s, " -> ", basename(ckpt)))
+      }
+      rm(obj_s, r); gc()                                        # free before next sample
+    }
+    if (length(res_list) > 0) {
+      common   <- Reduce(intersect, lapply(res_list, colnames))
+      res_list <- lapply(res_list, function(d) d[, common, drop = FALSE])
+      ct2_all  <- do.call(rbind, res_list)
+    }
+    rm(res_list); gc()
+  } else {
+    message("  Running CytoTRACE 2 on the full object (one pass)...")
+    ct2_all <- run_ct2_block(data, "ALL")
+    gc()
+  }
 
   # ---- Attach results ------------------------------------------------------
   if (!is.null(ct2_all) && nrow(ct2_all) > 0) {
@@ -628,9 +706,20 @@ if (RUN_CYTOTRACE1) {
   counts_all <- GetAssayData(data, assay = "RNA", layer = "counts")
   ct1_list   <- list()
 
-  # Whole-dataset pass (relative order is computed across all cells together).
-  r <- run_ct1_block(counts_all, "ALL")
-  if (!is.null(r)) ct1_list[["ALL"]] <- r
+  if (CT2_RUN_PER_SAMPLE) {
+    # v1 densifies the ENTIRE matrix (it cannot chunk), so per sample is the only
+    # memory-safe way on a large object - one sample's dense block at a time.
+    samples <- unique(as.character(data@meta.data[[SAMPLE_COLUMN]]))
+    for (s in samples) {
+      idx <- which(as.character(data@meta.data[[SAMPLE_COLUMN]]) == s)
+      r <- run_ct1_block(counts_all[, idx, drop = FALSE], s)
+      if (!is.null(r)) ct1_list[[s]] <- r
+      gc()
+    }
+  } else {
+    r <- run_ct1_block(counts_all, "ALL")
+    if (!is.null(r)) ct1_list[["ALL"]] <- r
+  }
 
   if (length(ct1_list) > 0) {
     ct1_all <- do.call(rbind, ct1_list)
@@ -653,7 +742,7 @@ if (RUN_CYTOTRACE1) {
 # Per-cell AUCell activity for the configured GO Biological Process gene sets.
 # Adds AUCell_<name> columns and collects them in `pathway_cols`, which are
 # folded into the by-condition plots and the per-contrast comparisons below.
-pathway_cols <- character(0)
+# (pathway_cols was initialised near the top / RESUME block.)
 if (RUN_PATHWAY_SCORES) {
   message("\n=== STEP 3b: AUCell pathway scores ===")
   if (!requireNamespace("AUCell", quietly = TRUE)) {
@@ -711,7 +800,7 @@ if (RUN_PATHWAY_SCORES) {
 # mapped mouse-symbol -> human-symbol (homologene 10090->9606) -> human Entrez.
 # This chain is fragile, so the WHOLE block is wrapped: any failure just skips
 # CCAT/SCENT and the rest of Script 09 continues normally.
-ccat_cols <- character(0)
+# (ccat_cols was initialised near the top / RESUME block.)
 if (RUN_CCAT || RUN_SCENT) {
   message("\n=== STEP 3c: CCAT / SCENT ===")
   deps_ok <- requireNamespace("SCENT", quietly = TRUE) &&
@@ -786,6 +875,34 @@ if (RUN_CCAT || RUN_SCENT) {
 }
 
 # =============================================================================
+# --- CHECKPOINT: save scores + object BEFORE the heavy plotting ---------------
+# =============================================================================
+# Every per-cell score is computed by now. Save them immediately - a compact CSV
+# of just the score columns AND the enriched .rds - so any failure (OOM, etc.) in
+# the plotting/stats below never loses the expensive potency computation. To
+# re-run only the plots later, set RESUME_SCORES <- TRUE at the top and this
+# object already carries the columns.
+message("\n=== Checkpoint: saving scores + enriched object ===")
+.score_keep <- intersect(c(
+  "entropy_shannon", "entropy_normalized", "entropy_score", "entropy_n_detected",
+  "gene_counts_score", "CytoTRACE2_Score", "CytoTRACE2_Potency", "CytoTRACE2_Relative",
+  "preKNN_CytoTRACE2_Score", "preKNN_CytoTRACE2_Potency", "potency_score",
+  "CytoTRACE1_Score", "CytoTRACE1_Rank", "CytoTRACE1_GCS",
+  pathway_cols, ccat_cols), colnames(data@meta.data))
+.id_keep <- intersect(c(SAMPLE_COLUMN, CELLTYPE_COLUMN, CONDITION_COLUMN),
+                      colnames(data@meta.data))
+tryCatch({
+  utils::write.csv(
+    data.frame(Barcode = colnames(data),
+               data@meta.data[, c(.id_keep, .score_keep), drop = FALSE],
+               check.names = FALSE),
+    file.path(SCORES_DIR, "potency_scores_per_cell.csv"), row.names = FALSE)
+  saveRDS(data, file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_with_cell_scores.rds")))
+  message("  Saved potency_scores_per_cell.csv + ",
+          PROJECT_NAME, "_with_cell_scores.rds (plotting next; safe to interrupt).")
+}, error = function(e) message("  [WARNING] checkpoint save failed: ", e$message))
+
+# =============================================================================
 # --- STEP 4: METHOD CONCORDANCE ----------------------------------------------
 # =============================================================================
 # Every method above claims to order cells by differentiation state. If they
@@ -803,13 +920,15 @@ if (RUN_CCAT || RUN_SCENT) {
 # =============================================================================
 message("\n=== STEP 4: Method concordance ===")
 
+# Include any score column that is PRESENT on the object (whether freshly
+# computed or reloaded via RESUME_SCORES) - a column exists only if it was scored.
 score_cols <- c()
-if (RUN_CYTOTRACE2 && "potency_score"     %in% colnames(data@meta.data)) score_cols <- c(score_cols, "potency_score")
-if (RUN_CYTOTRACE1 && "CytoTRACE1_Score"  %in% colnames(data@meta.data)) score_cols <- c(score_cols, "CytoTRACE1_Score")
-if (RUN_ENTROPY    && "entropy_score"     %in% colnames(data@meta.data)) score_cols <- c(score_cols, "entropy_score")
-if (RUN_ENTROPY    && "gene_counts_score" %in% colnames(data@meta.data)) score_cols <- c(score_cols, "gene_counts_score")
-if (RUN_CCAT       && "CCAT_score"        %in% colnames(data@meta.data)) score_cols <- c(score_cols, "CCAT_score")
-if (RUN_SCENT      && "SCENT_score"       %in% colnames(data@meta.data)) score_cols <- c(score_cols, "SCENT_score")
+if ("potency_score"     %in% colnames(data@meta.data)) score_cols <- c(score_cols, "potency_score")
+if ("CytoTRACE1_Score"  %in% colnames(data@meta.data)) score_cols <- c(score_cols, "CytoTRACE1_Score")
+if ("entropy_score"     %in% colnames(data@meta.data)) score_cols <- c(score_cols, "entropy_score")
+if ("gene_counts_score" %in% colnames(data@meta.data)) score_cols <- c(score_cols, "gene_counts_score")
+if ("CCAT_score"        %in% colnames(data@meta.data)) score_cols <- c(score_cols, "CCAT_score")
+if ("SCENT_score"       %in% colnames(data@meta.data)) score_cols <- c(score_cols, "SCENT_score")
 
 cor_df <- NULL
 if (length(score_cols) >= 2) {
@@ -950,36 +1069,67 @@ for (sc in score_cols) {
   plot_by_group(md, sc, CELLTYPE_COLUMN,
                 paste0(sc, " by cell type"),
                 paste0("box_", sc, "_by_celltype.png"))
-  plot_by_group(md, sc, CONDITION_COLUMN,
-                paste0(sc, " by ", CONDITION_COLUMN),
-                paste0("box_", sc, "_by_condition.png"))
 }
 
-# --- 5d: Score by condition, split by cell type ------------------------------
-# The comparison that usually matters: within each cell type, does potency
-# shift between experimental groups?
-for (sc in score_cols) {
-  tryCatch({
-    d <- md[!is.na(md[[sc]]), , drop = FALSE]
-    if (nrow(d) == 0) next
-    p <- ggplot(d, aes(x = .data[[CONDITION_COLUMN]], y = .data[[sc]],
-                       fill = .data[[CONDITION_COLUMN]])) +
-      geom_boxplot(outlier.size = 0.15, linewidth = 0.3) +
-      facet_wrap(stats::as.formula(paste0("~ `", CELLTYPE_COLUMN, "`")),
-                 scales = "free_y") +
-      labs(title = paste0(sc, " by condition, per cell type"),
-           x = NULL, y = sc) +
-      theme_bw() +
-      theme(axis.text.x   = element_text(angle = 45, hjust = 1, size = 7),
-            legend.position = "bottom",
-            strip.text    = element_text(size = 7, face = "bold"),
-            plot.title    = element_text(face = "bold"))
-    ggsave(file.path(SCORES_DIR, paste0("facet_", sc, "_condition_by_celltype.png")),
-           p, width = 14, height = 10, dpi = DPI_SETTING, bg = "white")
-    rm(p)
-  }, error = function(e) {
-    message(paste("  [WARNING] Facet plot failed for", sc, ":", e$message))
-  })
+# --- 5d: Score by condition, per cell type -----------------------------------
+# Two views per score, ordered by CONDITION_LEVELS, with Wilcoxon significance
+# brackets over each CONTRASTS_LIST pair:
+#   barplot_<score>.png  - group MEAN bar + SE
+#   violin_<score>.png   - violin + boxplot
+generate_gene_comparison_plots <- function(seurat_obj, score_col, group_by, x_axis,
+                                           comparisons, plot_type = "violin",
+                                           output_prefix = "", plot_title = score_col,
+                                           y_label = "Score",
+                                           fig_width = 16, fig_height = 7,
+                                           output_dir = SCORES_DIR) {
+  df_plot <- FetchData(seurat_obj, vars = c(score_col, group_by, x_axis)) %>%
+    dplyr::rename(Expression = 1) %>% tidyr::drop_na()
+  cust_theme <- theme_classic() + theme(
+    plot.title = element_text(hjust = 0.5, size = 18, face = "bold"),
+    strip.text = element_text(size = 14, face = "bold"),
+    strip.background = element_rect(fill = "white", color = "black", linewidth = 1),
+    axis.title.y = element_text(size = 16, face = "bold"), axis.title.x = element_blank(),
+    axis.text.x  = element_text(angle = 45, hjust = 1, size = 13, face = "bold"),
+    legend.position = "bottom", panel.spacing = unit(1.5, "lines")
+  )
+  p <- ggplot(df_plot, aes(!!sym(x_axis), Expression, fill = !!sym(x_axis)))
+  if (plot_type == "barplot") {
+    p <- p + stat_summary(fun = mean, geom = "bar", color = "black", alpha = 0.8) +
+      stat_summary(fun.data = mean_se, geom = "errorbar", width = 0.2)
+  } else {
+    p <- p + geom_violin(trim = TRUE, scale = "width", alpha = 0.7) +
+      geom_boxplot(width = 0.1, outlier.shape = NA, fill = "white", alpha = 0.5)
+  }
+  p <- p +
+    ggpubr::stat_compare_means(comparisons = comparisons, label = "p.signif",
+                       method = "wilcox.test", method.args = list(exact = FALSE),
+                       symnum.args = list(cutpoints = c(0, 0.0001, 0.001, 0.01, 0.05, 1),
+                                          symbols = c("****", "***", "**", "*", "ns")),
+                       step.increase = 0.1, size = 6, bracket.size = 0.8) +
+    facet_wrap(as.formula(paste("~", group_by)), scales = "free_y", ncol = 3) +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.22))) +
+    coord_cartesian(clip = "off") +
+    labs(title = plot_title, y = y_label) + scale_fill_brewer(palette = "Set1") + cust_theme
+  ggsave(file.path(output_dir, paste0(output_prefix, score_col, ".png")),
+         p, width = fig_width, height = fig_height, dpi = DPI_SETTING, bg = "white")
+  invisible(p)
+}
+
+if (exists("CONTRASTS_LIST") && length(CONTRASTS_LIST) > 0) {
+  ct_comparisons <- unname(CONTRASTS_LIST)   # list of c(group1, group2) pairs
+  for (sc in score_cols) {
+    for (pt in c("violin", "barplot")) {
+      tryCatch(
+        generate_gene_comparison_plots(
+          data, score_col = sc, group_by = CELLTYPE_COLUMN, x_axis = CONDITION_COLUMN,
+          comparisons = ct_comparisons, plot_type = pt,
+          output_prefix = paste0(pt, "_"), plot_title = sc, y_label = sc),
+        error = function(e)
+          message("  [WARNING] ", pt, " plot failed for ", sc, ": ", e$message))
+    }
+  }
+} else {
+  message("  [NOTE] CONTRASTS_LIST empty - skipping the bracketed comparison plots.")
 }
 
 # --- 5e: Potency category composition stacked bars ---------------------------
