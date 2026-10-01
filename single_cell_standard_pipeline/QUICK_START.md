@@ -18,6 +18,52 @@
 
 ---
 
+## Portable configuration — `config.R`
+
+All machine/project-specific paths live in **one file, `config.R`**, which every
+numbered script sources first. You no longer edit `ROOT_PATH`/`PROJECT_NAME` in
+each script — change them once in `config.R`, **or** (no code edit) export
+environment variables. Defaults target the **Nr4a1** study (`Nr4a1_s17_ack`).
+
+**Run convention:** launch scripts from this pipeline directory (so `./config.R`
+is found), or set `NR4A1_CONFIG=/full/path/to/config.R` (handy on HPC batch jobs).
+
+Switch dataset/machine without touching code:
+
+```bash
+export NR4A1_PROJECT=Wu_Diet_project2
+export NR4A1_ROOT=/home/ssromerogon/local_drive/optimus_drive/selim_working_dir/2026_wu_project2/r_process
+# optional: NR4A1_OUTPUT, NR4A1_CISTARGET, NR4A1_PY_SCENIC, NR4A1_PY_CELLRANK
+Rscript 07_DE_and_two_way_ANOVA.R
+```
+
+The **same `NR4A1_*` variables drive the Python side** (`12b`, `run_pyscenic2.sh`,
+`scenic.sh`), so one `export` block configures the whole pipeline — R and Python.
+
+> Note: `config.R` only holds machine/project knobs. Which `.rds` each script
+> *reads* (e.g. `_unified_annotated` vs `_with_cell_scores`) stays in that script.
+> Scripts 02–06/08 previously pointed at `Wu_Diet_project2`; they now default to
+> Nr4a1 like the rest — set the two env vars above to run Wu again.
+
+---
+
+## SCENIC / regulon analysis (`12a` → `12c`)
+
+```bash
+Rscript 12a_export_for_pyscenic.R          # Seurat -> per-label looms under seurat_output/SCENIC/
+./scenic.sh run                            # grn->ctx->aucell (detached, auto-resumes finished labels)
+./scenic.sh status                         # progress + which labels are done
+Rscript 12c_load_pyscenic_results.R        # attach AUC assay, FeaturePlot/violin/mean-AUC heatmap
+```
+
+`scenic.sh` wraps `run_pyscenic2.sh` (conda activate + libstdc++ preload +
+single-thread BLAS) which runs `12b_run_pyscenic.py`. Because `12b` defaults to
+`EXPORT_LOOM=False`, the outputs are `aucell.csv` + `regulons.p` (no
+`_pyscenic.loom`), and `12c` reads `aucell.csv` as its source of truth. See
+**INSTALL_NOTES.md §5b** for the pySCENIC conda env.
+
+---
+
 ## Installing the `TamuScDSC` package
 
 `TamuScDSC` holds the preprocessing engine (ingestion, light/stringent QC, the

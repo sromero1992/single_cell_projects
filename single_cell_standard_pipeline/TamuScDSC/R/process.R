@@ -46,13 +46,30 @@ process_rna <- function(data, assay_name = "RNA", num_hvg = 2000,
 #' @param resolution Clustering resolution (default 1.0).
 #' @param min_dist UMAP min.dist (default 0.3).
 #' @param kneigh Neighbours for UMAP (n.neighbors) and the graph (k.param) (default 15).
+#' @param normalization "LogNormalize" (default, re-uses existing normalized data)
+#'   or "SCT" (re-run SCTransform on the subset — its HVGs/variance differ from the
+#'   global object). SCT writes a separate 'SCT' assay used only for this embedding;
+#'   the RNA assay is restored as default before returning, so DE stays on RNA.
+#' @param vars_to_regress Covariates for SCTransform's vars.to.regress (e.g.
+#'   "percent_mt"). Ignored for LogNormalize. Do NOT pass nCount_RNA (SCT models
+#'   depth itself).
+#' @param harmonize_by Optional batch column (e.g. "SampleID"). When set, BOTH
+#'   embeddings are produced so you can compare batch effects: the un-integrated
+#'   PCA track (`umap_none` / `clusters_none`) AND the Harmony-corrected track
+#'   (`umap_harmony` / `clusters_harmony`), with Idents set to `clusters_harmony`.
+#'   NULL (default) produces only the un-integrated track and sets Idents to
+#'   `clusters_none`. Naming matches the subannotation scripts' convention.
 #' @return The subset, re-embedded Seurat object.
 #' @export
 process_and_extract_cell_types <- function(data, cell_types,
                                            cell_type_col = "broad_cell_types",
                                            assay_name = "RNA", num_hvg = 2000,
                                            dims_pca = 50, resolution = 1.0,
-                                           min_dist = 0.3, kneigh = 15) {
+                                           min_dist = 0.3, kneigh = 15,
+                                           normalization = c("LogNormalize", "SCT"),
+                                           vars_to_regress = NULL,
+                                           harmonize_by = NULL) {
+  normalization <- match.arg(normalization)
   Seurat::DefaultAssay(data) <- assay_name
   if (!cell_type_col %in% colnames(data@meta.data))
     stop("process_and_extract_cell_types(): column '", cell_type_col, "' not found.")
@@ -61,13 +78,70 @@ process_and_extract_cell_types <- function(data, cell_types,
     stop("process_and_extract_cell_types(): no cells match {",
          paste(cell_types, collapse = ", "), "} in column '", cell_type_col, "'.")
   data_sub <- subset(data, cells = keep)
-  data_sub <- Seurat::FindVariableFeatures(data_sub, selection.method = "vst", nfeatures = num_hvg)
-  data_sub <- Seurat::ScaleData(data_sub)
-  data_sub <- Seurat::RunPCA(data_sub)
-  data_sub <- Seurat::RunUMAP(data_sub, dims = 1:dims_pca, n.epochs = 500,
-                              min.dist = min_dist, n.neighbors = kneigh)
-  data_sub <- Seurat::FindNeighbors(data_sub, dims = 1:dims_pca, k.param = kneigh)
-  data_sub <- Seurat::FindClusters(data_sub, resolution = resolution)
+  # Drop reductions/graphs inherited from the PARENT object — they were computed on
+  # all cells and are meaningless for this subset; we recompute everything below.
+  data_sub@reductions <- list()
+  data_sub@graphs     <- list()
+
+  if (normalization == "SCT") {
+    if (!requireNamespace("sctransform", quietly = TRUE))
+      stop("normalization='SCT' needs the 'sctransform' package installed.")
+    vtr <- intersect(vars_to_regress, colnames(data_sub@meta.data))
+    if (length(vtr) < length(vars_to_regress))
+      warning("process_and_extract_cell_types(): vars_to_regress not in metadata, dropped: ",
+              paste(setdiff(vars_to_regress, vtr), collapse = ", "))
+    if (length(vtr)) {
+      message("  [SCT] regressing out: ", paste(vtr, collapse = ", "),
+              " (affects the SCT embedding/clustering only; RNA assay & DE unchanged).")
+      if ("percent_mt" %in% vtr)
+        message("  [SCT] NOTE: percent_mt removes the low-quality/dying-cell axis for ",
+                "cleaner clusters, but if mito fraction genuinely differs by condition/",
+                "cell type (plausible tumor/polyp vs WT) this can erase real signal and ",
+                "shift cluster boundaries. Compare with normalization set to LogNormalize if unsure.")
+    }
+    data_sub <- Seurat::SCTransform(data_sub, assay = assay_name, new.assay = "SCT",
+                                    variable.features.n = num_hvg,
+                                    vars.to.regress = if (length(vtr)) vtr else NULL,
+                                    vst.flavor = "v2", verbose = FALSE)
+    Seurat::DefaultAssay(data_sub) <- "SCT"
+    data_sub <- Seurat::RunPCA(data_sub, npcs = dims_pca, verbose = FALSE)
+  } else {
+    data_sub <- Seurat::FindVariableFeatures(data_sub, selection.method = "vst", nfeatures = num_hvg)
+    data_sub <- Seurat::ScaleData(data_sub)
+    data_sub <- Seurat::RunPCA(data_sub)
+  }
+
+  # neighbours -> clusters -> UMAP for one reduction (mirrors integrate_data()).
+  embed <- function(o, reduction, graph, clusters, umap) {
+    n_dims <- min(dims_pca, ncol(SeuratObject::Embeddings(o, reduction)))
+    o <- Seurat::FindNeighbors(o, reduction = reduction, dims = 1:n_dims,
+                               k.param = kneigh, graph.name = graph, verbose = FALSE)
+    o <- Seurat::FindClusters(o, resolution = resolution, graph.name = graph,
+                              cluster.name = clusters, verbose = FALSE)
+    Seurat::RunUMAP(o, reduction = reduction, dims = 1:n_dims, n.epochs = 500,
+                    min.dist = min_dist, n.neighbors = kneigh,
+                    reduction.name = umap, verbose = FALSE)
+  }
+
+  # Track A: un-integrated PCA — always produced (diagnostic for batch effects).
+  data_sub <- embed(data_sub, "pca", "pca_nn", "clusters_none", "umap_none")
+  active   <- "clusters_none"
+
+  # Track B: Harmony-corrected — only when a batch column is supplied.
+  if (!is.null(harmonize_by)) {
+    if (!requireNamespace("harmony", quietly = TRUE))
+      stop("process_and_extract_cell_types(): harmonize_by needs the 'harmony' package.")
+    if (!harmonize_by %in% colnames(data_sub@meta.data))
+      stop("process_and_extract_cell_types(): harmonize_by column '", harmonize_by, "' not found.")
+    data_sub <- harmony::RunHarmony(data_sub, group.by.vars = harmonize_by,
+                                    reduction.use = "pca", dims.use = 1:dims_pca,
+                                    reduction.save = "harmony")
+    data_sub <- embed(data_sub, "harmony", "harmony_nn", "clusters_harmony", "umap_harmony")
+    active   <- "clusters_harmony"
+  }
+
+  Seurat::Idents(data_sub) <- active
+  Seurat::DefaultAssay(data_sub) <- assay_name   # RNA back as default for downstream DE
   data_sub
 }
 

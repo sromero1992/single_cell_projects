@@ -1,0 +1,97 @@
+---
+title: "Embedding choices (SCT vs LogNormalize) and the downstream pipeline"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Embedding choices (SCT vs LogNormalize) and the downstream pipeline}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(eval = FALSE, comment = "#>")
+library(TamuScDSC)
+```
+
+This vignette covers the two embedding knobs added to the integration helpers, and
+how they feed the numbered pipeline scripts (DE, SCENIC, scTenifoldNet). The guiding
+rule throughout: **the SCT assay is for the embedding/clustering/annotation only;
+the `RNA` assay stays LogNormalized, and all differential expression reads `RNA`.**
+
+## 1. Global embedding: `integrate_data()`
+
+`integrate_data()` runs normalize → HVG → PCA → Harmony → clusters/UMAP and always
+produces two tracks you can compare for batch effects: the un-integrated
+`umap_unintegrated` / `clusters_unintegrated` and the Harmony `umap_harmony` /
+`clusters_harmony`.
+
+The normalization front-end is a toggle. `"LogNormalize"` (default) is the classic
+path; `"SCT"` swaps in SCTransform v2 (glmGamPoi) before PCA.
+
+```{r}
+# LogNormalize (default)
+obj <- integrate_data(obj, method = "RunHarmony", group_by = "SampleID")
+
+# SCTransform embedding, optionally regressing a quality covariate
+obj <- integrate_data(
+  obj, method = "RunHarmony", group_by = "SampleID",
+  normalization   = "SCT",
+  vars_to_regress = "percent_mt"   # removes the dying/stressed-cell axis
+)
+```
+
+Notes:
+
+* SCTransform already models sequencing depth, so **never** put `nCount_RNA` in
+  `vars_to_regress`. `percent_mt` is a legitimate quality covariate, but if mito
+  fraction genuinely differs by condition/cell type it can erase real signal — the
+  function prints a `[SCT] NOTE` when it regresses it. Compare with
+  `normalization = "LogNormalize"` if unsure.
+* `"SCT"` is wired to `method = "RunHarmony"` only.
+* See `?integrate_data` for every parameter.
+
+## 2. Subset re-embedding: `process_and_extract_cell_types()`
+
+Pulls one or more cell types from any metadata column and re-embeds them. With
+`harmonize_by` it emits **both** tracks (`umap_none`/`clusters_none` and
+`umap_harmony`/`clusters_harmony`) so you can judge batch effects within the lineage;
+`normalization = "SCT"` re-runs SCTransform on the subset (its HVGs differ from the
+global object).
+
+```{r}
+sub <- process_and_extract_cell_types(
+  obj, cell_types = "T cells", cell_type_col = "CellType_broad",
+  normalization = "SCT", vars_to_regress = "percent_mt",
+  harmonize_by  = "SampleID"
+)
+```
+
+The subannotation scripts `03/04/05` call this via their `SUBCLUSTER_NORMALIZATION`
+/ `SUBCLUSTER_VARS_TO_REGRESS` / `SUBCLUSTER_HARMONIZE_BY` config. See
+`?process_and_extract_cell_types`.
+
+## 3. Downstream pipeline scripts
+
+These are standalone scripts (not package functions), documented in their header
+comments and in `QUICK_START.md` / `INSTALL_NOTES.md`. They all read machine/project
+paths from `config.R` (nr4a1 defaults; override via `NR4A1_*` env vars).
+
+* **`07_DE_and_two_way_ANOVA.R`** — three DE tests side by side: **MAST**
+  (sample-aware at cell level), **Wilcoxon** (`RUN_WILCOX`, sample-naive), and
+  **edgeR pseudobulk** (`RUN_EDGER`, the sample-aware test for replicated designs),
+  each with Enrichr and a DV∩test overlap. SplineDV adds differential-variability
+  genes. Summary figures show all methods (collective grid + one per method; DV
+  plotted unsigned).
+* **`12a` → `12c` (SCENIC)** — `12a` exports per-label looms; `scenic.sh run`
+  drives `run_pyscenic2.sh`/`12b` (grn→ctx→aucell); `12c` reads `aucell.csv` back,
+  attaches an `AUC` assay, and makes FeaturePlot / violin / mean-AUC heatmaps.
+* **`13_sctenifoldnet.R`** — differential gene-regulatory networks per cell type,
+  with a resume-skip (`SKIP_IF_DONE`) so an interrupted run restarts cleanly.
+
+## 4. Where to find help
+
+```{r}
+?integrate_data
+?process_and_extract_cell_types
+help(package = "TamuScDSC")
+browseVignettes("TamuScDSC")
+```

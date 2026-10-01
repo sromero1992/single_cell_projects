@@ -12,11 +12,18 @@ library(Seurat)
 # =============================================================================
 # --- PART 1: USER CONFIGURATION ----------------------------------------------
 # =============================================================================
-PROJECT_NAME  <- "Nr4a1_ack17"
-ROOT_PATH     <- "/mnt/SCDC/Optimus/selim_working_dir/2026_nr4a1_ack/r_process/debug_pipeline_pkg"
+# ---- Shared portable config: nr4a1 defaults, override via env vars (see config.R).
+# Run from the pipeline directory, or set NR4A1_CONFIG=/full/path/to/config.R. ----
+.NR4A1_CFG <- Sys.getenv("NR4A1_CONFIG", "config.R")
+if (!file.exists(.NR4A1_CFG)) stop("config.R not found at '", .NR4A1_CFG,
+  "' - cd to the pipeline directory or set NR4A1_CONFIG.", call. = FALSE)
+source(.NR4A1_CFG)
+
+# PROJECT_NAME  <- "Nr4a1_ack17"   # [portable] now set in config.R
+# ROOT_PATH     <- "/mnt/SCDC/Optimus/selim_working_dir/2026_nr4a1_ack/r_process/debug_pipeline_pkg"   # [portable] now set in config.R
 METADATA_FILE <- file.path(ROOT_PATH, "Nr4a1_s17_metadata.xlsx")
 H5_DIR        <- file.path(ROOT_PATH, "h5_files")
-OUTPUT_DIR    <- file.path(ROOT_PATH, "seurat_output")
+# OUTPUT_DIR    <- file.path(ROOT_PATH, "seurat_output")   # [portable] now set in config.R
 DIAG_DIR      <- file.path(OUTPUT_DIR, "doublet_diagnostics")
 CHECKPOINT_DIR<- file.path(OUTPUT_DIR, "per_sample_checkpoints")
 SAMPLE_COL    <- "SampleID"
@@ -60,6 +67,19 @@ dbl <- doublet_params(
 )
 
 INTEGRATION_METHOD <- "RunHarmony"
+# Normalization for the EMBEDDING/clustering (annotation) only. "SCT" swaps in
+# SCTransform (v2/glmGamPoi) -> PCA -> Harmony; "LogNormalize" is the classic path.
+# Either way the RNA assay is left LogNormalized so DE (07/09) is unaffected.
+NORMALIZATION       <- "LogNormalize"   # "LogNormalize" (default) | "SCT"
+# Covariates for SCTransform's vars.to.regress (used only when NORMALIZATION="SCT";
+# embedding/clustering only — RNA assay & DE are untouched). SCT already models
+# sequencing depth, so NEVER add nCount_RNA. Common literature choices:
+#   "percent_mt"                    # remove dying/stressed-cell axis (most common)
+#   c("percent_mt","percent_ribo")  # also regress ribosomal fraction
+#   c("S.Score","G2M.Score")        # remove cell cycle (run CellCycleScoring first)
+# NULL = regress nothing (default). See the [SCT] NOTE printed at runtime re: risk
+# of erasing biology if mito differs by condition/cell type.
+SCT_VARS_TO_REGRESS <- NULL
 CLUSTER_RESOLUTION <- 1.0          # first-pass clustering resolution (1.0 or 1.5)
 RUN_DECONTX        <- TRUE
 # Use the raw/droplet h5 as the ambient background (DecontX-recommended: the
@@ -157,11 +177,13 @@ merged_obj <- apply_qc(merged_obj, p = qc$post, apply = TRUE)   # global gene th
 message("\n[STEP 6] Performing Batch Integration (Harmony) & UMAP...")
 merged_obj <- integrate_data(
   merged_obj,
-  method     = INTEGRATION_METHOD,
-  group_by   = SAMPLE_COL,
-  n_pcs      = dbl$n_pcs,
-  n_features = dbl$n_variable_features,
-  resolution = CLUSTER_RESOLUTION
+  method          = INTEGRATION_METHOD,
+  group_by        = SAMPLE_COL,
+  n_pcs           = dbl$n_pcs,
+  n_features      = dbl$n_variable_features,
+  resolution      = CLUSTER_RESOLUTION,
+  normalization   = NORMALIZATION,
+  vars_to_regress = SCT_VARS_TO_REGRESS
 )
 
 # -----------------------------------------------------------------------------

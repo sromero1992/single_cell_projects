@@ -33,6 +33,9 @@ cran_pkgs <- c(
   "Seurat", "devtools", "dplyr", "ggplot2", "Matrix", "ggpubr", "tidyr", "patchwork",
   "stringr", "tibble", "cowplot", "openxlsx","writexl", "readxl", "parallelly", "hdf5r",
   "enrichR", "remotes", "R.utils", "sf", "harmony", "xgboost",
+  # SCTransform normalization path for the annotation embedding (Script 01 /
+  # integrate_data + process_and_extract_cell_types when NORMALIZATION = "SCT").
+  "sctransform",
   # Potency-benchmark methods (Script 09 CCAT/SCENT + CytoTRACE cross-checks):
   #   mclust (SCENT clustering), pROC (benchmark ROC), homologene (mouse->human).
   "mclust", "pROC", "homologene"
@@ -42,13 +45,19 @@ bioc_pkgs <- c(
   "BiocManager", "ComplexHeatmap", "Biobase", "BiocNeighbors", "BiocGenerics",
   "celda", "dittoSeq", "AUCell", "Gviz", "GenomicRanges", "rtracklayer", "MAST",
   "BiocSingular", "SingleCellExperiment", "SummarizedExperiment", "scDblFinder",
+  # glmGamPoi = fast backend for SCTransform v2 (Script 01 SCT embedding path);
+  # edgeR = pseudobulk DE in Script 07 (sample-aware test for the 2/3/3 design).
+  "glmGamPoi", "edgeR",
   # Symbol <-> Ensembl mapping for the PathVisio/WikiPathways exports in Script 07
   # and for the Ensembl->symbol step in Script 09's CytoTRACE 2 preprocessing.
   # org.Hs.eg.db is needed only when CT2_SPECIES = "human"; cheap to keep here.
   "AnnotationDbi", "org.Mm.eg.db", "org.Hs.eg.db",
   # Potency-benchmark methods (Script 09 CCAT/SCENT): scuttle (normalisation),
   # biomaRt (ortholog / symbol mapping fallback).
-  "scuttle", "biomaRt"
+  "scuttle", "biomaRt",
+  # sva is a Bioconductor dependency of the CytoTRACE v1 GitHub package; install
+  # it here (before the GitHub loop) or CytoTRACE fails with "dependency 'sva'".
+  "sva"
 )
 
 github_pkgs <- c(

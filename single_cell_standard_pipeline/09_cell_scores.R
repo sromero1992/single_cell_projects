@@ -94,9 +94,16 @@ set.seed(123)
 # =============================================================================
 
 # --- 1.1: Project Identity & Paths -------------------------------------------
-PROJECT_NAME <- "Nr4a1_s17_ack"
-ROOT_PATH    <- "/home/ssromerogon/local_drive/optimus_drive/selim_working_dir/2026_nr4a1_ack/r_process"
-OUTPUT_DIR   <- file.path(ROOT_PATH, "seurat_output")
+# ---- Shared portable config: nr4a1 defaults, override via env vars (see config.R).
+# Run from the pipeline directory, or set NR4A1_CONFIG=/full/path/to/config.R. ----
+.NR4A1_CFG <- Sys.getenv("NR4A1_CONFIG", "config.R")
+if (!file.exists(.NR4A1_CFG)) stop("config.R not found at '", .NR4A1_CFG,
+  "' - cd to the pipeline directory or set NR4A1_CONFIG.", call. = FALSE)
+source(.NR4A1_CFG)
+
+# PROJECT_NAME <- "Nr4a1_s17_ack"   # [portable] now set in config.R
+# ROOT_PATH    <- "/home/ssromerogon/local_drive/optimus_drive/selim_working_dir/2026_nr4a1_ack/r_process"   # [portable] now set in config.R
+# OUTPUT_DIR   <- file.path(ROOT_PATH, "seurat_output")   # [portable] now set in config.R
 
 # Input object — the final annotated object from Script 06.
 RDS_PATH <- file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_unified_annotated.rds"))
@@ -107,9 +114,13 @@ RDS_PATH <- file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_unified_annotated.rds")
 
 SCORES_DIR <- file.path(OUTPUT_DIR, "cell_scores")
 
-# Per-sample CytoTRACE results are checkpointed here as CSV. A crash at sample
-# 10/16 keeps the first 9 - re-running reloads them and scores only what's left.
+# Per-sample CytoTRACE (v1 AND v2) results are checkpointed here as CSV and are
+# AUTO-LOADED on any re-run: a crash at sample 10/16 keeps the first 9, and the
+# next run reloads them and scores only what's left. No flag needed to resume.
 CELL_POTENCY_SCRATCH <- file.path(OUTPUT_DIR, "cell_potency_scratch")
+# Set TRUE to WIPE the scratch cache (ct1_*/ct2_* CSVs) at startup and force a
+# clean recompute of CytoTRACE v1/v2 from scratch. FALSE = keep and reuse.
+CLEAN_POTENCY_SCRATCH <- FALSE
 
 # --- 1.2: Metadata Columns ---------------------------------------------------
 MODE <- "subtypes"
@@ -142,9 +153,17 @@ RUN_CYTOTRACE2 <- TRUE   # absolute potency (recommended primary method)
 RUN_CYTOTRACE1 <- TRUE   # original relative CytoTRACE; skipped if not installed
 RUN_ENTROPY    <- TRUE   # native entropy metrics; no dependencies, always works
 RUN_PATHWAY_SCORES <- TRUE  # AUCell per-cell scoring of the GOBP gene sets below
-RUN_CCAT  <- TRUE    # CCAT connectome-correlation potency (SCENT PPI). Fully guarded:
+RUN_CCAT  <- FALSE   # CCAT connectome-correlation potency (SCENT PPI). Fully guarded:
                      #   any failure in the fragile mouse->human->PPI chain is skipped.
 RUN_SCENT <- FALSE   # SCENT signalling entropy (CompSR) - slow (min); fully guarded.
+RUN_CELLCYCLE <- TRUE  # Seurat CellCycleScoring on ALL cells; cell-cycle PLOTS are
+                       #   made for the colonocyte subtypes only (STEP 5f).
+# Cell-cycle gene source:
+#   "mouse_curated" -> validated mouse S/G2M ortholog lists (recommended; the data
+#                      is mouse and Seurat's built-in lists are HUMAN symbols).
+#   "seurat"        -> Seurat's cc.genes.updated.2019 title-cased to mouse (quick,
+#                      but title-casing misses a few renamed orthologs).
+CC_GENE_SOURCE <- "mouse_curated"
 
 # RESUME_SCORES: if TRUE and a previous run already wrote
 # cell_scores/potency_scores_per_cell.csv, load those columns onto the object and
@@ -181,6 +200,10 @@ PATHWAY_FALLBACK <- list(
                   "Tfrc","Alox15","Sat1","Aifm2","Vdac2")
 )
 PATHWAY_MIN_GENES <- 5   # skip a gene set with fewer than this many genes present
+# AUCell aucMaxRank as a FRACTION of genes: the top X% of each cell's ranking that
+# defines the AUC. 0.05 = AUCell's default (top 5%); 0.10 matches the "top 10%"
+# style. Higher = more sensitive but less separation between high/low-activity cells.
+AUCELL_MAX_RANK_PCT <- 0.05
 
 # --- 1.4: CytoTRACE 2 Parameters ---------------------------------------------
 # SPECIES: "mouse" or "human". CytoTRACE 2's feature set is mouse-based; for
@@ -252,6 +275,11 @@ POINT_SIZE   <- 0.3
 
 # Colour scale for potency UMAPs (low potency -> high potency)
 POTENCY_COLORS <- c("#2166AC", "#67A9CF", "#F7F7F7", "#EF8A62", "#B2182B")
+# Sequential gray -> blue ramp for CONTINUOUS score UMAPs. The scores are not
+# standardised/centred, so a diverging blue-white-red ramp (with a washed-out
+# white midpoint) is inappropriate and looks pale; a sequential ramp reads them
+# correctly as low -> high.
+SCORE_UMAP_COLORS <- c("grey88", "#9ECAE1", "#4292C6", "#08519C", "#08306B")
 
 # Canonical CytoTRACE 2 category order, low to high potency.
 POTENCY_LEVELS <- c("Differentiated", "Unipotent", "Oligopotent",
@@ -262,6 +290,13 @@ POTENCY_LEVELS <- c("Differentiated", "Unipotent", "Oligopotent",
 # =============================================================================
 
 if (!dir.exists(SCORES_DIR)) dir.create(SCORES_DIR, recursive = TRUE)
+
+# Optional: wipe the per-sample CytoTRACE scratch cache to force a clean recompute.
+if (isTRUE(CLEAN_POTENCY_SCRATCH) && dir.exists(CELL_POTENCY_SCRATCH)) {
+  old <- list.files(CELL_POTENCY_SCRATCH, pattern = "^ct[12]_.*\\.csv$", full.names = TRUE)
+  if (length(old) > 0) file.remove(old)
+  message("  [CLEAN] Removed ", length(old), " cached CytoTRACE scratch file(s).")
+}
 
 # --- Availability checks -----------------------------------------------------
 # Detect once, up front, so the run either proceeds knowingly or stops early
@@ -332,6 +367,43 @@ if (!is.null(CONDITION_LEVELS)) {
     data@meta.data[[CONDITION_COLUMN]],
     levels = intersect(CONDITION_LEVELS, present)
   )
+}
+
+# --- Cell-cycle scoring (ALL cells) ------------------------------------------
+# Seurat CellCycleScoring adds S.Score, G2M.Score and a discrete Phase to every
+# cell. Scored on the whole object; the dedicated cell-cycle plots later are
+# restricted to the colonocyte subtypes (STEP 5f).
+if (RUN_CELLCYCLE) {
+  message("\n=== Cell-cycle scoring (CellCycleScoring, all cells) ===")
+  # Mouse S / G2M ortholog lists (Tirosh et al., mouse-symbol version).
+  cc_mouse_s <- c("Atad2","Brip1","Casp8ap2","Ccne2","Cdc45","Cdc6","Cdca7","Cenpu",
+    "Chaf1b","Clspn","Dscc1","Dtl","E2f8","Exo1","Fen1","Gins2","Gmnn","Hells",
+    "Mcm2","Mcm4","Mcm5","Mcm6","Msh2","Nasp","Pcna","Pola1","Pold3","Polr1b",
+    "Prim1","Rad51ap1","Rfc2","Rrm1","Rrm2","Slbp","Tipin","Tyms","Ubr7","Uhrf1",
+    "Ung","Usp1","Vps50","Wdr76","Xrcc2")
+  cc_mouse_g2m <- c("Anln","Anp32e","Aurka","Aurkb","Birc5","Bub1","Cbx5","Ccnb2",
+    "Cdc20","Cdc25c","Cdca2","Cdca3","Cdca8","Cdk1","Cenpa","Cenpe","Cenpf","Ckap2",
+    "Ckap2l","Ckap5","Cks1b","Cks2","Ctcf","Dazl","Dlgap5","Ect2","G2e3","Gas2l3",
+    "Gtse1","Hjurp","Hmgb2","Hmmr","Jpt1","Kif11","Kif20b","Kif23","Kif2c","Lbr",
+    "Mki67","Ncapd2","Ndc80","Nek2","Nuf2")
+  if (CC_GENE_SOURCE == "seurat") {
+    s_src   <- tools::toTitleCase(tolower(Seurat::cc.genes.updated.2019$s.genes))
+    g2m_src <- tools::toTitleCase(tolower(Seurat::cc.genes.updated.2019$g2m.genes))
+  } else {
+    s_src <- cc_mouse_s; g2m_src <- cc_mouse_g2m
+  }
+  present_genes <- rownames(data)
+  s_genes   <- intersect(s_src,   present_genes)
+  g2m_genes <- intersect(g2m_src, present_genes)
+  message(sprintf("  S genes: %d/%d present | G2M genes: %d/%d present",
+                  length(s_genes), length(s_src), length(g2m_genes), length(g2m_src)))
+  data <- tryCatch(
+    Seurat::CellCycleScoring(object = data, s.features = s_genes,
+                             g2m.features = g2m_genes, set.ident = FALSE),
+    error = function(e) { message("  [WARN] CellCycleScoring failed: ", e$message); data })
+  if ("Phase" %in% colnames(data@meta.data))
+    message("  Phase table: ", paste(names(table(data$Phase)),
+                                      table(data$Phase), sep="=", collapse=" "))
 }
 
 # --- Input quality report ----------------------------------------------------
@@ -547,6 +619,12 @@ if (RUN_CYTOTRACE2) {
     message(paste0("    -> ", label, ": ", ncol(obj), " cells..."))
     ct2_par <- isTRUE(CT2_PARALLELIZE) && .Platform$OS.type != "windows"
 
+    # Capture the authoritative barcodes NOW, from the input object, before the
+    # lean rebuild below (CreateSeuratObject/cytotrace2 mangle cell names). These
+    # travel with the scores as an explicit `barcode` column so downstream
+    # attachment matches on identity, never on row order.
+    orig_cells <- colnames(obj)
+
     res <- tryCatch({
       cnts <- prep_ct2_input(obj)                              # sparse, symbol rownames
       lean <- Seurat::CreateSeuratObject(counts = cnts)        # counts-only, minimal RAM
@@ -568,11 +646,19 @@ if (RUN_CYTOTRACE2) {
       rm(out, lean); gc()
       keep <- intersect(ct2_cols, colnames(md))
       if (length(keep) == 0) stop("cytotrace2() returned no recognised prediction columns.")
-      res_df <- md[, keep, drop = FALSE]                       # rownames = cell barcodes
+      res_df <- md[, keep, drop = FALSE]
       for (sc_col in intersect(c("CytoTRACE2_Score", "preKNN_CytoTRACE2_Score"),
                                colnames(res_df))) {
         res_df[[sc_col]] <- pmin(pmax(res_df[[sc_col]], 0), 1)
       }
+      # cytotrace2(is_seurat=TRUE) returns the object unfiltered and in input
+      # order, so row i corresponds to orig_cells[i]. Attach the true barcode as
+      # a first-class column and drop the (mangled) rownames.
+      if (nrow(res_df) != length(orig_cells))
+        stop(sprintf("row/cell mismatch: %d scored rows vs %d input cells",
+                     nrow(res_df), length(orig_cells)))
+      res_df <- cbind(barcode = orig_cells, res_df, stringsAsFactors = FALSE)
+      rownames(res_df) <- NULL
       res_df
     }, error = function(e) {
       message(paste0("    [WARNING] CytoTRACE 2 failed on ", label, ": ", e$message))
@@ -590,23 +676,30 @@ if (RUN_CYTOTRACE2) {
 
     res_list <- list()
     for (s in samples) {
+      cells_s <- colnames(data)[as.character(data@meta.data[[SAMPLE_COLUMN]]) == s]
       ckpt <- file.path(CELL_POTENCY_SCRATCH,
                         paste0("ct2_", gsub("[^A-Za-z0-9_.-]", "_", s), ".csv"))
       if (file.exists(ckpt)) {                                  # resume
         message(paste0("    [checkpoint] ", s, ": loading ", basename(ckpt)))
-        res_list[[s]] <- utils::read.csv(ckpt, row.names = 1, check.names = FALSE,
-                                         stringsAsFactors = FALSE)
-        next
+        r <- utils::read.csv(ckpt, check.names = FALSE, stringsAsFactors = FALSE)
+      } else {
+        obj_s <- subset(data, cells = cells_s)
+        r <- run_ct2_block(obj_s, s)                            # carries `barcode` column
+        if (!is.null(r)) {
+          utils::write.csv(r, ckpt, row.names = FALSE)          # save immediately
+          message(paste0("    [saved] ", s, " -> ", basename(ckpt)))
+        }
+        rm(obj_s); gc()                                         # free before next sample
       }
-      cells_s <- colnames(data)[as.character(data@meta.data[[SAMPLE_COLUMN]]) == s]
-      obj_s   <- subset(data, cells = cells_s)
-      r <- run_ct2_block(obj_s, s)
       if (!is.null(r)) {
-        utils::write.csv(r, ckpt, row.names = TRUE)            # save immediately
+        # Sanity: every returned barcode must exist in `data` for this sample.
+        n_ok <- sum(r$barcode %in% cells_s)
+        if (n_ok != nrow(r))
+          message(paste0("    [WARN] ", s, ": ", nrow(r) - n_ok,
+                         " scored barcodes not found in data -- check inputs."))
         res_list[[s]] <- r
-        message(paste0("    [saved] ", s, " -> ", basename(ckpt)))
       }
-      rm(obj_s, r); gc()                                        # free before next sample
+      rm(r); gc()
     }
     if (length(res_list) > 0) {
       common   <- Reduce(intersect, lapply(res_list, colnames))
@@ -621,13 +714,13 @@ if (RUN_CYTOTRACE2) {
   }
 
   # ---- Attach results ------------------------------------------------------
-  if (!is.null(ct2_all) && nrow(ct2_all) > 0) {
-    # Align strictly by barcode; never assume row order matches.
-    ct2_aligned <- ct2_all[match(colnames(data), rownames(ct2_all)), , drop = FALSE]
-    rownames(ct2_aligned) <- colnames(data)
+  if (!is.null(ct2_all) && nrow(ct2_all) > 0 && "barcode" %in% colnames(ct2_all)) {
+    # Align strictly on the explicit `barcode` column; never assume row order.
+    idx        <- match(colnames(data), ct2_all$barcode)
+    score_cols <- setdiff(colnames(ct2_all), "barcode")
 
-    for (cn in colnames(ct2_aligned)) {
-      data@meta.data[[cn]] <- ct2_aligned[[cn]]
+    for (cn in score_cols) {
+      data@meta.data[[cn]] <- ct2_all[[cn]][idx]
     }
 
     # Enforce the canonical low-to-high potency ordering on the category
@@ -684,19 +777,31 @@ if (RUN_CYTOTRACE1) {
       return(NULL)
     }
     message(paste0("    -> ", label, ": ", ncol(mat), " cells..."))
+    # Barcodes are stamped by the CALLER from colnames(data) (the counts-layer
+    # matrix can carry different cell names, which was the '0 cells scored' bug).
+    # Here we only ensure the scores come back in INPUT column order: CytoTRACE may
+    # sanitise/reorder names, so remap its output to the input order when possible.
+    orig_cells <- colnames(mat)
     tryCatch({
       # CytoTRACE() wants a dense matrix of counts with gene rownames.
       dense <- as.matrix(mat)
       res   <- CytoTRACE(dense, ncores = 1)
-      out   <- data.frame(
-        CytoTRACE1_Score   = as.numeric(res$CytoTRACE),
-        CytoTRACE1_Rank    = as.numeric(res$CytoTRACErank),
-        CytoTRACE1_GCS     = as.numeric(res$GCS),
-        row.names          = names(res$CytoTRACE),
+      rm(dense); gc()
+      sc <- res$CytoTRACE; rk <- res$CytoTRACErank; gcs <- res$GCS
+      nm <- names(sc)
+      if (!is.null(nm) && length(nm) == length(orig_cells)) {
+        ord <- match(make.names(orig_cells), nm)               # input -> output position
+        if (!anyNA(ord)) { sc <- sc[ord]; rk <- rk[ord]; gcs <- gcs[ord] }
+        else message(paste0("    [WARN] ", label,
+                            ": CytoTRACE names didn't remap; assuming input order."))
+      }
+      data.frame(
+        CytoTRACE1_Score   = as.numeric(sc),
+        CytoTRACE1_Rank    = as.numeric(rk),
+        CytoTRACE1_GCS     = as.numeric(gcs),
+        row.names          = NULL,
         stringsAsFactors   = FALSE
       )
-      rm(dense); gc()
-      out
     }, error = function(e) {
       message(paste0("    [WARNING] CytoTRACE v1 failed on ", label, ": ", e$message))
       NULL
@@ -709,24 +814,55 @@ if (RUN_CYTOTRACE1) {
   if (CT2_RUN_PER_SAMPLE) {
     # v1 densifies the ENTIRE matrix (it cannot chunk), so per sample is the only
     # memory-safe way on a large object - one sample's dense block at a time.
+    # Each sample is checkpointed to ct1_<sample>.csv and AUTO-LOADED on re-runs.
+    if (!dir.exists(CELL_POTENCY_SCRATCH)) dir.create(CELL_POTENCY_SCRATCH, recursive = TRUE)
     samples <- unique(as.character(data@meta.data[[SAMPLE_COLUMN]]))
     for (s in samples) {
-      idx <- which(as.character(data@meta.data[[SAMPLE_COLUMN]]) == s)
-      r <- run_ct1_block(counts_all[, idx, drop = FALSE], s)
-      if (!is.null(r)) ct1_list[[s]] <- r
+      idx     <- which(as.character(data@meta.data[[SAMPLE_COLUMN]]) == s)
+      cells_s <- colnames(data)[idx]                           # authoritative barcodes
+      ckpt    <- file.path(CELL_POTENCY_SCRATCH,
+                           paste0("ct1_", gsub("[^A-Za-z0-9_.-]", "_", s), ".csv"))
+      if (file.exists(ckpt)) {                                 # resume
+        message(paste0("    [checkpoint] ", s, ": loading ", basename(ckpt)))
+        r <- utils::read.csv(ckpt, check.names = FALSE, stringsAsFactors = FALSE)
+      } else {
+        r <- run_ct1_block(counts_all[, idx, drop = FALSE], s)
+        if (!is.null(r)) {
+          if (nrow(r) == length(cells_s)) {
+            r$barcode <- cells_s
+            utils::write.csv(r, ckpt, row.names = FALSE)       # save immediately
+            message(paste0("    [saved] ", s, " -> ", basename(ckpt)))
+          } else {
+            message(paste0("    [WARN] ", s, ": ", nrow(r), " scored vs ",
+                           length(cells_s), " cells -- dropping.")); r <- NULL
+          }
+        }
+      }
+      if (!is.null(r)) {
+        n_ok <- sum(r$barcode %in% cells_s)
+        if (n_ok != nrow(r))
+          message(paste0("    [WARN] ", s, ": ", nrow(r) - n_ok,
+                         " scored barcodes not found in data -- check inputs."))
+        ct1_list[[s]] <- r
+      }
       gc()
     }
   } else {
+    cells_s <- colnames(data)
     r <- run_ct1_block(counts_all, "ALL")
-    if (!is.null(r)) ct1_list[["ALL"]] <- r
+    if (!is.null(r) && nrow(r) == length(cells_s)) {
+      r$barcode <- cells_s; ct1_list[["ALL"]] <- r
+    }
   }
 
   if (length(ct1_list) > 0) {
     ct1_all <- do.call(rbind, ct1_list)
-    ct1_all <- ct1_all[match(colnames(data), rownames(ct1_all)), , drop = FALSE]
-    data$CytoTRACE1_Score <- ct1_all$CytoTRACE1_Score
-    data$CytoTRACE1_Rank  <- ct1_all$CytoTRACE1_Rank
-    data$CytoTRACE1_GCS   <- ct1_all$CytoTRACE1_GCS
+    ov <- sum(colnames(data) %in% ct1_all$barcode)
+    message(paste0("  [diag] CT1 barcode overlap with object: ", ov, " / ", ncol(data)))
+    idx <- match(colnames(data), ct1_all$barcode)             # align on real barcode
+    data$CytoTRACE1_Score <- ct1_all$CytoTRACE1_Score[idx]
+    data$CytoTRACE1_Rank  <- ct1_all$CytoTRACE1_Rank[idx]
+    data$CytoTRACE1_GCS   <- ct1_all$CytoTRACE1_GCS[idx]
     message(paste0("  CytoTRACE v1 complete: ",
                    sum(!is.na(data$CytoTRACE1_Score)), " cells scored."))
   } else {
@@ -777,8 +913,16 @@ if (RUN_PATHWAY_SCORES) {
     if (length(gene_sets) > 0) {
       expr <- GetAssayData(data, assay = "RNA", layer = "counts")
       rk   <- AUCell::AUCell_buildRankings(expr, plotStats = FALSE, verbose = FALSE)
-      auc  <- AUCell::AUCell_calcAUC(gene_sets, rk, verbose = FALSE)
+      max_rank <- max(1L, ceiling(AUCELL_MAX_RANK_PCT * nrow(rk)))   # top X% of genes
+      message(sprintf("  aucMaxRank = %d genes (top %.0f%% of %d).",
+                      max_rank, 100 * AUCELL_MAX_RANK_PCT, nrow(rk)))
+      auc  <- AUCell::AUCell_calcAUC(gene_sets, rk, aucMaxRank = max_rank, verbose = FALSE)
       am   <- AUCell::getAUC(auc)                             # gene sets x cells
+      # The counts-layer matrix can carry different cell-name strings than the
+      # object (same '0 cells scored' quirk that hit CytoTRACE). AUCell preserves
+      # column ORDER, so restamp the object's authoritative barcodes positionally.
+      if (ncol(am) == ncol(data)) colnames(am) <- colnames(data)
+      else stop(sprintf("AUCell returned %d cols vs %d cells.", ncol(am), ncol(data)))
       for (nm in rownames(am)) {
         col <- paste0("AUCell_", nm)
         data@meta.data[[col]] <- as.numeric(am[nm, colnames(data)])
@@ -897,7 +1041,7 @@ tryCatch({
                data@meta.data[, c(.id_keep, .score_keep), drop = FALSE],
                check.names = FALSE),
     file.path(SCORES_DIR, "potency_scores_per_cell.csv"), row.names = FALSE)
-  saveRDS(data, file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_with_cell_scores.rds")))
+  #saveRDS(data, file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_with_cell_scores.rds")))
   message("  Saved potency_scores_per_cell.csv + ",
           PROJECT_NAME, "_with_cell_scores.rds (plotting next; safe to interrupt).")
 }, error = function(e) message("  [WARNING] checkpoint save failed: ", e$message))
@@ -999,13 +1143,19 @@ reduction_use <- if (UMAP_REDUCTION %in% names(data@reductions)) {
 
 # --- 5a: Continuous score UMAPs ---------------------------------------------
 if (!is.na(reduction_use)) {
-  for (sc in score_cols) {
+  # score_cols carries the CytoTRACE2 numeric as `potency_score`; add the raw
+  # CytoTRACE2_Score / _Relative columns too so they get their own named UMAPs.
+  umap_scores <- unique(c(
+    intersect(c("CytoTRACE2_Score", "CytoTRACE2_Relative", "preKNN_CytoTRACE2_Score"),
+              colnames(data@meta.data)),
+    score_cols))
+  for (sc in umap_scores) {
     tryCatch({
       p <- FeaturePlot(data, features = sc, reduction = reduction_use,
-                       pt.size = POINT_SIZE) +
-        scale_color_gradientn(colors = POTENCY_COLORS) +
+                       pt.size = POINT_SIZE, order = TRUE) +
+        scale_color_gradientn(colors = SCORE_UMAP_COLORS) +
         coord_fixed() +
-        labs(title = sc, subtitle = "higher = less differentiated") +
+        labs(title = sc) +
         theme(plot.title = element_text(face = "bold"))
       ggsave(file.path(SCORES_DIR, paste0("umap_", sc, ".png")),
              p, width = PLOT_WIDTH, height = PLOT_HEIGHT,
@@ -1016,14 +1166,57 @@ if (!is.na(reduction_use)) {
     })
   }
 
+  # --- 5a-2: Score UMAP faceted by genotype (cols) x sex (rows) -------------
+  # Splits each score UMAP into a grid so every condition population is visible:
+  #   columns = genotype (WT / Polyp / Polyp_NR4a1_KO), rows = sex.
+  # Genotype and sex are parsed from CONDITION_COLUMN (e.g. "Polyp_NR4a1_KO_Male").
+  if (CONDITION_COLUMN %in% colnames(data@meta.data)) {
+    .emb  <- Embeddings(data, reduction = reduction_use)[, 1:2, drop = FALSE]
+    .gs   <- as.character(data@meta.data[[CONDITION_COLUMN]])
+    .sex  <- ifelse(grepl("_Female$", .gs), "Female",
+             ifelse(grepl("_Male$",   .gs), "Male", NA_character_))
+    .geno <- sub("_(Female|Male)$", "", .gs)
+    lev      <- if (exists("CONDITION_LEVELS")) CONDITION_LEVELS else unique(.gs)
+    geno_lev <- unique(sub("_(Female|Male)$", "", lev))
+    for (sc in umap_scores) {
+      tryCatch({
+        d <- data.frame(UMAP_1 = .emb[, 1], UMAP_2 = .emb[, 2],
+                        score    = data@meta.data[[sc]],
+                        Genotype = factor(.geno, levels = geno_lev),
+                        Sex      = factor(.sex,  levels = c("Female", "Male")),
+                        stringsAsFactors = FALSE)
+        d <- d[!is.na(d$Genotype) & !is.na(d$Sex) & !is.na(d$score), , drop = FALSE]
+        if (nrow(d) == 0) return(invisible(NULL))
+        d <- d[order(d$score), ]                       # high scores drawn on top
+        p <- ggplot(d, aes(UMAP_1, UMAP_2, color = score)) +
+          geom_point(size = POINT_SIZE, stroke = 0) +
+          scale_color_gradientn(colors = SCORE_UMAP_COLORS) +
+          facet_grid(Sex ~ Genotype) +
+          coord_fixed() +
+          labs(title = sc, color = sc, x = "UMAP 1", y = "UMAP 2") +
+          theme_bw() +
+          theme(plot.title = element_text(face = "bold"),
+                strip.text = element_text(face = "bold"),
+                panel.grid = element_blank())
+        ggsave(file.path(SCORES_DIR, paste0("umap_grid_", sc, ".png")),
+               p, width = 12, height = 8, dpi = DPI_SETTING, bg = "white")
+        rm(p, d)
+      }, error = function(e)
+        message(paste("  [WARNING] UMAP grid failed for", sc, ":", e$message)))
+    }
+    rm(.emb, .gs, .sex, .geno)
+  }
+
   # --- 5b: Discrete potency category UMAP -----------------------------------
   if ("CytoTRACE2_Potency" %in% colnames(data@meta.data)) {
     tryCatch({
       p <- DimPlot(data, group.by = "CytoTRACE2_Potency",
-                   reduction = reduction_use, pt.size = POINT_SIZE) +
+                   reduction = reduction_use, pt.size = max(POINT_SIZE, 0.7)) +
         coord_fixed() +
         labs(title = "CytoTRACE 2 potency category") +
         theme(plot.title = element_text(face = "bold"))
+      # Force the points fully opaque (avoid the washed-out look on a dense UMAP).
+      if (length(p$layers) >= 1) p$layers[[1]]$aes_params$alpha <- 1
       ggsave(file.path(SCORES_DIR, "umap_CytoTRACE2_Potency_category.png"),
              p, width = PLOT_WIDTH, height = PLOT_HEIGHT,
              dpi = DPI_SETTING, bg = "white")
@@ -1037,24 +1230,47 @@ if (!is.na(reduction_use)) {
 # --- 5c: Score by cell type --------------------------------------------------
 # The key sanity check: known stem/progenitor compartments should sit at the
 # top of these boxplots and terminally differentiated types at the bottom.
-plot_by_group <- function(df, score, group, title, fname, angle = 45) {
+plot_by_group <- function(df, score, group, title, fname, angle = 45, split = NULL) {
   tryCatch({
-    d <- df[!is.na(df[[score]]) & !is.na(df[[group]]), , drop = FALSE]
+    keep <- !is.na(df[[score]]) & !is.na(df[[group]])
+    if (!is.null(split)) keep <- keep & !is.na(df[[split]])
+    d <- df[keep, , drop = FALSE]
     if (nrow(d) == 0) return(invisible(NULL))
-    # Order categories by median score so the gradient is readable at a glance.
-    ord <- d %>% group_by(.data[[group]]) %>%
-      summarise(m = stats::median(.data[[score]], na.rm = TRUE), .groups = "drop") %>%
-      arrange(m)
+    # Order cell types by median score so the gradient is readable at a glance.
+    ord <- d %>% dplyr::group_by(.data[[group]]) %>%
+      dplyr::summarise(m = stats::median(.data[[score]], na.rm = TRUE), .groups = "drop") %>%
+      dplyr::arrange(m)
     d[[group]] <- factor(as.character(d[[group]]), levels = as.character(ord[[group]]))
 
-    p <- ggplot(d, aes(x = .data[[group]], y = .data[[score]], fill = .data[[group]])) +
-      geom_violin(scale = "width", trim = TRUE, alpha = 0.6, linewidth = 0.3) +
-      geom_boxplot(width = 0.15, outlier.size = 0.2, alpha = 0.9, linewidth = 0.3) +
-      labs(title = title, x = NULL, y = score) +
-      theme_classic() +
-      theme(legend.position = "none",
-            axis.text.x = element_text(angle = angle, hjust = 1),
-            plot.title  = element_text(face = "bold"))
+    if (!is.null(split) && split %in% colnames(d)) {
+      # Split each cell type into its condition populations (dodged violins), so
+      # the groups are not pooled into a single misleading distribution.
+      lev <- if (exists("CONDITION_LEVELS") &&
+                 all(unique(as.character(d[[split]])) %in% CONDITION_LEVELS))
+               CONDITION_LEVELS else sort(unique(as.character(d[[split]])))
+      d[[split]] <- factor(as.character(d[[split]]), levels = lev)
+      dodge <- position_dodge(width = 0.85)
+      p <- ggplot(d, aes(x = .data[[group]], y = .data[[score]], fill = .data[[split]])) +
+        geom_violin(scale = "width", trim = TRUE, alpha = 0.7, linewidth = 0.2,
+                    position = dodge) +
+        geom_boxplot(width = 0.15, outlier.shape = NA, alpha = 0.9, linewidth = 0.2,
+                     position = dodge) +
+        scale_fill_brewer(palette = "Set2") +
+        labs(title = title, x = NULL, y = score, fill = split) +
+        theme_classic() +
+        theme(legend.position = "bottom",
+              axis.text.x = element_text(angle = angle, hjust = 1),
+              plot.title  = element_text(face = "bold"))
+    } else {
+      p <- ggplot(d, aes(x = .data[[group]], y = .data[[score]], fill = .data[[group]])) +
+        geom_violin(scale = "width", trim = TRUE, alpha = 0.6, linewidth = 0.3) +
+        geom_boxplot(width = 0.15, outlier.size = 0.2, alpha = 0.9, linewidth = 0.3) +
+        labs(title = title, x = NULL, y = score) +
+        theme_classic() +
+        theme(legend.position = "none",
+              axis.text.x = element_text(angle = angle, hjust = 1),
+              plot.title  = element_text(face = "bold"))
+    }
     ggsave(file.path(SCORES_DIR, fname), p,
            width = PLOT_WIDTH + 2, height = PLOT_HEIGHT,
            dpi = DPI_SETTING, bg = "white")
@@ -1066,84 +1282,37 @@ plot_by_group <- function(df, score, group, title, fname, angle = 45) {
 
 md <- data@meta.data
 for (sc in score_cols) {
+  # One violin per cell type (pooled) - a quick stem->differentiated overview.
+  # The per-condition split (6 populations within each cell type) is already
+  # produced by plot_score_comparison (by_CellType_broad / Colonocytes_by_CellType),
+  # so it is not duplicated here.
   plot_by_group(md, sc, CELLTYPE_COLUMN,
                 paste0(sc, " by cell type"),
                 paste0("box_", sc, "_by_celltype.png"))
 }
 
 # --- 5d: Score by condition, per cell type -----------------------------------
-# Two views per score, ordered by CONDITION_LEVELS, with Wilcoxon significance
-# brackets over each CONTRASTS_LIST pair:
-#   barplot_<score>.png  - group MEAN bar + SE
-#   violin_<score>.png   - violin + boxplot
-generate_gene_comparison_plots <- function(seurat_obj, score_col, group_by, x_axis,
-                                           comparisons, plot_type = "violin",
-                                           output_prefix = "", plot_title = score_col,
-                                           y_label = "Score",
-                                           fig_width = 16, fig_height = 7,
-                                           output_dir = SCORES_DIR) {
-  df_plot <- FetchData(seurat_obj, vars = c(score_col, group_by, x_axis)) %>%
-    dplyr::rename(Expression = 1) %>% tidyr::drop_na()
-  cust_theme <- theme_classic() + theme(
-    plot.title = element_text(hjust = 0.5, size = 18, face = "bold"),
-    strip.text = element_text(size = 14, face = "bold"),
-    strip.background = element_rect(fill = "white", color = "black", linewidth = 1),
-    axis.title.y = element_text(size = 16, face = "bold"), axis.title.x = element_blank(),
-    axis.text.x  = element_text(angle = 45, hjust = 1, size = 13, face = "bold"),
-    legend.position = "bottom", panel.spacing = unit(1.5, "lines")
-  )
-  p <- ggplot(df_plot, aes(!!sym(x_axis), Expression, fill = !!sym(x_axis)))
-  if (plot_type == "barplot") {
-    p <- p + stat_summary(fun = mean, geom = "bar", color = "black", alpha = 0.8) +
-      stat_summary(fun.data = mean_se, geom = "errorbar", width = 0.2)
-  } else {
-    p <- p + geom_violin(trim = TRUE, scale = "width", alpha = 0.7) +
-      geom_boxplot(width = 0.1, outlier.shape = NA, fill = "white", alpha = 0.5)
-  }
-  p <- p +
-    ggpubr::stat_compare_means(comparisons = comparisons, label = "p.signif",
-                       method = "wilcox.test", method.args = list(exact = FALSE),
-                       symnum.args = list(cutpoints = c(0, 0.0001, 0.001, 0.01, 0.05, 1),
-                                          symbols = c("****", "***", "**", "*", "ns")),
-                       step.increase = 0.1, size = 6, bracket.size = 0.8) +
-    facet_wrap(as.formula(paste("~", group_by)), scales = "free_y", ncol = 3) +
-    scale_y_continuous(expand = expansion(mult = c(0, 0.22))) +
-    coord_cartesian(clip = "off") +
-    labs(title = plot_title, y = y_label) + scale_fill_brewer(palette = "Set1") + cust_theme
-  ggsave(file.path(output_dir, paste0(output_prefix, score_col, ".png")),
-         p, width = fig_width, height = fig_height, dpi = DPI_SETTING, bg = "white")
-  invisible(p)
-}
-
-if (exists("CONTRASTS_LIST") && length(CONTRASTS_LIST) > 0) {
-  ct_comparisons <- unname(CONTRASTS_LIST)   # list of c(group1, group2) pairs
-  for (sc in score_cols) {
-    for (pt in c("violin", "barplot")) {
-      tryCatch(
-        generate_gene_comparison_plots(
-          data, score_col = sc, group_by = CELLTYPE_COLUMN, x_axis = CONDITION_COLUMN,
-          comparisons = ct_comparisons, plot_type = pt,
-          output_prefix = paste0(pt, "_"), plot_title = sc, y_label = sc),
-        error = function(e)
-          message("  [WARNING] ", pt, " plot failed for ", sc, ": ", e$message))
-    }
-  }
-} else {
-  message("  [NOTE] CONTRASTS_LIST empty - skipping the bracketed comparison plots.")
-}
+# The by-condition comparison plots (barplot + violin, Wilcoxon brackets, Pass 1
+# broad + Pass 2 Colonocytes) are produced ONLY by YOUR plot_score_comparison()
+# in the dedicated plotting section at the END of this script. The old
+# generate_gene_comparison_plots()/plot_specs block was removed so there is a
+# single, consistently-coloured source for these figures.
 
 # --- 5e: Potency category composition stacked bars ---------------------------
+# One stacked-proportion bar plot per grouping: by cell type, by condition, and
+# by sample (QC view) - the same style as the cell-type proportion bars.
 if ("CytoTRACE2_Potency" %in% colnames(md)) {
-  for (grp in unique(c(CELLTYPE_COLUMN, CONDITION_COLUMN))) {
+  for (grp in unique(c(CELLTYPE_COLUMN, CONDITION_COLUMN, SAMPLE_COLUMN))) {
+    if (!grp %in% colnames(md)) next
     tryCatch({
       d <- md[!is.na(md$CytoTRACE2_Potency) & !is.na(md[[grp]]), , drop = FALSE]
       if (nrow(d) == 0) next
       comp <- d %>%
-        group_by(.data[[grp]], CytoTRACE2_Potency) %>%
-        summarise(n = dplyr::n(), .groups = "drop") %>%
-        group_by(.data[[grp]]) %>%
-        mutate(pct = n / sum(n) * 100) %>%
-        ungroup()
+        dplyr::group_by(.data[[grp]], CytoTRACE2_Potency) %>%
+        dplyr::summarise(n = dplyr::n(), .groups = "drop") %>%
+        dplyr::group_by(.data[[grp]]) %>%
+        dplyr::mutate(pct = n / sum(n) * 100) %>%
+        dplyr::ungroup()
       p <- ggplot(comp, aes(x = .data[[grp]], y = pct, fill = CytoTRACE2_Potency)) +
         geom_col(color = "white", linewidth = 0.2) +
         labs(title = paste0("Potency category composition by ", grp),
@@ -1171,8 +1340,8 @@ sheets <- list()
 # --- 6a: Per cell type summary ----------------------------------------------
 if (length(score_cols) > 0) {
   summ_ct <- md %>%
-    group_by(.data[[CELLTYPE_COLUMN]]) %>%
-    summarise(
+    dplyr::group_by(.data[[CELLTYPE_COLUMN]]) %>%
+    dplyr::summarise(
       N_Cells = dplyr::n(),
       dplyr::across(dplyr::all_of(score_cols),
                     list(mean   = ~mean(.x, na.rm = TRUE),
@@ -1181,13 +1350,13 @@ if (length(score_cols) > 0) {
                     .names = "{.col}_{.fn}"),
       .groups = "drop"
     ) %>%
-    arrange(dplyr::desc(.data[[paste0(score_cols[1], "_median")]]))
+    dplyr::arrange(dplyr::desc(.data[[paste0(score_cols[1], "_median")]]))
   sheets[["By_CellType"]] <- as.data.frame(summ_ct)
 
   # --- 6b: Per cell type x condition -----------------------------------------
   summ_cc <- md %>%
-    group_by(.data[[CELLTYPE_COLUMN]], .data[[CONDITION_COLUMN]]) %>%
-    summarise(
+    dplyr::group_by(.data[[CELLTYPE_COLUMN]], .data[[CONDITION_COLUMN]]) %>%
+    dplyr::summarise(
       N_Cells = dplyr::n(),
       dplyr::across(dplyr::all_of(score_cols),
                     list(mean   = ~mean(.x, na.rm = TRUE),
@@ -1199,8 +1368,8 @@ if (length(score_cols) > 0) {
 
   # --- 6c: Per sample (QC view) ----------------------------------------------
   summ_s <- md %>%
-    group_by(.data[[SAMPLE_COLUMN]]) %>%
-    summarise(
+    dplyr::group_by(.data[[SAMPLE_COLUMN]]) %>%
+    dplyr::summarise(
       N_Cells = dplyr::n(),
       dplyr::across(dplyr::all_of(score_cols),
                     list(median = ~stats::median(.x, na.rm = TRUE)),
@@ -1287,10 +1456,10 @@ if (RUN_GROUP_STATS && length(score_cols) > 0) {
     # Correct across cell types WITHIN each score, not across everything at
     # once - the scores are different questions, not one family of tests.
     stats_df <- stats_df %>%
-      group_by(Score) %>%
-      mutate(P_Adj = stats::p.adjust(P_Value, method = STATS_PADJ_METHOD)) %>%
-      ungroup() %>%
-      arrange(Score, P_Adj) %>%
+      dplyr::group_by(Score) %>%
+      dplyr::mutate(P_Adj = stats::p.adjust(P_Value, method = STATS_PADJ_METHOD)) %>%
+      dplyr::ungroup() %>%
+      dplyr::arrange(Score, P_Adj) %>%
       as.data.frame()
     stats_df$Significant <- stats_df$P_Adj < 0.05
     stats_df$CAVEAT <- "Cell-level test; cells within a sample are not independent. Confirm with sample-level statistics."
@@ -1340,10 +1509,10 @@ if (RUN_GROUP_STATS && exists("CONTRASTS_LIST") && length(CONTRASTS_LIST) > 0 &&
     con_df <- do.call(rbind, con_rows)
     # BH-correct within each Contrast x Score family (across cell types).
     con_df <- con_df %>%
-      group_by(Contrast, Score) %>%
-      mutate(P_Adj = stats::p.adjust(P_Value, method = STATS_PADJ_METHOD)) %>%
-      ungroup() %>%
-      arrange(Contrast, Score, P_Adj) %>%
+      dplyr::group_by(Contrast, Score) %>%
+      dplyr::mutate(P_Adj = stats::p.adjust(P_Value, method = STATS_PADJ_METHOD)) %>%
+      dplyr::ungroup() %>%
+      dplyr::arrange(Contrast, Score, P_Adj) %>%
       as.data.frame()
     con_df$Significant <- con_df$P_Adj < 0.05
     con_df$CAVEAT <- "Cell-level Wilcoxon; cells within a sample are not independent. Confirm at the sample level."
@@ -1369,7 +1538,8 @@ sheets[["Run_Info"]] <- data.frame(
             RUN_CYTOTRACE2, RUN_CYTOTRACE1, RUN_ENTROPY,
             CT2_SPECIES, CT2_SLOT,
             CT2_USE_PREKNN, ENTROPY_NORMALIZE, ENTROPY_MIN_GENES,
-            round(frac_low * 100, 2), as.character(Sys.Date())),
+            if (exists("frac_low")) round(frac_low * 100, 2) else NA,
+            as.character(Sys.Date())),
   stringsAsFactors = FALSE
 )
 
@@ -1421,3 +1591,302 @@ message("   - CytoTRACE2_Relative and CytoTRACE1_Score are RELATIVE to this run 
 message("   - Check method_concordance_heatmap.png: all correlations should be positive.")
 message("   - Group p-values are cell-level; confirm key findings at the sample level.")
 message("\n  NEXT: 10_trajectory_cellrank.R to infer trajectories using these scores.")
+
+
+
+library(Seurat)
+library(ggplot2)
+library(ggpubr)
+library(dplyr)
+library(tidyr)
+
+out_rds <- file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_with_cell_scores.rds"))
+data<- readRDS(out_rds)
+
+# ==============================================================================
+# 1. SETUP PARAMETERS & SCORES TO PLOT
+# ==============================================================================
+SPLIT_BY_COL <- "Genotype_sex"
+
+selected_groups <- c(
+  "WT_Female", "Polyp_Female", "Polyp_NR4a1_KO_Female",
+  "WT_Male",   "Polyp_Male",   "Polyp_NR4a1_KO_Male"
+)
+
+my_comparisons <- list(
+  c("Polyp_NR4a1_KO_Female", "Polyp_Female"),
+  c("Polyp_Female",           "WT_Female"),
+  c("Polyp_NR4a1_KO_Male",   "Polyp_Male"),
+  c("Polyp_Male",            "WT_Male")
+)
+
+pathway_cols   <- grep("^AUCell_", colnames(data@meta.data), value = TRUE)
+scores_to_plot <- unique(c("CytoTRACE2_Score", "CytoTRACE1_Score",  "AUCell_apoptosis", pathway_cols))
+scores_to_plot <- intersect(scores_to_plot, colnames(data@meta.data))
+
+if (!exists("SCORES_DIR")) SCORES_DIR <- "./cell_scores"
+
+# ==============================================================================
+# 2. FLEXIBLE GENE/SCORE PLOTTING FUNCTION
+# ==============================================================================
+plot_score_comparison <- function(seurat_obj, 
+                                  score_col, 
+                                  split_by = SPLIT_BY_COL, 
+                                  facet_by = "CellType_broad", 
+                                  groups = selected_groups, 
+                                  comparisons = my_comparisons, 
+                                  plot_type = "violin", # Options: "violin", "barplot", "jitter"
+                                  save_dir = SCORES_DIR) {
+  
+  # Fetch data and filter to selected groups
+  df <- FetchData(seurat_obj, vars = c(score_col, split_by, facet_by)) %>%
+    tidyr::drop_na() %>%
+    dplyr::filter(!!sym(split_by) %in% groups)
+  
+  if (nrow(df) == 0) return(NULL)
+  
+  df[[split_by]] <- factor(df[[split_by]], levels = groups)
+  
+  # Retain only valid comparison pairs existing in the data
+  valid_comps <- Filter(function(x) all(x %in% unique(df[[split_by]])), comparisons)
+  
+  # Initialize ggplot object with explicit group mapping
+  p <- ggplot(df, aes(
+    x = !!sym(split_by), 
+    y = !!sym(score_col), 
+    fill = !!sym(split_by), 
+    color = !!sym(split_by),
+    group = !!sym(split_by)
+  ))
+  
+  # ---------------------------------------------------------------------------
+  # GEOM LAYERS BASED ON plot_type
+  # ---------------------------------------------------------------------------
+  if (plot_type == "barplot") {
+    p <- p +
+      # 1. Jittered points in the background (shape 21 with black contour)
+      geom_jitter(
+        shape = 21, 
+        color = "black", 
+        stroke = 0.3, 
+        width = 0.2, 
+        size = 1.2, 
+        alpha = 0.7, 
+        show.legend = FALSE
+      ) +
+      # 2. Solid mean bar plot rendered in front of points
+      stat_summary(
+        fun = mean, 
+        geom = "bar", 
+        color = "black", 
+        linewidth = 0.6,
+        alpha = 1, 
+        width = 0.7
+      ) +
+      # 3. Standard error bars on top
+      stat_summary(
+        fun.data = mean_se, 
+        geom = "errorbar", 
+        width = 0.2, 
+        color = "black", 
+        linewidth = 0.8
+      )
+    
+  } else if (plot_type == "jitter") {
+    # Pure Jittered points + Errorbar/Mean Summary
+    p <- p +
+      geom_jitter(
+        shape = 21, 
+        color = "black", 
+        stroke = 0.3, 
+        width = 0.25, 
+        size = 1.2, 
+        alpha = 0.6
+      ) +
+      stat_summary(
+        fun.data = mean_se, 
+        geom = "errorbar", 
+        width = 0.3, 
+        color = "black", 
+        linewidth = 0.8
+      ) +
+      stat_summary(
+        fun = mean, 
+        geom = "point", 
+        size = 3, 
+        color = "black"
+      )
+    
+  } else {
+    # Default: Violin plot + inner boxplot
+    p <- p +
+      geom_violin(scale = "width", trim = TRUE, alpha = 0.7, color = "black", linewidth = 0.3) +
+      geom_boxplot(width = 0.12, outlier.shape = NA, fill = "white", alpha = 0.6, color = "black", linewidth = 0.3)
+  }
+  
+  # ---------------------------------------------------------------------------
+  # STATISTICAL TESTING & FACETING
+  # ---------------------------------------------------------------------------
+  p <- p +
+    facet_wrap(as.formula(paste("~", facet_by)), scales = "free_y", ncol = 4) +
+    ggpubr::stat_compare_means(
+      comparisons   = valid_comps,
+      method        = "wilcox.test",
+      method.args   = list(exact = FALSE),
+      label         = "p.signif",
+      symnum.args   = list(cutpoints = c(0, 0.0001, 0.001, 0.01, 0.05, 1), 
+                           symbols   = c("****", "***", "**", "*", "ns")),
+      step.increase = 0.08,
+      size          = 4.5,
+      bracket.size  = 0.6,
+      inherit.aes   = TRUE
+    ) +
+    scale_y_continuous(expand = expansion(mult = c(0.05, 0.25))) +
+    scale_fill_hue() +
+    scale_color_hue() +
+    labs(
+      title = paste("Distribution of", score_col),
+      x     = NULL,
+      y     = score_col,
+      fill  = split_by
+    ) +
+    theme_classic() +
+    theme(
+      plot.title       = element_text(face = "bold", size = 16, hjust = 0.5),
+      strip.text       = element_text(face = "bold", size = 12),
+      strip.background = element_rect(fill = "grey95", color = "black", linewidth = 0.8),
+      
+      axis.text.x      = element_blank(),
+      axis.ticks.x     = element_blank(),
+      
+      axis.title.y     = element_text(size = 13, face = "bold"),
+      legend.position  = "bottom",
+      
+      legend.title     = element_text(face = "bold", size = 14),
+      legend.text      = element_text(size = 12),
+      legend.key.size  = unit(1.2, "cm"),
+      
+      panel.spacing    = unit(1, "lines")
+    ) +
+    guides(
+      fill = guide_legend(
+        nrow = 2, 
+        byrow = TRUE, 
+        override.aes = list(shape = 21, size = 4, color = "black", stroke = 0.5)
+      ),
+      color = "none"
+    )
+  
+  out_path <- file.path(save_dir, paste0(plot_type, "_", score_col, ".png"))
+  ggsave(out_path, p, width = 12, height = 15, dpi = 300, bg = "white")
+  message("Saved: ", out_path)
+  return(p)
+}
+
+# ==============================================================================
+# 3. RUN PASS 1: ALL CELLS (Change plot_type to "barplot", "violin", or "jitter")
+# ==============================================================================
+message("\n--- Running Pass 1: Broad Layer (All Cells) ---")
+dir_broad <- file.path(SCORES_DIR, "by_CellType_broad")
+if (!dir.exists(dir_broad)) dir.create(dir_broad, recursive = TRUE)
+
+for (sc in scores_to_plot) {
+  tryCatch(
+    plot_score_comparison(data, score_col = sc, facet_by = "CellType_broad",
+                          plot_type = "barplot", save_dir = dir_broad),
+    error = function(e) message("Failed broad barplot for ", sc, ": ", e$message)
+  )
+  tryCatch(
+    plot_score_comparison(data, score_col = sc, facet_by = "CellType_broad",
+                          plot_type = "violin", save_dir = dir_broad),
+    error = function(e) message("Failed broad violin for ", sc, ": ", e$message)
+  )
+}
+
+# ==============================================================================
+# 4. RUN PASS 2: COLONOCYTES SUBSET
+# ==============================================================================
+message("\n--- Running Pass 2: Colonocytes Subtypes ---")
+
+if ("CellType_broad" %in% colnames(data@meta.data) && "Colonocytes" %in% data@meta.data$CellType_broad) {
+  
+  colonocytes_data <- subset(data, subset = CellType_broad == "Colonocytes")
+  
+  dir_colonocytes <- file.path(SCORES_DIR, "Colonocytes_by_CellType")
+  if (!dir.exists(dir_colonocytes)) dir.create(dir_colonocytes, recursive = TRUE)
+  
+  for (sc in scores_to_plot) {
+    tryCatch(
+      plot_score_comparison(colonocytes_data, score_col = sc, facet_by = "CellType",
+                            plot_type = "barplot", save_dir = dir_colonocytes),
+      error = function(e) message("Failed colonocytes barplot for ", sc, ": ", e$message)
+    )
+    tryCatch(
+      plot_score_comparison(colonocytes_data, score_col = sc, facet_by = "CellType",
+                            plot_type = "violin", save_dir = dir_colonocytes),
+      error = function(e) message("Failed colonocytes violin for ", sc, ": ", e$message)
+    )
+  }
+}
+
+# ==============================================================================
+# 5f. CELL-CYCLE PLOTS (colonocyte subtypes only)
+# ==============================================================================
+# Cell cycle was scored on ALL cells earlier; here we visualise ONLY the
+# colonocyte subtypes: (a) S/G2M score violins+barplots by condition (same
+# Wilcoxon-bracket style as the other scores), (b) a Phase-composition stacked
+# bar where % is computed PER SAMPLE then averaged within condition.
+if (RUN_CELLCYCLE && "Phase" %in% colnames(data@meta.data) &&
+    "CellType_broad" %in% colnames(data@meta.data) &&
+    "Colonocytes" %in% as.character(data@meta.data[["CellType_broad"]])) {
+  message("\n--- Cell-cycle plots (Colonocytes) ---")
+  cc_dir  <- file.path(SCORES_DIR, "cell_cycle_colonocytes")
+  if (!dir.exists(cc_dir)) dir.create(cc_dir, recursive = TRUE)
+  colo_cc <- subset(data, subset = CellType_broad == "Colonocytes")
+
+  # (a) S.Score / G2M.Score by condition, faceted by subtype (reuses your fn).
+  for (sc in intersect(c("S.Score", "G2M.Score"), colnames(colo_cc@meta.data))) {
+    for (pt in c("violin", "barplot")) {
+      tryCatch(
+        plot_score_comparison(colo_cc, score_col = sc, facet_by = CELLTYPE_COLUMN,
+                              plot_type = pt, save_dir = cc_dir),
+        error = function(e) message("  [WARN] ", pt, " ", sc, ": ", e$message))
+    }
+  }
+
+  # (b) Phase composition: per-sample % averaged within condition.
+  tryCatch({
+    md_cc <- colo_cc@meta.data
+    comp <- md_cc %>%
+      dplyr::group_by(.data[[SAMPLE_COLUMN]], .data[[CONDITION_COLUMN]],
+                      .data[[CELLTYPE_COLUMN]], Phase) %>%
+      dplyr::summarise(n = dplyr::n(), .groups = "drop") %>%
+      dplyr::group_by(.data[[SAMPLE_COLUMN]], .data[[CELLTYPE_COLUMN]]) %>%
+      dplyr::mutate(pct = n / sum(n) * 100) %>%
+      dplyr::group_by(.data[[CONDITION_COLUMN]], .data[[CELLTYPE_COLUMN]], Phase) %>%
+      dplyr::summarise(pct = mean(pct), .groups = "drop")
+    if (!is.null(CONDITION_LEVELS)) {
+      lv <- intersect(CONDITION_LEVELS, unique(as.character(comp[[CONDITION_COLUMN]])))
+      comp[[CONDITION_COLUMN]] <- factor(as.character(comp[[CONDITION_COLUMN]]), levels = lv)
+    }
+    p <- ggplot(comp, aes(x = .data[[CONDITION_COLUMN]], y = pct, fill = Phase)) +
+      geom_col(color = "white", linewidth = 0.2) +
+      geom_text(aes(label = paste0(round(pct, 1), "%")),
+                position = position_stack(vjust = 0.5), size = 3, fontface = "bold") +
+      facet_wrap(as.formula(paste("~", CELLTYPE_COLUMN)), scales = "free_y", ncol = 4) +
+      labs(title = "Cell-cycle phase composition (colonocyte subtypes)",
+           subtitle = "per-sample % averaged within condition",
+           x = NULL, y = "% of cells") +
+      scale_fill_brewer(palette = "Set2") +
+      theme_bw() +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1),
+            strip.text  = element_text(face = "bold"),
+            plot.title  = element_text(face = "bold"))
+    ggsave(file.path(cc_dir, "phase_composition_by_condition.png"),
+           p, width = 14, height = 8, dpi = DPI_SETTING, bg = "white")
+    rm(p)
+    message("  Saved phase_composition_by_condition.png")
+  }, error = function(e) message("  [WARN] Phase composition plot: ", e$message))
+  rm(colo_cc); gc()
+}
+

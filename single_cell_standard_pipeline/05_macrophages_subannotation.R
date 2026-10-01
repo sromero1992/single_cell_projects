@@ -54,12 +54,19 @@ set.seed(123)
 # =============================================================================
 
 # --- 1.1: Project Paths (must match Scripts 01 and 02) -----------------------
-PROJECT_NAME <- "Wu_Diet_project2"
+# ---- Shared portable config: nr4a1 defaults, override via env vars (see config.R).
+# Run from the pipeline directory, or set NR4A1_CONFIG=/full/path/to/config.R. ----
+.NR4A1_CFG <- Sys.getenv("NR4A1_CONFIG", "config.R")
+if (!file.exists(.NR4A1_CFG)) stop("config.R not found at '", .NR4A1_CFG,
+  "' - cd to the pipeline directory or set NR4A1_CONFIG.", call. = FALSE)
+source(.NR4A1_CFG)
+
+# PROJECT_NAME <- "Wu_Diet_project2"   # [portable] now set in config.R
 #ROOT_PATH <- "/home/ssromerogon/2026_nr4a1_ack/r_process"
 #ROOT_PATH   <- "Z:/selim_working_dir/2026_nr4a1_ack/r_process"  # Windows
-ROOT_PATH <- "/home/ssromerogon/local_drive/optimus_drive/selim_working_dir/2026_wu_project2/r_process"
+# ROOT_PATH <- "/home/ssromerogon/local_drive/optimus_drive/selim_working_dir/2026_wu_project2/r_process"   # [portable] now set in config.R
 
-OUTPUT_DIR       <- file.path(ROOT_PATH, "seurat_output")
+# OUTPUT_DIR       <- file.path(ROOT_PATH, "seurat_output")   # [portable] now set in config.R
 MAC_DIR          <- file.path(OUTPUT_DIR, "macrophages_subannotation")  # <-- all macrophage plots go here
 MAIN_RDS         <- file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_final_annotated.rds"))
 MARKERS_CSV_FILE <- file.path(ROOT_PATH, "cell_type_markers.csv")
@@ -73,6 +80,16 @@ SUBCLUSTER_N_HVG       <- 2000   # HVGs for sub-clustering PCA
 SUBCLUSTER_N_PCS       <- 50     # PCs used for kNN graph
 SUBCLUSTER_K_NEIGHBORS <- 30     # k for kNN
 SUBCLUSTER_MIN_DIST    <- 0.2    # UMAP min.dist
+
+# --- Embedding normalization for sub-clustering (annotation only; RNA/DE untouched) ---
+SUBCLUSTER_NORMALIZATION   <- "LogNormalize"  # "LogNormalize" (default) | "SCT"
+# SCTransform vars.to.regress (used only if normalization = "SCT"). SCT already
+# models sequencing depth, so NEVER add nCount_RNA. Common literature choices:
+#   "percent_mt"                    # remove dying/stressed-cell axis (most common)
+#   c("percent_mt","percent_ribo")  # also ribosomal fraction
+#   c("S.Score","G2M.Score")        # remove cell cycle (run CellCycleScoring first)
+SUBCLUSTER_VARS_TO_REGRESS <- NULL
+SUBCLUSTER_HARMONIZE_BY    <- "SampleID"      # batch col for Harmony track; NULL = un-integrated only
 # Resolution: set to NULL to read from CSV (subcluster_resolution column),
 # or override with a number here.
 SUBCLUSTER_RESOLUTION  <- NULL
@@ -215,40 +232,27 @@ process_and_extract_cell_type <- function(data, cell_type_name,
                                           dims_pca   = 50,
                                           resolution = 3.0,
                                           min_dist   = 0.3,
-                                          kneigh     = 15) {
+                                          kneigh     = 15,
+                                          normalization   = SUBCLUSTER_NORMALIZATION,
+                                          vars_to_regress = SUBCLUSTER_VARS_TO_REGRESS,
+                                          harmonize_by    = SUBCLUSTER_HARMONIZE_BY) {
+  # Thin wrapper over the upgraded package function. Same call signature and same
+  # dual-track output (umap_none/clusters_none + umap_harmony/clusters_harmony),
+  # plus the normalization / vars_to_regress / harmonize_by options.
   message(paste("  Subsetting and re-clustering:", cell_type_name))
-  data_sub <- subset(data, subset = CellType == cell_type_name)
-  data_sub@reductions <- list(); data_sub@graphs <- list()
-  
-  data_sub <- FindVariableFeatures(data_sub, selection.method = "vst", nfeatures = num_hvg) %>%
-    ScaleData(verbose = FALSE) %>%
-    RunPCA(npcs = dims_pca, reduction.name = "pca", verbose = FALSE)
-  gc()
-  
-  # Track A: Standard PCA
-  data_sub <- FindNeighbors(data_sub, dims = 1:dims_pca, reduction = "pca",
-                            k.param = kneigh, graph.name = "pca_nn", verbose = FALSE) %>%
-    FindClusters(resolution = resolution, graph.name = "pca_nn",
-                 cluster.name = "clusters_none", verbose = FALSE) %>%
-    RunUMAP(dims = 1:dims_pca, reduction = "pca", n.neighbors = kneigh,
-            min.dist = min_dist, n.epochs = 500,
-            reduction.name = "umap_none", verbose = FALSE)
-  gc()
-  
-  # Track B: Harmony
-  message("  Running Harmony for sub-clustering...")
-  data_sub <- RunHarmony(data_sub, group.by.vars = "SampleID",
-                         reduction = "pca", reduction.save = "harmony", verbose = FALSE)
-  gc()
-  data_sub <- FindNeighbors(data_sub, dims = 1:dims_pca, reduction = "harmony",
-                            k.param = kneigh, graph.name = "harmony_nn", verbose = FALSE) %>%
-    FindClusters(resolution = resolution, graph.name = "harmony_nn",
-                 cluster.name = "clusters_harmony", verbose = FALSE) %>%
-    RunUMAP(dims = 1:dims_pca, reduction = "harmony", n.neighbors = kneigh,
-            min.dist = min_dist, n.epochs = 500,
-            reduction.name = "umap_harmony", verbose = FALSE)
-  gc()
-  return(data_sub)
+  TamuScDSC::process_and_extract_cell_types(
+    data            = data,
+    cell_types      = cell_type_name,
+    cell_type_col   = "CellType",
+    num_hvg         = num_hvg,
+    dims_pca        = dims_pca,
+    resolution      = resolution,
+    min_dist        = min_dist,
+    kneigh          = kneigh,
+    normalization   = normalization,
+    vars_to_regress = vars_to_regress,
+    harmonize_by    = harmonize_by
+  )
 }
 
 run_pca_umap <- function(data,

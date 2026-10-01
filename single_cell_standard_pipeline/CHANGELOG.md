@@ -6,6 +6,40 @@
 
 ---
 
+## 0. 2026-10 update — portability, multi-method DE, SCENIC workflow
+
+**Portability (`config.R`).** All machine/project paths centralized in a new
+`config.R` sourced by every numbered script. nr4a1 stays the default; override via
+env vars (`NR4A1_PROJECT/_ROOT/_OUTPUT/_CISTARGET/_PY_SCENIC/_PY_CELLRANK`) with no
+code edits. Hardcoded `PROJECT_NAME`/`ROOT_PATH`/`OUTPUT_DIR`/`CISTARGET_DIR` in
+00–13 (+ `07b`) were replaced by a `source(config.R)` bootstrap. **Behavior change:**
+scripts 02–06/08 previously pointed at `Wu_Diet_project2`; they now default to
+Nr4a1 like the rest — set `NR4A1_PROJECT`/`NR4A1_ROOT` to run Wu. `12b` (Python)
+reads the same `NR4A1_*` env vars.
+
+**Script 07 (DE).** Added Wilcoxon and edgeR-pseudobulk tests alongside MAST
+(`RUN_WILCOX`, `RUN_EDGER`), each with Enrichr and a DV∩test overlap. DV-only
+Enrichr tables now saved. Per-cell-type output subfolders. Summary now spans all
+methods: a collective DE grid (signed up/down, counts on bars) + one figure per
+method + a separate unsigned SplineDV figure. Ensembl column moved to first.
+edgeR pseudobulk aggregates via `Seurat::AggregateExpression(slot="counts")`.
+
+**Script 01 + TamuScDSC.** Optional SCTransform embedding path (`NORMALIZATION`,
+`vars_to_regress`) in `integrate_data()` and `process_and_extract_cell_types()`,
+LogNormalize default; subset re-embed now emits both un-integrated and Harmony
+tracks. 03/04/05 route through the upgraded package function. RNA assay untouched
+(DE unaffected). Runtime caveat printed when `percent_mt` is regressed.
+
+**Script 13 (scTenifoldNet).** Resume-skip: `SKIP_IF_DONE` skips a contrast×cell-type
+whose output xlsx already exists with a non-empty result sheet (survives reboots).
+
+**SCENIC (new).** `12c_load_pyscenic_results.R` (loom/aucell → AUC assay →
+FeaturePlot/violin/mean-AUC heatmap), `run_pyscenic2.sh` (stable runner),
+`scenic.sh` (status/watch/run/stop/clean/fresh). Two `environment.yml` reconciled.
+`00_rlibs_installation.R` gained `sctransform`, `glmGamPoi`, `edgeR`.
+
+---
+
 ## 1. Why this build exists
 
 Four pipeline generations had drifted apart:

@@ -331,11 +331,16 @@ sudo apt install libopenblas-dev liblapack-dev   # Debian family
 
 ### The Python part — only for `iCytoTRACE()`
 
-The `iCytoTRACE()` function (multi-batch integration) needs Python with `scanoramaCT` and `numpy`. **Script 09 does not call `iCytoTRACE()`** — it runs the plain `CytoTRACE()` per sample instead, which avoids this entirely. Skip this unless you specifically want integrated CytoTRACE:
+The `iCytoTRACE()` function (multi-batch integration) needs Python with `scanoramaCT` and `numpy`. **Script 09 does not call `iCytoTRACE()`** — it runs the plain `CytoTRACE()` on the whole dataset instead, which avoids this entirely. Skip this unless you specifically want integrated CytoTRACE:
 
 ```bash
 pip install numpy scanoramaCT
 ```
+
+> During `install_github("gunsagargulati/CytoTRACE")` you WILL see
+> `Warning: The ScanoramaCT python module is not accessible ... iCytoTRACE ... disabled`.
+> That is expected and harmless — it only disables `iCytoTRACE()`, which the
+> pipeline never uses. The install still finishes with `* DONE (CytoTRACE)`.
 
 ### Known failure modes
 
@@ -343,7 +348,7 @@ pip install numpy scanoramaCT
 |---|---|
 | `there is no package called 'sva'` | `BiocManager::install("sva")` — it's Bioconductor, not CRAN |
 | Fails on modern Matrix | Known; the package predates Matrix 1.5+. Use `RUN_CYTOTRACE1 <- FALSE` |
-| Enormous memory use | `CytoTRACE()` densifies the matrix. Script 09 already runs it per sample; reduce `MAX_CELLS` if needed |
+| Enormous memory use | `CytoTRACE()` densifies the matrix. Script 09 runs it once on the whole object; use `RUN_CYTOTRACE1 <- FALSE` if RAM is tight (the `gene_counts_score` already captures the v1 signal) |
 
 If it will not install after 30 minutes of effort, set `RUN_CYTOTRACE1 <- FALSE`. CytoTRACE 2 plus the built-in entropy metrics already give you two independent estimates.
 
@@ -712,6 +717,51 @@ Rscript 10_trajectory_cellrank.R
 ```
 
 `RETICULATE_PYTHON` overrides everything else and is the most reliable way to get a deterministic binding in a batch job.
+
+---
+
+## 5b. pySCENIC environment — Scripts 12a–12c (regulon analysis)
+
+pySCENIC (TF regulon inference) runs in its **own** conda env, separate from the
+CellRank env — the version pins conflict, so don't merge them. The env is fully
+specified by **`environment.yml`** in this folder (python 3.9.18, numpy 1.23.5,
+pyscenic 0.12.1, `dask<=2023.10.1` — the exact combination that avoids the
+"Must supply at least one delayed object" / numpy-ABI / segfault failures).
+
+```bash
+conda env create -f environment.yml        # creates env named 'pyscenic'
+conda activate pyscenic
+```
+
+What touches what:
+- `12a_export_for_pyscenic.R` (R) — writes per-label looms to `seurat_output/SCENIC/`.
+- `12b_run_pyscenic.py` (Python) — grn→ctx→aucell; writes `aucell.csv` + `regulons.p`
+  per label. Needs the **cisTarget mouse databases** (two `.feather` rankings +
+  the `motifs-v9-nr.mgi` tbl + `allTFs_mm.txt`) at `NR4A1_CISTARGET`.
+- `run_pyscenic2.sh` — stable launcher: `conda activate` + `LD_PRELOAD` of the env's
+  libstdc++ (GLIBCXX fix) + single-thread BLAS (stops OOM/segfault from
+  oversubscription), then runs `12b`.
+- `scenic.sh` — `status | watch | run | stop | clean | fresh` convenience wrapper.
+- `12c_load_pyscenic_results.R` (R) — reads `aucell.csv` back, attaches an `AUC`
+  assay, plots. (No `_pyscenic.loom` is produced because `12b` defaults to
+  `EXPORT_LOOM=False`; `aucell.csv` is the source of truth.)
+
+Portability: `12a/12b/12c/*.sh` all read the **same `NR4A1_*` env vars as `config.R`**
+(`NR4A1_ROOT`, `NR4A1_OUTPUT`, `NR4A1_CISTARGET`, `NR4A1_PY_SCENIC`,
+`NR4A1_SCENIC_WORKERS`). Defaults target the Nr4a1 study.
+
+```bash
+# typical run
+Rscript 12a_export_for_pyscenic.R
+conda activate pyscenic
+./scenic.sh run              # or: ./scenic.sh run --labels Stem_cells__Female
+./scenic.sh status
+Rscript 12c_load_pyscenic_results.R
+```
+
+If a run is interrupted, just `./scenic.sh run` again — `12b` auto-discovers labels
+and re-running a finished one simply overwrites it; use `./scenic.sh status` to see
+which labels already have a non-empty `aucell.csv`.
 
 ---
 

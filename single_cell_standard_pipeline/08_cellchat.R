@@ -48,9 +48,16 @@ set.seed(123)
 # =============================================================================
 # --- PART 1: CONFIGURATION ---------------------------------------------------
 # =============================================================================
-PROJECT_NAME <- "Wu_Diet_project2"
-ROOT_PATH    <- "/home/ssromerogon/local_drive/optimus_drive/selim_working_dir/2026_wu_project2/r_process"
-OUTPUT_DIR   <- file.path(ROOT_PATH, "seurat_output")
+# ---- Shared portable config: nr4a1 defaults, override via env vars (see config.R).
+# Run from the pipeline directory, or set NR4A1_CONFIG=/full/path/to/config.R. ----
+.NR4A1_CFG <- Sys.getenv("NR4A1_CONFIG", "config.R")
+if (!file.exists(.NR4A1_CFG)) stop("config.R not found at '", .NR4A1_CFG,
+  "' - cd to the pipeline directory or set NR4A1_CONFIG.", call. = FALSE)
+source(.NR4A1_CFG)
+
+# PROJECT_NAME <- "Wu_Diet_project2"   # [portable] now set in config.R
+# ROOT_PATH    <- "/home/ssromerogon/local_drive/optimus_drive/selim_working_dir/2026_wu_project2/r_process"   # [portable] now set in config.R
+# OUTPUT_DIR   <- file.path(ROOT_PATH, "seurat_output")   # [portable] now set in config.R
 
 # Input
 UNIFIED_RDS  <- file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_unified_annotated.rds"))

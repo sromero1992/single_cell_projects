@@ -65,12 +65,19 @@ set.seed(123)
 
 # --- 1.1: Project Identity ---
 # These MUST match the values set in Script 01.
-PROJECT_NAME <- "Wu_Diet_project2"
+# ---- Shared portable config: nr4a1 defaults, override via env vars (see config.R).
+# Run from the pipeline directory, or set NR4A1_CONFIG=/full/path/to/config.R. ----
+.NR4A1_CFG <- Sys.getenv("NR4A1_CONFIG", "config.R")
+if (!file.exists(.NR4A1_CFG)) stop("config.R not found at '", .NR4A1_CFG,
+  "' - cd to the pipeline directory or set NR4A1_CONFIG.", call. = FALSE)
+source(.NR4A1_CFG)
+
+# PROJECT_NAME <- "Wu_Diet_project2"   # [portable] now set in config.R
 #ROOT_PATH   <- "Z:/selim_working_dir/2026_nr4a1_ack/r_process"  # Windows
-ROOT_PATH <- "/home/ssromerogon/local_drive/optimus_drive/selim_working_dir/2026_wu_project2/r_process"
+# ROOT_PATH <- "/home/ssromerogon/local_drive/optimus_drive/selim_working_dir/2026_wu_project2/r_process"   # [portable] now set in config.R
 
 # --- 1.2: Path Configuration (Auto-generated; do not edit) ---
-OUTPUT_DIR       <- file.path(ROOT_PATH, "seurat_output")
+# OUTPUT_DIR       <- file.path(ROOT_PATH, "seurat_output")   # [portable] now set in config.R
 INPUT_RDS        <- file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_processed_for_annotation.rds"))
 MARKERS_CSV_FILE <- file.path(ROOT_PATH, "cell_type_markers.csv")
 # Alternative: if CSV is in the same folder as this script:
