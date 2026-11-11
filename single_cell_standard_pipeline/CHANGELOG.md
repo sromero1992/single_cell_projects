@@ -33,10 +33,35 @@ tracks. 03/04/05 route through the upgraded package function. RNA assay untouche
 **Script 13 (scTenifoldNet).** Resume-skip: `SKIP_IF_DONE` skips a contrast×cell-type
 whose output xlsx already exists with a non-empty result sheet (survives reboots).
 
+**Script 09b (new).** `09b_potency_cycle_contour.R` — a 2-D cell-state landscape after
+Script 09: CytoTRACE2 potency vs cycling activity (1 − pooled Shannon entropy over
+S+G2M), KDE contours with four quadrant states (Quiescent-Stem / Cycling-Stem /
+Committed-Cycling / Differentiated-Resting), plus an S vs G2M AUCell plane coloured by
+potency. Self-contained `potency_cycle_contour()` (source() anywhere) with a config.R
+driver; added `viridis` to Script 00.
+
 **SCENIC (new).** `12c_load_pyscenic_results.R` (loom/aucell → AUC assay →
 FeaturePlot/violin/mean-AUC heatmap), `run_pyscenic2.sh` (stable runner),
 `scenic.sh` (status/watch/run/stop/clean/fresh). Two `environment.yml` reconciled.
-`00_rlibs_installation.R` gained `sctransform`, `glmGamPoi`, `edgeR`.
+`00_rlibs_installation.R` gained `sctransform`, `glmGamPoi`, `edgeR`,
+`ggraph`/`tidygraph`/`igraph`/`ggrepel`.
+
+**TF regulatory-network (new, optional).** `12d_build_tf_network.py` builds a
+3-layer GRN around a configurable focus gene (`NR4A1_FOCUS_GENE`, default Nr4a1):
+upstream TFs → focus → targets from GRNBoost2 `adjacencies.tsv`, with motif-pruned
+`regulons.p` edges flagged (solid vs dashed). Writes node/edge CSVs + a networkx
+plot; `12d_plot_tf_network.R` redraws from the CSVs with ggraph. GRNBoost2
+`importance` is predictive, not mutual information and not causal.
+`12d_plot_tf_network.R` also computes the downstream target↔target GRN from the
+single-cell expression (Spearman default, or pcNet via `NR4A1_NET_COEXPR_METHOD`),
+with Louvain modules, overlays it on the backbone, and writes `*_augmented.csv`.
+
+**Hierarchy program score (new).** `12e_hierarchy_aucell_umap.R` AUCell-scores the
+12d hierarchy's gene sets (upstream / downstream / all / per co-expression module)
+across the whole object and overlays them on the UMAP + violins — an un-pruned,
+expression-driven program score orthogonal to the motif-validated regulon. Also emits
+a lineage/potency trace: program AUCell vs `CytoTRACE2_Score` with cell types ordered
+by mean potency, so a stem-defined program can be traced across differentiation.
 
 ---
 

@@ -54,7 +54,39 @@ Rscript 12a_export_for_pyscenic.R          # Seurat -> per-label looms under seu
 ./scenic.sh run                            # grn->ctx->aucell (detached, auto-resumes finished labels)
 ./scenic.sh status                         # progress + which labels are done
 Rscript 12c_load_pyscenic_results.R        # attach AUC assay, FeaturePlot/violin/mean-AUC heatmap
+python 12d_build_tf_network.py             # optional: TF->focus->targets GRN (default Nr4a1) + CSVs + networkx plot
+Rscript 12d_plot_tf_network.R              # optional: ggraph plot from those CSVs
 ```
+
+The `12d` pair builds a 3-layer regulatory neighborhood around a focus gene
+(`NR4A1_FOCUS_GENE`, default `Nr4a1`): **upstream TFs → focus → target genes** from the
+GRNBoost2 `adjacencies.tsv` (motif-confirmed `regulons.p` edges solid, adjacency-only
+dashed). `12d_build_tf_network.py` runs in the **pyscenic env** (it unpickles
+`regulons.p`) and writes the backbone node/edge CSVs. `12d_plot_tf_network.R` then adds
+the piece SCENIC can't give you: a **Spearman co-expression GRN among the downstream
+target genes**, computed from the single-cell expression of that label's cells
+(`|rho| ≥ NR4A1_NET_COEXPR_R`, default 0.3), with targets colored by Louvain module and
+drawn as a green undirected mesh. It writes `*_augmented.csv`; render the full graph in
+networkx with `python 12d_build_tf_network.py --nodes <..._nodes_augmented.csv> --edges <..._edges_augmented.csv> --out net.png`.
+Point everything at any gene: `NR4A1_FOCUS_GENE=Foxp3`. The downstream GRN method is
+`NR4A1_NET_COEXPR_METHOD` = `spearman` (default) or `pcnet` (scTenifoldNet's PC-regression
+network, same as Script 13).
+
+```bash
+Rscript 12e_hierarchy_aucell_umap.R        # AUCell-score the hierarchy's gene sets, overlay on the UMAP
+```
+
+`12e` takes the hierarchy from `12d` and **AUCell-scores its gene sets across the whole
+object** (upstream TFs, downstream targets, all, and each downstream co-expression
+module separately), then overlays each score on the existing UMAP (FeaturePlot) plus
+violins by cell type/condition. This is an un-pruned, expression-driven program score —
+orthogonal to the motif-validated regulon — so it shows *where in transcriptional space*
+the Nr4a1 regulatory neighborhood is coordinately active. `NR4A1_HIER_SCOPE=label`
+restricts scoring to the label's own cells instead of the whole object. It also emits a
+**lineage/potency trace**: the program's AUCell score plotted against `CytoTRACE2_Score`
+(from Script 09, `NR4A1_POTENCY_COL`) with cell types ordered by mean potency
+(stem → differentiated) — so a stem-defined Nr4a1 program can be traced across the other
+cell types to see whether it decays or holds along differentiation.
 
 `scenic.sh` wraps `run_pyscenic2.sh` (conda activate + libstdc++ preload +
 single-thread BLAS) which runs `12b_run_pyscenic.py`. Because `12b` defaults to

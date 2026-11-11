@@ -39,7 +39,7 @@ import loompy as lp
 #   NR4A1_SCENIC_WORKERS  dask/aucell workers     (default: 4)
 ROOT_PATH   = os.environ.get(
     "NR4A1_ROOT",
-    "/home/ssromerogon/local_drive/optimus_drive/selim_working_dir/2026_nr4a1_ack/r_process")
+    "/run/media/external/scdc_projects/2026_nr4a1_ack/r_process")
 OUTPUT_DIR  = os.environ.get("NR4A1_OUTPUT", os.path.join(ROOT_PATH, "seurat_output"))
 SCENIC_DIR  = os.environ.get("NR4A1_SCENIC_DIR", os.path.join(OUTPUT_DIR, "SCENIC"))
 DB_DIR      = os.environ.get("NR4A1_CISTARGET", "/home/ssromerogon/cisTarget_databases")

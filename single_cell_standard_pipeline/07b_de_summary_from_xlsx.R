@@ -21,7 +21,21 @@ suppressPackageStartupMessages({
 # =============================================================================
 # Shared portable config (nr4a1 defaults; override via env vars). Run from the
 # pipeline directory, or set NR4A1_CONFIG=/full/path/to/config.R.
-.NR4A1_CFG <- Sys.getenv("NR4A1_CONFIG", "config.R")
+# Robust config.R locator: works whether launched with Rscript from any dir,
+# source()'d, or run interactively. Tries, in order: NR4A1_CONFIG env var; the
+# dir of this script; the current working dir; the default install path.
+.NR4A1_CFG <- local({
+  cand <- Sys.getenv("NR4A1_CONFIG", "")
+  a  <- commandArgs(FALSE); fa <- sub("^--file=", "", a[grep("^--file=", a)])
+  if (length(fa)) cand <- c(cand, file.path(dirname(normalizePath(fa[1], mustWork = FALSE)), "config.R"))
+  of <- tryCatch(sys.frame(1)$ofile, error = function(e) NULL)
+  if (!is.null(of)) cand <- c(cand, file.path(dirname(normalizePath(of, mustWork = FALSE)), "config.R"))
+  cand <- c(cand, "config.R",
+            "/run/media/external/scdc_projects/2026_nr4a1_ack/r_process/config.R")
+  hit <- cand[nzchar(cand) & file.exists(cand)]
+  if (!length(hit)) stop("config.R not found. Set NR4A1_CONFIG=/full/path/to/config.R", call. = FALSE)
+  hit[1]
+})
 if (file.exists(.NR4A1_CFG)) source(.NR4A1_CFG) else
   message("[07b] config.R not found; using the literal DE_DIR below.")
 
@@ -31,7 +45,7 @@ DE_LEVEL <- Sys.getenv("NR4A1_DE_LEVEL", "subtypes")
 DE_DIR   <- Sys.getenv(
   "NR4A1_DE_DIR",
   if (exists("OUTPUT_DIR")) file.path(OUTPUT_DIR, "DE_results", DE_LEVEL)
-  else "/home/ssromerogon/local_drive/optimus_drive/selim_working_dir/2026_nr4a1_ack/r_process/seurat_output/DE_results/subtypes"
+  else "/run/media/external/scdc_projects/2026_nr4a1_ack/r_process/seurat_output/DE_results/subtypes"
 )
 
 # Which files to read. "_MAST_DE_all_genes.xlsx" lets you re-threshold freely;

@@ -6,10 +6,11 @@
 # regulon-activity plots. Focused on the Nr4a1 regulon but works for any TF.
 #
 # INPUT  (per label dir under <OUTPUT_DIR>/SCENIC/<label>/):
-#   aucell.csv   -- cells x regulons continuous AUC matrix   (PRIMARY source)
-#   regulons.p   -- pickled regulon gene sets (optional, for membership export)
-#   <label>_pyscenic.loom -- only if 12b was run with EXPORT_LOOM=True (optional)
-# Because our 12b defaults to EXPORT_LOOM=False, aucell.csv is the source of truth.
+#   aucell.csv              -- cells x regulons AUC matrix  (Python-API 12b output)
+#   <label>_pyscenic.loom   -- AUC in col_attrs/RegulonsAUC (pySCENIC CLI output)
+# Either works: aucell.csv is read first; if absent, the regulon AUC is pulled out
+# of the _pyscenic.loom (needs the hdf5r package). So both the 12b Python-API run
+# and the pyscenic CLI run are supported.
 #
 # OUTPUT (per label, under <OUTPUT_DIR>/SCENIC/<label>/R_plots/):
 #   FeaturePlot_<TF>.png           -- TF regulon AUC on the subset's UMAP
@@ -34,7 +35,21 @@ suppressPackageStartupMessages({
 
 # --- Shared portable config: nr4a1 defaults, override via env vars (config.R).
 # Run from the pipeline directory, or set NR4A1_CONFIG=/full/path/to/config.R. ----
-.NR4A1_CFG <- Sys.getenv("NR4A1_CONFIG", "config.R")
+# Robust config.R locator: works whether launched with Rscript from any dir,
+# source()'d, or run interactively. Tries, in order: NR4A1_CONFIG env var; the
+# dir of this script; the current working dir; the default install path.
+.NR4A1_CFG <- local({
+  cand <- Sys.getenv("NR4A1_CONFIG", "")
+  a  <- commandArgs(FALSE); fa <- sub("^--file=", "", a[grep("^--file=", a)])
+  if (length(fa)) cand <- c(cand, file.path(dirname(normalizePath(fa[1], mustWork = FALSE)), "config.R"))
+  of <- tryCatch(sys.frame(1)$ofile, error = function(e) NULL)
+  if (!is.null(of)) cand <- c(cand, file.path(dirname(normalizePath(of, mustWork = FALSE)), "config.R"))
+  cand <- c(cand, "config.R",
+            "/run/media/external/scdc_projects/2026_nr4a1_ack/r_process/config.R")
+  hit <- cand[nzchar(cand) & file.exists(cand)]
+  if (!length(hit)) stop("config.R not found. Set NR4A1_CONFIG=/full/path/to/config.R", call. = FALSE)
+  hit[1]
+})
 if (!file.exists(.NR4A1_CFG)) stop("config.R not found at '", .NR4A1_CFG,
   "' - cd to the pipeline directory or set NR4A1_CONFIG.", call. = FALSE)
 source(.NR4A1_CFG)
@@ -60,19 +75,45 @@ LABELS           <- NULL
 # =============================================================================
 # Read a label's AUC matrix -> regulons x cells (cells as columns). aucell.csv is
 # written by pySCENIC as cells x regulons with the cell id in the first column.
+# Pull the regulon-AUC matrix out of a pySCENIC CLI loom: col_attrs/RegulonsAUC is
+# a compound (cells x regulons) table, col_attrs/CellID holds the barcodes.
+read_auc_loom <- function(label_dir) {
+  lf <- list.files(label_dir, pattern = "\\.loom$", full.names = TRUE)
+  if (!length(lf)) return(NULL)
+  if (!requireNamespace("hdf5r", quietly = TRUE)) {
+    message("  [note] .loom present but hdf5r not installed; cannot read AUC from loom.")
+    return(NULL)
+  }
+  out <- tryCatch({
+    h <- hdf5r::H5File$new(lf[1], mode = "r"); on.exit(h$close_all(), add = TRUE)
+    if (!h$exists("col_attrs/RegulonsAUC")) return(NULL)
+    auc   <- h[["col_attrs/RegulonsAUC"]]$read()          # data.frame: cells x regulons
+    cells <- as.character(h[["col_attrs/CellID"]]$read())
+    m <- as.matrix(as.data.frame(auc)); rownames(m) <- cells
+    t(m)                                                  # -> regulons x cells
+  }, error = function(e) { message("  [note] loom AUC read failed: ", conditionMessage(e)); NULL })
+  out
+}
+
+# aucell.csv first (Python-API 12b); else the CLI _pyscenic.loom.
 read_auc <- function(label_dir) {
   f <- file.path(label_dir, "aucell.csv")
-  if (!file.exists(f) || file.info(f)$size == 0) return(NULL)
-  m <- tryCatch(utils::read.csv(f, row.names = 1, check.names = FALSE),
-                error = function(e) NULL)
-  if (is.null(m) || nrow(m) == 0 || ncol(m) == 0) return(NULL)
-  t(as.matrix(m))                       # -> regulons x cells
+  if (file.exists(f) && file.info(f)$size > 0) {
+    m <- tryCatch(utils::read.csv(f, row.names = 1, check.names = FALSE),
+                  error = function(e) NULL)
+    if (!is.null(m) && nrow(m) > 0 && ncol(m) > 0) return(t(as.matrix(m)))  # regulons x cells
+  }
+  read_auc_loom(label_dir)
 }
+
+.has_auc_source <- function(x)
+  file.exists(file.path(SCENIC_DIR, x, "aucell.csv")) ||
+  length(list.files(file.path(SCENIC_DIR, x), pattern = "\\.loom$")) > 0
 
 discover_labels <- function() {
   if (!dir.exists(SCENIC_DIR)) stop("SCENIC_DIR not found: ", SCENIC_DIR, call. = FALSE)
   d <- list.dirs(SCENIC_DIR, recursive = FALSE, full.names = FALSE)
-  d[vapply(d, function(x) file.exists(file.path(SCENIC_DIR, x, "aucell.csv")), logical(1))]
+  d[vapply(d, .has_auc_source, logical(1))]
 }
 
 pick_umap <- function(obj) {
@@ -104,7 +145,7 @@ for (label in labels) {
   ldir <- file.path(SCENIC_DIR, label)
   message("\n########## ", label, " ##########")
   auc <- read_auc(ldir)
-  if (is.null(auc)) { message("  [SKIP] empty/unreadable aucell.csv"); next }
+  if (is.null(auc)) { message("  [SKIP] no readable AUC (aucell.csv or _pyscenic.loom)"); next }
 
   # --- cell-name alignment (THE gotcha): keep only shared barcodes ------------
   shared <- intersect(colnames(auc), colnames(so))

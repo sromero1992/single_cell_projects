@@ -1,0 +1,47 @@
+name: cellbender_env
+# =============================================================================
+# Dedicated environment to RUN CellBender remove-background.
+# The other file here (environment.yml / scanpy_env_311) is a scanpy env and
+# does NOT contain CellBender or PyTorch -- use THIS one for the CellBender step.
+#
+# CellBender is installed from its STABLE RELEASE (PyPI), not the dev/master
+# branch. See the notes in the pip section to pin a specific tagged release or
+# to install a GPU build of PyTorch.
+#
+# Create:   conda env create -f environment_cellbender.yml
+# Activate: conda activate cellbender_env
+# =============================================================================
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+dependencies:
+  - python=3.10          # CellBender v0.4.0 supports Python 3.10-3.12
+  - pip
+  - numpy=1.26
+  - pandas
+  - scipy
+  - h5py
+  - pytables
+  - openpyxl          # read the metadata .xlsx
+  - hdf5plugin        # zstd-compressed .h5ad output (optional)
+  - pip:
+      # --- PyTorch --------------------------------------------------------
+      # Default below is the CPU build. For GPU (much faster), install the CUDA
+      # wheel matching your driver INSTEAD of the plain "torch" line, e.g. CUDA 12.1:
+      #   pip install torch --index-url https://download.pytorch.org/whl/cu121
+      - torch
+      # --- CellBender: STABLE RELEASE v0.4.0 ------------------------------
+      # Latest stable (Aug 2025). v0.4.0 produces the SAME outputs as v0.3.2 /
+      # v0.3.0 but updates Python compatibility to 3.10-3.12. Pinned to the tag
+      # from the repo so you get exactly the stable release:
+      - "git+https://github.com/broadinstitute/CellBender.git@v0.4.0"
+      # Simpler alternative (PyPI, should also resolve to 0.4.0):
+      #   - cellbender
+      # WARNINGS:
+      #   * do NOT use '@master' -- that is the dev branch, not a stable release.
+      #   * do NOT use v0.3.1 -- it was redacted for a major bug (fixed in 0.3.2).
+      # CellBender's own deps (pyro-ppl, tables, etc.) are pulled in automatically.
+      # --- for the optional .h5ad conversion step in the script -----------
+      - scanpy
+      - anndata

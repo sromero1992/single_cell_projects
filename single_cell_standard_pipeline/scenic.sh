@@ -24,7 +24,7 @@ LOG="${NR4A1_SCENIC_LOG:-$HERE/log_run.txt}"
 PYNAME="12b_run_pyscenic.py"
 
 # Resolve SCENIC_DIR exactly like 12b does (for clean/status).
-ROOT="${NR4A1_ROOT:-/home/ssromerogon/local_drive/optimus_drive/selim_working_dir/2026_nr4a1_ack/r_process}"
+ROOT="${NR4A1_ROOT:-/run/media/external/scdc_projects/2026_nr4a1_ack/r_process}"
 OUT="${NR4A1_OUTPUT:-$ROOT/seurat_output}"
 SCENIC_DIR="${NR4A1_SCENIC_DIR:-$OUT/SCENIC}"
 

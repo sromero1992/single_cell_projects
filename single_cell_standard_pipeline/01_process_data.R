@@ -14,7 +14,21 @@ library(Seurat)
 # =============================================================================
 # ---- Shared portable config: nr4a1 defaults, override via env vars (see config.R).
 # Run from the pipeline directory, or set NR4A1_CONFIG=/full/path/to/config.R. ----
-.NR4A1_CFG <- Sys.getenv("NR4A1_CONFIG", "config.R")
+# Robust config.R locator: works whether launched with Rscript from any dir,
+# source()'d, or run interactively. Tries, in order: NR4A1_CONFIG env var; the
+# dir of this script; the current working dir; the default install path.
+.NR4A1_CFG <- local({
+  cand <- Sys.getenv("NR4A1_CONFIG", "")
+  a  <- commandArgs(FALSE); fa <- sub("^--file=", "", a[grep("^--file=", a)])
+  if (length(fa)) cand <- c(cand, file.path(dirname(normalizePath(fa[1], mustWork = FALSE)), "config.R"))
+  of <- tryCatch(sys.frame(1)$ofile, error = function(e) NULL)
+  if (!is.null(of)) cand <- c(cand, file.path(dirname(normalizePath(of, mustWork = FALSE)), "config.R"))
+  cand <- c(cand, "config.R",
+            "/run/media/external/scdc_projects/2026_nr4a1_ack/r_process/config.R")
+  hit <- cand[nzchar(cand) & file.exists(cand)]
+  if (!length(hit)) stop("config.R not found. Set NR4A1_CONFIG=/full/path/to/config.R", call. = FALSE)
+  hit[1]
+})
 if (!file.exists(.NR4A1_CFG)) stop("config.R not found at '", .NR4A1_CFG,
   "' - cd to the pipeline directory or set NR4A1_CONFIG.", call. = FALSE)
 source(.NR4A1_CFG)
@@ -92,6 +106,20 @@ RUN_SCEVAN         <- FALSE        # optional CNA / malignant-cell inference
 SCEVAN_CORES       <- 20          # processors for SCEVAN (par_cores)
 PROBE              <- NULL
 
+# --- Ambient RNA via CellBender (run EXTERNALLY first; see cellbender/README.md)
+# CellBender is a separate per-sample step run in its own conda env/GPU terminal.
+# If you ran cellbender/process_samples_raw_cellbender.py with --pipeline-h5, a
+# CellBender-corrected matrix sits NEXT TO the source h5s as
+# <H5_DIR>/<SampleID>/<CELLBENDER_H5>. Flip USE_CELLBENDER to ingest THAT instead
+# of the Cell Ranger filtered matrix. CellBender already removes ambient RNA, so
+# normally set RUN_DECONTX <- FALSE when using it (we warn if both are on).
+USE_CELLBENDER <- FALSE
+CELLBENDER_H5  <- "sample_cellbender_filtered.h5"
+FILTERED_H5    <- if (USE_CELLBENDER) CELLBENDER_H5 else "sample_filtered_feature_bc_matrix.h5"
+if (USE_CELLBENDER && RUN_DECONTX)
+  message("[note] USE_CELLBENDER and RUN_DECONTX are BOTH on -> ambient RNA would be ",
+          "corrected twice. Consider setting RUN_DECONTX <- FALSE.")
+
 # Cluster-level doublet review is a TWO-PASS workflow:
 #   1st run: REVIEW_ACTION = "flag"  -> re-clusters at 4.0, writes plots, removes
 #            nothing. Inspect DIAG_DIR, confirm the flagged clusters are real
@@ -115,7 +143,9 @@ metadata <- as.data.frame(readxl::read_excel(METADATA_FILE))
 # STEP 1: INGESTION (Raw)
 # -----------------------------------------------------------------------------
 message("\n[STEP 1] Ingesting 10x Raw Matrices...")
-sample_list <- read_10x_samples(metadata, H5_DIR, sample_col = SAMPLE_COL, probe = PROBE)
+sample_list <- read_10x_samples(metadata, H5_DIR, sample_col = SAMPLE_COL,
+                                h5_name = FILTERED_H5, probe = PROBE)
+if (USE_CELLBENDER) message("  [ingest] using CellBender matrices: <SampleID>/", CELLBENDER_H5)
 
 # -----------------------------------------------------------------------------
 # STEP 1b (OPTIONAL): SCEVAN CNA inference on RAW counts, per-sample checkpoints

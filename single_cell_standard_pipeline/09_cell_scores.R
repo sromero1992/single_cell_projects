@@ -96,7 +96,21 @@ set.seed(123)
 # --- 1.1: Project Identity & Paths -------------------------------------------
 # ---- Shared portable config: nr4a1 defaults, override via env vars (see config.R).
 # Run from the pipeline directory, or set NR4A1_CONFIG=/full/path/to/config.R. ----
-.NR4A1_CFG <- Sys.getenv("NR4A1_CONFIG", "config.R")
+# Robust config.R locator: works whether launched with Rscript from any dir,
+# source()'d, or run interactively. Tries, in order: NR4A1_CONFIG env var; the
+# dir of this script; the current working dir; the default install path.
+.NR4A1_CFG <- local({
+  cand <- Sys.getenv("NR4A1_CONFIG", "")
+  a  <- commandArgs(FALSE); fa <- sub("^--file=", "", a[grep("^--file=", a)])
+  if (length(fa)) cand <- c(cand, file.path(dirname(normalizePath(fa[1], mustWork = FALSE)), "config.R"))
+  of <- tryCatch(sys.frame(1)$ofile, error = function(e) NULL)
+  if (!is.null(of)) cand <- c(cand, file.path(dirname(normalizePath(of, mustWork = FALSE)), "config.R"))
+  cand <- c(cand, "config.R",
+            "/run/media/external/scdc_projects/2026_nr4a1_ack/r_process/config.R")
+  hit <- cand[nzchar(cand) & file.exists(cand)]
+  if (!length(hit)) stop("config.R not found. Set NR4A1_CONFIG=/full/path/to/config.R", call. = FALSE)
+  hit[1]
+})
 if (!file.exists(.NR4A1_CFG)) stop("config.R not found at '", .NR4A1_CFG,
   "' - cd to the pipeline directory or set NR4A1_CONFIG.", call. = FALSE)
 source(.NR4A1_CFG)
@@ -104,6 +118,9 @@ source(.NR4A1_CFG)
 # PROJECT_NAME <- "Nr4a1_s17_ack"   # [portable] now set in config.R
 # ROOT_PATH    <- "/home/ssromerogon/local_drive/optimus_drive/selim_working_dir/2026_nr4a1_ack/r_process"   # [portable] now set in config.R
 # OUTPUT_DIR   <- file.path(ROOT_PATH, "seurat_output")   # [portable] now set in config.R
+PROJECT_NAME <- "Nr4a1_s17_ack"
+ROOT_PATH    <- "/mnt/SCDC/Optimus/selim_working_dir/2026_nr4a1_ack/r_process"
+OUTPUT_DIR   <- file.path(ROOT_PATH, "seurat_output")
 
 # Input object — the final annotated object from Script 06.
 RDS_PATH <- file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_unified_annotated.rds"))
@@ -376,6 +393,10 @@ if (!is.null(CONDITION_LEVELS)) {
 if (RUN_CELLCYCLE) {
   message("\n=== Cell-cycle scoring (CellCycleScoring, all cells) ===")
   # Mouse S / G2M ortholog lists (Tirosh et al., mouse-symbol version).
+  # CITATION (cite for the cell-cycle gene lists): Tirosh I, Izar B, Prakadan SM,
+  #   et al. Science. 2016;352(6282):189-196. doi:10.1126/science.aad0501
+  #   (canonical S + G2/M markers; same lists as Seurat::cc.genes.updated.2019,
+  #    here title-cased to mouse symbols).
   cc_mouse_s <- c("Atad2","Brip1","Casp8ap2","Ccne2","Cdc45","Cdc6","Cdca7","Cenpu",
     "Chaf1b","Clspn","Dscc1","Dtl","E2f8","Exo1","Fen1","Gins2","Gmnn","Hells",
     "Mcm2","Mcm4","Mcm5","Mcm6","Msh2","Nasp","Pcna","Pola1","Pold3","Polr1b",
@@ -906,6 +927,13 @@ if (RUN_PATHWAY_SCORES) {
 
     gene_sets <- lapply(names(PATHWAY_GO_TERMS), build_set)
     names(gene_sets) <- names(PATHWAY_GO_TERMS)
+    # Also score the cell-cycle panels with AUCell, so cycling activity becomes a
+    # pathway score (AUCell_S_phase / AUCell_G2M_phase) plotted exactly like
+    # apoptosis/WNT/etc. Reuses the curated S/G2M lists from the cell-cycle block.
+    if (RUN_CELLCYCLE && exists("s_genes") && exists("g2m_genes")) {
+      gene_sets[["S_phase"]]   <- intersect(s_genes,   present)
+      gene_sets[["G2M_phase"]] <- intersect(g2m_genes, present)
+    }
     gene_sets <- gene_sets[vapply(gene_sets, length, integer(1)) >= PATHWAY_MIN_GENES]
     for (nm in names(gene_sets))
       message(sprintf("  %-22s %d genes", nm, length(gene_sets[[nm]])))
@@ -1600,8 +1628,15 @@ library(ggpubr)
 library(dplyr)
 library(tidyr)
 
-out_rds <- file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_with_cell_scores.rds"))
-data<- readRDS(out_rds)
+# Reuse the in-memory object from STEP 7 (one save, no reload) when running the
+# whole script in one session. Only read the .rds back if this plotting section
+# is run on its own in a fresh session (then OUTPUT_DIR/PROJECT_NAME must be set,
+# e.g. by sourcing the config block at the top first).
+if (!exists("data")) {
+  out_rds <- file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_with_cell_scores.rds"))
+  message("[plot] 'data' not in memory -> loading ", out_rds)
+  data <- readRDS(out_rds)
+}
 
 # ==============================================================================
 # 1. SETUP PARAMETERS & SCORES TO PLOT
@@ -1621,7 +1656,9 @@ my_comparisons <- list(
 )
 
 pathway_cols   <- grep("^AUCell_", colnames(data@meta.data), value = TRUE)
-scores_to_plot <- unique(c("CytoTRACE2_Score", "CytoTRACE1_Score",  "AUCell_apoptosis", pathway_cols))
+scores_to_plot <- unique(c("CytoTRACE2_Score", "CytoTRACE1_Score",
+                           "S.Score", "G2M.Score",          # Seurat cell-cycle scores
+                           "AUCell_apoptosis", pathway_cols))  # pathway_cols incl AUCell_S_phase/G2M_phase
 scores_to_plot <- intersect(scores_to_plot, colnames(data@meta.data))
 
 if (!exists("SCORES_DIR")) SCORES_DIR <- "./cell_scores"
@@ -1741,7 +1778,8 @@ plot_score_comparison <- function(seurat_obj,
       bracket.size  = 0.6,
       inherit.aes   = TRUE
     ) +
-    scale_y_continuous(expand = expansion(mult = c(0.05, 0.25))) +
+    scale_y_continuous(expand = expansion(mult = c(0.05, 0.25)),
+                       n.breaks = 4) +          # fewer y ticks (try 4-5)
     scale_fill_hue() +
     scale_color_hue() +
     labs(
@@ -1759,6 +1797,7 @@ plot_score_comparison <- function(seurat_obj,
       axis.text.x      = element_blank(),
       axis.ticks.x     = element_blank(),
       
+      axis.text.y      = element_text(size = 13),       # bigger y numbers
       axis.title.y     = element_text(size = 13, face = "bold"),
       legend.position  = "bottom",
       
@@ -1777,8 +1816,14 @@ plot_score_comparison <- function(seurat_obj,
       color = "none"
     )
   
+  # auto-size height from the facet count (facet_wrap ncol = 4):
+  # ~15 for the many broad cell types, ~8 for the few colonocyte subtypes.
+  n_facets <- length(unique(df[[facet_by]]))
+  n_rows   <- ceiling(n_facets / 4)
+  plot_h   <- max(5, n_rows * 3.5 + 1.5)
+
   out_path <- file.path(save_dir, paste0(plot_type, "_", score_col, ".png"))
-  ggsave(out_path, p, width = 12, height = 15, dpi = 300, bg = "white")
+  ggsave(out_path, p, width = 12, height = plot_h, dpi = 300, bg = "white")
   message("Saved: ", out_path)
   return(p)
 }
@@ -1888,5 +1933,37 @@ if (RUN_CELLCYCLE && "Phase" %in% colnames(data@meta.data) &&
     message("  Saved phase_composition_by_condition.png")
   }, error = function(e) message("  [WARN] Phase composition plot: ", e$message))
   rm(colo_cc); gc()
+}
+
+# ==============================================================================
+# INDIVIDUAL CYCLING-GENE EXPRESSION PLOTS  (subfolder: individual_cycling_genes)
+# ==============================================================================
+# Each cell-cycle gene's EXPRESSION per condition, faceted by cell type, with the
+# same Wilcoxon brackets as the pathway/score plots -- via plot_score_comparison()
+# (FetchData pulls the gene's expression). Many genes => many files, so default to
+# violin only; add "barplot" to match the barplot+violin style of the passes.
+CYCLING_GENE_PLOT_TYPES <- c("violin", "barplot")   # both; drop "barplot" to halve files
+if (exists("plot_score_comparison")) {
+  .cyc_genes <- if (exists("s_genes") && exists("g2m_genes"))
+                  unique(c(s_genes, g2m_genes)) else character(0)
+  .cyc_genes <- intersect(.cyc_genes, rownames(data))
+  if (length(.cyc_genes) > 0) {
+    message("\n--- Individual cycling-gene expression plots (", length(.cyc_genes),
+            " genes x ", length(CYCLING_GENE_PLOT_TYPES), " type) ---")
+    dir_cyc_genes <- file.path(SCORES_DIR, "individual_cycling_genes")
+    if (!dir.exists(dir_cyc_genes)) dir.create(dir_cyc_genes, recursive = TRUE)
+    for (g in .cyc_genes) {
+      for (pt in CYCLING_GENE_PLOT_TYPES) {
+        tryCatch(
+          plot_score_comparison(data, score_col = g, facet_by = "CellType_broad",
+                                plot_type = pt, save_dir = dir_cyc_genes),
+          error = function(e) message("  [WARN] ", pt, " ", g, ": ", e$message))
+      }
+    }
+    message("  Individual cycling-gene plots saved to: ", dir_cyc_genes)
+  } else {
+    message("\n[note] No cycling genes available for individual plots ",
+            "(RUN_CELLCYCLE off, or none present).")
+  }
 }
 

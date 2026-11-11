@@ -36,6 +36,10 @@ cran_pkgs <- c(
   # SCTransform normalization path for the annotation embedding (Script 01 /
   # integrate_data + process_and_extract_cell_types when NORMALIZATION = "SCT").
   "sctransform",
+  # TF regulatory-network plots from SCENIC adjacencies (Script 12d R plotter).
+  "ggraph", "tidygraph", "igraph", "ggrepel",
+  # Potency x cycling state-landscape contours (Script 09b).
+  "viridis",
   # Potency-benchmark methods (Script 09 CCAT/SCENT + CytoTRACE cross-checks):
   #   mclust (SCENT clustering), pROC (benchmark ROC), homologene (mouse->human).
   "mclust", "pROC", "homologene"

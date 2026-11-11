@@ -61,7 +61,21 @@ set.seed(123)
 # --- 1.1: Project Paths (must match Scripts 01 and 02) -----------------------
 # ---- Shared portable config: nr4a1 defaults, override via env vars (see config.R).
 # Run from the pipeline directory, or set NR4A1_CONFIG=/full/path/to/config.R. ----
-.NR4A1_CFG <- Sys.getenv("NR4A1_CONFIG", "config.R")
+# Robust config.R locator: works whether launched with Rscript from any dir,
+# source()'d, or run interactively. Tries, in order: NR4A1_CONFIG env var; the
+# dir of this script; the current working dir; the default install path.
+.NR4A1_CFG <- local({
+  cand <- Sys.getenv("NR4A1_CONFIG", "")
+  a  <- commandArgs(FALSE); fa <- sub("^--file=", "", a[grep("^--file=", a)])
+  if (length(fa)) cand <- c(cand, file.path(dirname(normalizePath(fa[1], mustWork = FALSE)), "config.R"))
+  of <- tryCatch(sys.frame(1)$ofile, error = function(e) NULL)
+  if (!is.null(of)) cand <- c(cand, file.path(dirname(normalizePath(of, mustWork = FALSE)), "config.R"))
+  cand <- c(cand, "config.R",
+            "/run/media/external/scdc_projects/2026_nr4a1_ack/r_process/config.R")
+  hit <- cand[nzchar(cand) & file.exists(cand)]
+  if (!length(hit)) stop("config.R not found. Set NR4A1_CONFIG=/full/path/to/config.R", call. = FALSE)
+  hit[1]
+})
 if (!file.exists(.NR4A1_CFG)) stop("config.R not found at '", .NR4A1_CFG,
   "' - cd to the pipeline directory or set NR4A1_CONFIG.", call. = FALSE)
 source(.NR4A1_CFG)

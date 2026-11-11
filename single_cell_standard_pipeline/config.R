@@ -32,7 +32,7 @@
 PROJECT_NAME  <- Sys.getenv("NR4A1_PROJECT", "Nr4a1_s17_ack")
 ROOT_PATH     <- Sys.getenv(
   "NR4A1_ROOT",
-  "/home/ssromerogon/local_drive/optimus_drive/selim_working_dir/2026_nr4a1_ack/r_process"
+  "/run/media/external/scdc_projects/2026_nr4a1_ack/r_process"
 )
 OUTPUT_DIR    <- Sys.getenv("NR4A1_OUTPUT", file.path(ROOT_PATH, "seurat_output"))
 
