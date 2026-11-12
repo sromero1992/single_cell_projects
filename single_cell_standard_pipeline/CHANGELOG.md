@@ -6,6 +6,66 @@
 
 ---
 
+## 0.1  2026-11 update — CellBender, reference auto-download, SCENIC/landscape refinements
+
+**Config locator (robustness).** Every script that sources `config.R` now uses a
+4-way locator (env var `NR4A1_CONFIG` → the script's own dir → cwd → the install
+default), so a script finds `config.R` whether launched by `Rscript` from any
+directory, `source()`d, or run interactively. `09b` (previously the one script with
+hardcoded paths) now uses the same locator; its landscape knobs
+(`NR4A1_LANDSCAPE_SUBSET_COL/_VAL/_CELLTYPE_COL`, `NR4A1_SPECIES`) are env-overridable.
+
+**CellBender ambient-RNA option (new, `cellbender/`).** An alternative to DecontX,
+run **externally** per sample before Script 01: `process_samples_raw_cellbender.py`
+(portable, env/flag-driven; reads the **raw** 10x matrix; per-sample
+`expected_cells`/`total_droplets` from metadata columns, else 20000/50000 defaults;
+GPU auto-detect; resumable). `environment_cellbender.yml` pins CellBender **v0.4.0**
+(stable) + PyTorch + scanpy. With `--pipeline-h5` it drops
+`h5_files/<SampleID>/sample_cellbender_filtered.h5` next to the source files; Script
+01 then ingests it via the new `USE_CELLBENDER` toggle (set `RUN_DECONTX <- FALSE` to
+avoid double-correcting). See `cellbender/README.md`.
+
+**cisTarget auto-download (new, `reference_downloader/`).** `scenic.sh`/`run_pyscenic2.sh`
+now **preflight** the motif databases: if `CISTARGET_DIR` lacks the ranking feathers +
+motif `.tbl` + `allTFs` list, they fetch them with `reference_downloader/download_references.py`
+(both 10kb & 500bp, species via `NR4A1_SPECIES`) before launching SCENIC. Disable with
+`NR4A1_AUTO_DOWNLOAD_REFS=0`. `12b` now **auto-discovers** the DB files by glob, so the
+older **v9 (mc9nr)** or the downloader's newer **v10 (`v10_clust`)** databases both work.
+
+**SCENIC GRN (`12d`).** Focus gene default is now **`Nr4a1-cust`** (the plain `Nr4a1`
+node is dropped via `NR4A1_NET_DROP_GENES` to avoid a duplicate hub). Edges recoloured
+so **orange = the target GRN only** (hub→target + target↔target), grey = upstream TF
+input. Edges are **percentile-trimmed** against GRNBoost2 false positives: start from
+all edges, keep the top **5% and 10%** per class (`NR4A1_NET_EDGE_PCTLS`) → separate
+`*_top5pct`/`*_top10pct` figures. Added **per-condition GRNs** (one hub-and-ring PNG per
+`Genotype_sex`): node fill = mean expression, size = % expressing, target ring = that
+condition's single-cell co-expression (static SCENIC backbone). Fixed a sex-leak bug
+(the loose `"Male"` match also caught `"Female"`); per-condition cell-count thresholds
+are configurable.
+
+**SCENIC regulon activity (`12c`).** Reads the per-cell regulon AUC from the pySCENIC
+CLI `_pyscenic.loom` (via `hdf5r`) when `aucell.csv` is absent — so the regulon violins
+/ mean-AUC heatmap work for either the Python-API or CLI run. Added `hdf5r` to Script 00.
+
+**Hierarchy program (`12e`).** Now scores the **Stem + Tumor-epithelium** gene sets
+across **all colonocytes** on a **freshly re-embedded colonocyte UMAP** (same params as
+the Script-04 sub-annotation: HVG 2000, 50 PCs, Harmony by SampleID, UMAP k=15) instead
+of the global broad-cell UMAP. Violins now use the pipeline's `plot_score_comparison`
+(faceted by subtype, split by the 6 `Genotype_sex` with the defined levels/legend +
+within-sex Wilcoxon). The potency-vs-cell-type lineage figure was removed (the
+comparison of interest is across conditions). Columns renamed `AUC_…`. Sparse AUCell +
+`DietSeurat` to keep memory down.
+
+**Cell-state landscape (`09b`).** Quadrant names made axis-descriptive and
+biology-safe (Stem-like/Differentiated × cycling/non-cycling) — the old "LT-HSC" tag
+was hematopoietic. Each landscape figure is now drawn **three ways** — combined S+G2M,
+**S-phase only**, and **G2M only** — each with its own median split (`*_Sphase`/`*_G2M`),
+since S and G2M peak at different stages. The pseudobulk landscape resolves to one point
+per **Seurat cluster × cell type** (true states, incl. minorities like stem cells) and
+the condition panels follow the canonical `Genotype_sex` order used across 02/03/05.
+
+---
+
 ## 0. 2026-10 update — portability, multi-method DE, SCENIC workflow
 
 **Portability (`config.R`).** All machine/project paths centralized in a new

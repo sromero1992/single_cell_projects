@@ -44,12 +44,22 @@ OUTPUT_DIR  = os.environ.get("NR4A1_OUTPUT", os.path.join(ROOT_PATH, "seurat_out
 SCENIC_DIR  = os.environ.get("NR4A1_SCENIC_DIR", os.path.join(OUTPUT_DIR, "SCENIC"))
 DB_DIR      = os.environ.get("NR4A1_CISTARGET", "/home/ssromerogon/cisTarget_databases")
 
-TF_FILE     = os.path.join(DB_DIR, "allTFs_mm.txt")
-DB_FEATHERS = [
+# cisTarget DB files: AUTO-DISCOVER them in DB_DIR by pattern so EITHER the v9
+# (mc9nr) or the v10 (v10_clust / "SCENIC+") databases work -- whichever you already
+# have or the reference_downloader fetched. Falls back to the classic v9 names when
+# globbing finds nothing (so a missing-file error names a concrete path).
+import glob as _glob
+def _db_glob(pat):
+    return sorted(_glob.glob(os.path.join(DB_DIR, pat)))
+
+DB_FEATHERS = _db_glob("*.genes_vs_motifs.rankings.feather") or [
     os.path.join(DB_DIR, "mm10__refseq-r80__10kb_up_and_down_tss.mc9nr.genes_vs_motifs.rankings.feather"),
     os.path.join(DB_DIR, "mm10__refseq-r80__500bp_up_and_100bp_down_tss.mc9nr.genes_vs_motifs.rankings.feather"),
 ]
-MOTIF_TBL   = os.path.join(DB_DIR, "motifs-v9-nr.mgi-m0.001-o0.0.tbl")
+_tbls   = _db_glob("motifs-*.tbl")
+MOTIF_TBL = _tbls[0] if _tbls else os.path.join(DB_DIR, "motifs-v9-nr.mgi-m0.001-o0.0.tbl")
+_tfs    = _db_glob("allTFs_*.txt")
+TF_FILE = _tfs[0] if _tfs else os.path.join(DB_DIR, "allTFs_mm.txt")
 
 N_WORKERS   = int(os.environ.get("NR4A1_SCENIC_WORKERS", "4"))   # fewer = less RAM/teardown mess
 

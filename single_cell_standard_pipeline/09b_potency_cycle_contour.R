@@ -757,26 +757,46 @@ potency_cycle_contour <- function(
 
 
 ## =============================================================================
-## 5.  PIPELINE DRIVER (standalone; hardcoded paths)
+## 5.  PIPELINE DRIVER (standalone; paths from config.R)
 ## =============================================================================
 ## Runs only when this file is executed directly (Rscript 09b_...R). When it is
 ## source()d from another script the function above stays reusable and nothing
-## runs. Edit the three paths below for a different project/machine.
+## runs. Machine/project paths come from config.R (same robust locator as the
+## rest of the pipeline); the landscape-specific knobs are env-overridable.
 if (sys.nframe() == 0L) {
-  PROJECT_NAME <- "Nr4a1_s17_ack"
-  ROOT_PATH    <- "/run/media/external/scdc_projects/2026_nr4a1_ack/r_process"
-  OUTPUT_DIR   <- file.path(ROOT_PATH, "seurat_output")
+  # --- portable paths: source config.R (env var | script dir | cwd | default) --
+  .NR4A1_CFG <- local({
+    cand <- Sys.getenv("NR4A1_CONFIG", "")
+    a  <- commandArgs(FALSE); fa <- sub("^--file=", "", a[grep("^--file=", a)])
+    if (length(fa)) cand <- c(cand, file.path(dirname(normalizePath(fa[1], mustWork = FALSE)), "config.R"))
+    of <- tryCatch(sys.frame(1)$ofile, error = function(e) NULL)
+    if (!is.null(of)) cand <- c(cand, file.path(dirname(normalizePath(of, mustWork = FALSE)), "config.R"))
+    cand <- c(cand, "config.R",
+              "/run/media/external/scdc_projects/2026_nr4a1_ack/r_process/config.R")
+    hit <- cand[nzchar(cand) & file.exists(cand)]
+    if (length(hit)) hit[1] else ""
+  })
+  if (nzchar(.NR4A1_CFG)) {
+    source(.NR4A1_CFG)
+  } else {
+    message("[09b] config.R not found; using built-in nr4a1 defaults.")
+    PROJECT_NAME <- "Nr4a1_s17_ack"
+    ROOT_PATH    <- "/run/media/external/scdc_projects/2026_nr4a1_ack/r_process"
+    OUTPUT_DIR   <- file.path(ROOT_PATH, "seurat_output")
+  }
 
   # Input = the cell-scores object from Script 09 (carries CytoTRACE2_Score).
   RDS_PATH <- file.path(OUTPUT_DIR, paste0(PROJECT_NAME, "_with_cell_scores.rds"))
-  SPECIES  <- "mouse"
+  SPECIES  <- Sys.getenv("NR4A1_SPECIES", "mouse")
 
-  # --- WHICH CELLS to build the landscape on ---------------------------------
-  # Restrict to one broad lineage and facet by its subtypes. Set SUBSET_COL and
-  # SUBSET_VAL to NULL to use the whole object (then CELLTYPE_COL can stay NULL).
-  SUBSET_COL   <- "CellType_broad"   # column holding the broad labels; NULL = all cells
-  SUBSET_VAL   <- "Colonocytes"      # the broad type(s) to pull
-  CELLTYPE_COL <- "CellType"         # column used for islands/facets (the subtypes)
+  # --- WHICH CELLS to build the landscape on (env-overridable) ----------------
+  # Restrict to one broad lineage and facet by its subtypes. Set the SUBSET vars
+  # to "" (empty) to use the whole object.
+  SUBSET_COL   <- Sys.getenv("NR4A1_LANDSCAPE_SUBSET_COL",   "CellType_broad")
+  SUBSET_VAL   <- Sys.getenv("NR4A1_LANDSCAPE_SUBSET_VAL",   "Colonocytes")
+  CELLTYPE_COL <- Sys.getenv("NR4A1_LANDSCAPE_CELLTYPE_COL", "CellType")
+  if (!nzchar(SUBSET_COL)) SUBSET_COL <- NULL
+  if (!nzchar(SUBSET_VAL)) SUBSET_VAL <- NULL
 
   # Output dir gets a subfolder per subset so runs don't overwrite each other.
   tag     <- if (!is.null(SUBSET_VAL))

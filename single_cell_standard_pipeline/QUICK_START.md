@@ -25,8 +25,11 @@ numbered script sources first. You no longer edit `ROOT_PATH`/`PROJECT_NAME` in
 each script — change them once in `config.R`, **or** (no code edit) export
 environment variables. Defaults target the **Nr4a1** study (`Nr4a1_s17_ack`).
 
-**Run convention:** launch scripts from this pipeline directory (so `./config.R`
-is found), or set `NR4A1_CONFIG=/full/path/to/config.R` (handy on HPC batch jobs).
+**Run convention:** scripts find `config.R` automatically via a 4-way locator —
+`NR4A1_CONFIG` env var → the script's own directory → the current directory → the
+install default. So you can `Rscript` from any folder, `source()` a script, or run
+it interactively; set `NR4A1_CONFIG=/full/path/to/config.R` only to force a specific
+copy (handy on HPC batch jobs).
 
 Switch dataset/machine without touching code:
 
@@ -47,52 +50,57 @@ The **same `NR4A1_*` variables drive the Python side** (`12b`, `run_pyscenic2.sh
 
 ---
 
-## SCENIC / regulon analysis (`12a` → `12c`)
+## SCENIC / regulon analysis (`12a` → `12e`)
 
 ```bash
 Rscript 12a_export_for_pyscenic.R          # Seurat -> per-label looms under seurat_output/SCENIC/
 ./scenic.sh run                            # grn->ctx->aucell (detached, auto-resumes finished labels)
 ./scenic.sh status                         # progress + which labels are done
-Rscript 12c_load_pyscenic_results.R        # attach AUC assay, FeaturePlot/violin/mean-AUC heatmap
-python 12d_build_tf_network.py             # optional: TF->focus->targets GRN (default Nr4a1) + CSVs + networkx plot
-Rscript 12d_plot_tf_network.R              # optional: ggraph plot from those CSVs
+Rscript 12c_load_pyscenic_results.R        # regulon AUC: FeaturePlot/violin/mean-AUC heatmap by condition
+python 12d_build_tf_network.py             # TF->focus->targets GRN + top5%/top10% CSVs + hub-ring plot
+Rscript 12d_plot_tf_network.R              # combined + per-condition hub-ring GRNs (expression + co-expression)
+Rscript 12e_hierarchy_aucell_umap.R        # score the GRN gene sets across the colonocyte lineage
 ```
 
-The `12d` pair builds a 3-layer regulatory neighborhood around a focus gene
-(`NR4A1_FOCUS_GENE`, default `Nr4a1`): **upstream TFs → focus → target genes** from the
-GRNBoost2 `adjacencies.tsv` (motif-confirmed `regulons.p` edges solid, adjacency-only
-dashed). `12d_build_tf_network.py` runs in the **pyscenic env** (it unpickles
-`regulons.p`) and writes the backbone node/edge CSVs. `12d_plot_tf_network.R` then adds
-the piece SCENIC can't give you: a **Spearman co-expression GRN among the downstream
-target genes**, computed from the single-cell expression of that label's cells
-(`|rho| ≥ NR4A1_NET_COEXPR_R`, default 0.3), with targets colored by Louvain module and
-drawn as a green undirected mesh. It writes `*_augmented.csv`; render the full graph in
-networkx with `python 12d_build_tf_network.py --nodes <..._nodes_augmented.csv> --edges <..._edges_augmented.csv> --out net.png`.
-Point everything at any gene: `NR4A1_FOCUS_GENE=Foxp3`. The downstream GRN method is
-`NR4A1_NET_COEXPR_METHOD` = `spearman` (default) or `pcnet` (scTenifoldNet's PC-regression
-network, same as Script 13).
+**cisTarget databases auto-download.** `scenic.sh`/`run_pyscenic2.sh` preflight the
+motif databases: if `CISTARGET_DIR` lacks the ranking feathers + motif `.tbl` +
+`allTFs` list, they fetch them via `reference_downloader/download_references.py` (both
+10kb & 500bp; `NR4A1_SPECIES`, default mouse) before running. Disable with
+`NR4A1_AUTO_DOWNLOAD_REFS=0`. `12b` auto-discovers the DB files by glob, so the older
+**v9 (mc9nr)** or the newer **v10** databases both work.
 
-```bash
-Rscript 12e_hierarchy_aucell_umap.R        # AUCell-score the hierarchy's gene sets, overlay on the UMAP
-```
+**`12d` — the regulatory network.** 3-layer neighborhood around a focus gene
+(`NR4A1_FOCUS_GENE`, default **`Nr4a1-cust`**; the plain `Nr4a1` node is dropped via
+`NR4A1_NET_DROP_GENES`): **upstream TFs → focus → targets** from the GRNBoost2
+adjacencies (`importance` — predictive, not MI/causal), with motif-confirmed regulon
+edges solid vs adjacency-only dashed. Edges are **percentile-trimmed** to suppress
+false positives — the top **5% and 10%** per class (`NR4A1_NET_EDGE_PCTLS`) → separate
+`*_top5pct`/`*_top10pct` outputs. In the plot, **orange = the target GRN** (hub→target
+spokes + target↔target ring), grey = upstream TF input. `12d_plot_tf_network.R` adds
+the target↔target **co-expression** from single-cell expression (Spearman default or
+`pcnet` via `NR4A1_NET_COEXPR_METHOD`, `|rho| ≥ NR4A1_NET_COEXPR_R`) and writes
+`*_augmented.csv`. It also emits **per-condition hub-ring GRNs** — one PNG per
+`Genotype_sex`, node fill = mean expression, node size = % cells expressing, ring =
+that condition's co-expression (static SCENIC backbone). Point it at any gene with
+`NR4A1_FOCUS_GENE=…`.
 
-`12e` takes the hierarchy from `12d` and **AUCell-scores its gene sets across the whole
-object** (upstream TFs, downstream targets, all, and each downstream co-expression
-module separately), then overlays each score on the existing UMAP (FeaturePlot) plus
-violins by cell type/condition. This is an un-pruned, expression-driven program score —
-orthogonal to the motif-validated regulon — so it shows *where in transcriptional space*
-the Nr4a1 regulatory neighborhood is coordinately active. `NR4A1_HIER_SCOPE=label`
-restricts scoring to the label's own cells instead of the whole object. It also emits a
-**lineage/potency trace**: the program's AUCell score plotted against `CytoTRACE2_Score`
-(from Script 09, `NR4A1_POTENCY_COL`) with cell types ordered by mean potency
-(stem → differentiated) — so a stem-defined Nr4a1 program can be traced across the other
-cell types to see whether it decays or holds along differentiation.
+**`12c` — regulon activity (sample-wise).** Scores each cell's regulon AUC and compares
+it across conditions (per-`Genotype_sex` violins + a condition × regulon mean-AUC
+heatmap). Reads `aucell.csv` or, for a pySCENIC **CLI** run, the `_pyscenic.loom` (via
+`hdf5r`). The regulon is the real TF (`Nr4a1(+)`); for the custom feature use `12d`/`12e`.
 
-`scenic.sh` wraps `run_pyscenic2.sh` (conda activate + libstdc++ preload +
-single-thread BLAS) which runs `12b_run_pyscenic.py`. Because `12b` defaults to
-`EXPORT_LOOM=False`, the outputs are `aucell.csv` + `regulons.p` (no
-`_pyscenic.loom`), and `12c` reads `aucell.csv` as its source of truth. See
-**INSTALL_NOTES.md §5b** for the pySCENIC conda env.
+**`12e` — the GRN program across the lineage.** AUCell-scores the `12d` gene sets
+(upstream TFs, downstream targets, all) **across all colonocytes on a freshly
+re-embedded colonocyte UMAP** (Script-04 params: HVG 2000, 50 PCs, Harmony by SampleID,
+UMAP k=15), so the stem/tumour program can be followed *downstream* through the lineage.
+By default it scores only the **Stem + Tumor-epithelium** GRNs
+(`NR4A1_HIER_GENESET_PATTERN="Stem|Tumor"`) on the colonocyte compartment
+(`NR4A1_HIER_SCOPE="Colonocytes"`). Violins use the pipeline's `plot_score_comparison`
+(faceted by subtype, split by the 6 conditions, defined levels + within-sex Wilcoxon).
+
+`scenic.sh` wraps `run_pyscenic2.sh` (conda activate + libstdc++ preload + single-thread
+BLAS + the cisTarget preflight) which runs `12b_run_pyscenic.py`. See **INSTALL_NOTES.md
+§5b** for the pySCENIC conda env.
 
 ---
 
@@ -169,6 +177,35 @@ DRY_RUN=1 ./copy_sc_data.sh    # preview
 ```
 
 It exits non-zero and lists the offenders if any required H5 is missing. Every `SampleID` in your metadata must have an exactly-matching folder in `h5_files/`.
+
+---
+
+## Ambient RNA — DecontX (built-in) or CellBender (optional)
+
+Script 01 removes ambient RNA with **DecontX** by default (`RUN_DECONTX <- TRUE`,
+on the raw droplet matrix). For a **CellBender** pass instead, run it **externally
+first** (its own GPU conda env), then flip one switch:
+
+```bash
+# one-time: create the env (CellBender v0.4.0 stable + PyTorch + scanpy)
+conda env create -f cellbender/environment_cellbender.yml && conda activate cellbender_env
+
+# per-sample ambient removal on the RAW matrices; writes a cleaned h5 next to the source
+CB_METADATA=Nr4a1_s17_metadata.xlsx CB_H5_DIR=h5_files \
+  python cellbender/process_samples_raw_cellbender.py --cuda --pipeline-h5
+```
+
+`--pipeline-h5` drops `h5_files/<SampleID>/sample_cellbender_filtered.h5` next to the
+Cell Ranger files (nothing overwritten). Then in `01_process_data.R`:
+
+```r
+USE_CELLBENDER <- TRUE     # ingest the CellBender matrices
+RUN_DECONTX    <- FALSE     # CellBender already removed ambient RNA (don't double-correct)
+```
+
+Defaults: 20000 expected cells / 50000 total droplets per sample (override globally,
+or per sample with `expected_cells`/`total_droplets` metadata columns). See
+`cellbender/README.md` for the full workflow and flags.
 
 ---
 

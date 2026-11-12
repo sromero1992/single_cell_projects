@@ -49,4 +49,33 @@ fi
 echo "[run_pyscenic2] env=$ENV_NAME  workers=$NR4A1_SCENIC_WORKERS"
 echo "[run_pyscenic2] script=$PY_SCRIPT"
 echo "[run_pyscenic2] $(python --version 2>&1) @ $(command -v python)"
+
+# --- cisTarget DB preflight: download if missing -----------------------------
+# The cisTarget motif databases are NOT shipped. If they're absent from DB_DIR,
+# fetch them with the bundled reference_downloader (both the 10kb and 500bp
+# rankings + the motif .tbl + allTFs). 12b auto-discovers whatever lands there,
+# so v9 (existing) or v10 (freshly downloaded) both work. Disable the auto-fetch
+# with NR4A1_AUTO_DOWNLOAD_REFS=0 (then it just errors if the DBs are missing).
+DB_DIR="${NR4A1_CISTARGET:-/home/ssromerogon/cisTarget_databases}"
+_have_refs() {
+  compgen -G "$DB_DIR/*.genes_vs_motifs.rankings.feather" >/dev/null 2>&1 \
+    && compgen -G "$DB_DIR/motifs-*.tbl" >/dev/null 2>&1 \
+    && compgen -G "$DB_DIR/allTFs_*.txt" >/dev/null 2>&1
+}
+if ! _have_refs; then
+  DL="${NR4A1_REF_DOWNLOADER:-$HERE/reference_downloader/download_references.py}"
+  if [ "${NR4A1_AUTO_DOWNLOAD_REFS:-1}" = "1" ] && [ -f "$DL" ]; then
+    echo "[refs] cisTarget DBs missing in $DB_DIR -> downloading (species=${NR4A1_SPECIES:-mouse}, ~1-2 GB)..."
+    mkdir -p "$DB_DIR"
+    python "$DL" --scenic --species "${NR4A1_SPECIES:-mouse}" --scenic-db 10kb  --scenic-dir "$DB_DIR" || true
+    python "$DL" --scenic --species "${NR4A1_SPECIES:-mouse}" --scenic-db 500bp --scenic-dir "$DB_DIR" || true
+  fi
+  if ! _have_refs; then
+    echo "ERROR: cisTarget databases not found in $DB_DIR and auto-download did not provide them." >&2
+    echo "       Fetch manually: python $DL --scenic --scenic-dir $DB_DIR" >&2
+    exit 1
+  fi
+fi
+echo "[refs] cisTarget DB dir: $DB_DIR"
+
 exec python "$PY_SCRIPT" "$@"
