@@ -1,0 +1,51 @@
+tier,cell_type,parent_cell_type,markers,subcluster_resolution,description,
+broad,Plasma B cells,,Ighg1|Mzb1,,Antibody-secreting plasma cells, high Ig expression
+broad,B cells,,Ms4a1|Cd19,,Mature B lymphocytes,
+broad,T cells,,Cd3e|Cd4|Cd8a|Trbc2,,Pan-T cell markers including helper and cytotoxic T cells,
+broad,cDCs,,Clec9a|Xcr1,,Classical dendritic cells (type 1 cDC),
+broad,Macrophages,,Cd163|Csf1r|Cd68|Mrc1|Aif1,,Tissue-resident and monocyte-derived macrophages,
+broad,Fibroblasts,,Col1a1|Col3a1|Col6a2,,Stromal fibroblasts defined by collagen expression,
+broad,ENs,,Vip|Tubb3|Vat1l,,Enteric neurons of the enteric nervous system,
+broad,EGCs,,Sox10|Plp1,,Enteric glial cells (peripheral glia),
+broad,LECs,,Lyve1|Flt4|Pecam1,,Lymphatic endothelial cells,
+broad,VECs,,Plvap|Flt1,,Vascular endothelial cells,
+broad,Colonocytes,,Epcam|Muc2|Krt19|Krt20|Vil1,,Colonic epithelial cells (all subtypes),
+broad,SMCs,,Des|Cnn1|Myh11|Tagln,,Smooth muscle cells (intestinal muscularis),
+broad,vSMCs,,Myh11|Tagln|Notch3|Rgs5,,Vascular smooth muscle cells,
+broad,Pericytes,,Rgs5|Kcnj8,,Pericyte cells,
+broad,Mast cells,,Ms4a2|Cpa3,2,Mast cells, often appear in T cell broad clusters
+broad,Adipocytes,,Adipoq|Plin1|Plin4|Fabp4,,Adipocytes defined by lipid-storage genes,
+sub,Goblet cells,Colonocytes,Muc2|Spink4|Agr2|Retnlb|Fam3d,3,Mucus-secreting goblet cells, first-pass separation from absorptive enterocytes
+sub,EECs,Colonocytes,Chga|Chgb|Tph1|Scgn|Scg5,3,"Enteroendocrine cells, rare hormone-secreting epithelial cells",
+sub,Tuft cells,Colonocytes,Dclk1|Trpm5|Avil|Sh2d6|Plcg2,3,Chemosensory tuft cells, brush-border morphology
+sub,DCS,Colonocytes,Reg4|Dll1,3,"Deep crypt secretory cells, niche support cells for stem cells",
+sub,Abs. colonocytes,Colonocytes,Ces2c|Slc26a3|Ceacam1|Aqp8,3,"Absorptive colonocytes, mature ion-transport and lipid-handling cells",
+sub,TA cells,Colonocytes,Mki67|Top2a|Birc5|Pcna|Stmn1,3,Transit-amplifying cells, actively cycling progenitors
+sub,Stem cells,Colonocytes,Lgr5|Lrig1|Ascl2|Slc12a2|Smoc2|Kcnq1|Gpx2|Ephb2|Bmpr1a|Hopx|Sox9,3,Intestinal stem cells at crypt base (CBC and reserve),
+sub,Tumor stem-like cells,Colonocytes,Lgr5|Ascl2|Ephb2,3,"WNT-high stem-like state in Apc/Kras-driven tumor epithelium, mirrors normal crypt-base stem signature",
+sub,Tumor regenerative cells,Colonocytes,Clu|Anxa1|Tacstd2|Ly6a,3,"Revival-stem-cell-like / fetal-like state, expands in Apc/Kras-driven tumors and after injury",
+sub,Serrated/metaplastic cells,Colonocytes,Muc5ac|Tff2|Aqp5|Anxa10,3,Gastric-type metaplasia marking serrated-pathway tumor epithelium,
+sub,Paneth-like cells (tumor),Colonocytes,Lyz1|Ang4|Mmp7|Defa17|Defa24,3,"Paneth-like niche state in Apc/Kras-driven tumor epithelium, same markers as IBD-associated Paneth-like cells but tumor-associated",
+sub,ILC1,T cells,Tbx21|Il12rb2|Ifng,2,"ILC1; Tbx21+ innate lymphoid cells, IFNg-producing, Prf1-negative",
+sub,ILC2,T cells,Gata3|Il1rl1|Klrg1|Areg,2,"ILC2; Gata3-high innate lymphoid cells, type 2 cytokine producers",
+sub,ILC3,T cells,Rorc|Il22|Ncr1,2,"ILC3; Rorc+ innate lymphoid cells, IL-22-producing, NCR+ and NCR- subsets",
+sub,NK cells,T cells,Ncr1|Klrb1b,2,Natural killer cells, innate cytotoxic lymphocytes
+sub,Mast cells,T cells,Ms4a2|Cpa3,2,Mast cells, often appear in T cell broad clusters
+sub,CD4+ T cells,T cells,Cd4|Cd3e|Cd3d,2,Helper T cells, CD4-expressing conventional T cells
+sub,Tregs,T cells,Foxp3|Il2ra|Ikzf2|Ctla4,2,Regulatory T cells, Foxp3 is the master transcription factor
+sub,CD8+ T cells,T cells,Cd8a|Cd8b1|Sell,2,Cytotoxic T cells, CD8-expressing effector and memory T cells
+sub,Cyc. T cells,T cells,Mki67|Top2a,2,Cycling (proliferating) T cells,
+sub,gd  T cells,T cells,Trdc|Trgc1,2,Gamma-delta T cells, innate-like T cell subset
+sub,pDCs,Macrophages,Siglech|Bst2|Ly6d|Irf7|Tcf4,2,Plasmacytoid DCs; Siglech+ Bst2+; no Itgax no Cd68,
+sub,cDC1,Macrophages,Itgax|Clec9a|Xcr1|Flt3|Itgae,2,cDC1; Itgax+ Clec9a+ Xcr1+; cross-presenting DCs; no Cd68 no Siglech,
+sub,cDC2,Macrophages,Itgax|Cd209a|Clec4g|Napsa|Siglecg|Flt3,2,cDC2; Cd209a+ Clec4g+ Napsa+; Itgax+ but Clec9a/Xcr1 negative; antigen-presenting to CD4+ T cells,
+sub,mRegDCs,Macrophages,Ccr7|Fscn1|Cd274|Pdcd1lg2|Il4i1|Ccl22,2,Mature regulatory DCs; Ccr7+ Fscn1+ PD-L1/L2+; immunostimulatory and immunosuppressive programs co-expressed,
+sub,Monocytes,Macrophages,Cd14|Ccr2|Ly6c2|Fcgr3|Plac8,2,Monocytes; Cd14+ Ccr2+ Ly6c2high; no Adgre1 no Timd4,
+sub,M0 macrophages,Macrophages,Cd68|Csf1r|Adgre1|Cx3cr1|Timd4,2,Resting tissue-resident macrophages; Cd68+ Adgre1+ no polarization markers,
+sub,M1 macrophages,Macrophages,Il1b|Tnf|Cxcl9|Cxcl10|Il6|Irf5|Nos2,2,Pro-inflammatory M1; Il1b+ Tnf+ Cxcl9/10+; no Mrc1 no Arg1,
+sub,M2 macrophages,Macrophages,Mrc1|Cd163|Arg1|Chil3|Retnla|C1qa|C1qb|C1qc,2,Anti-inflammatory M2; Mrc1+ Arg1+ Chil3+; no Il1b no Tnf,
+sub,Cyc. Macrophages,Macrophages,Mki67|Top2a,2,Proliferating TAMs; Mki67+ Top2a+; poor prognosis marker,
+sub,Neutrophils,Macrophages,Ly6g|Csf3r|S100a8|S100a9|Cxcr2,2,Neutrophils; Ly6g+ Csf3r+; often co-detected in myeloid clusters,
+sub,BEST4+ cells,Colonocytes,Best4|Otop2|Ca7|Spib,3,"Rare pH-sensing/ion-transport cells, distinct lineage from absorptive colonocytes",
+sub,Paneth-like cells (IBD),Colonocytes,Lyz1|Ang4|Mmp7|Defa17|Defa24,3,"Paneth-like metaplastic cells, not present in healthy colon, seen in IBD",
+sub,Inflammatory colonocytes,Colonocytes,Duox2|Duoxa2|Lcn2|Nos2|Saa1,3,"Inflammation-associated absorptive state, seen in IBD and other inflamed/diseased tissue",
